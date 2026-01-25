@@ -151,3 +151,151 @@ def visualize_sample_together(img_cv2, outputs, faces):
     cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_mesh_side], axis=1)
 
     return cur_img
+
+
+def my_visualize(img_cv2, outputs, faces):
+    # Render everything together
+    img_keypoints = img_cv2.copy()
+    img_mesh = img_cv2.copy()
+
+    # Get original output (mean prediction)
+    mhr_outputs = outputs['mhr']
+    for key in mhr_outputs:
+        try:
+            mhr_outputs[key] = mhr_outputs[key].cpu().detach().numpy()
+        except:
+            pass
+    person_output = mhr_outputs 
+
+    keypoints_2d = person_output["pred_keypoints_2d"][0]
+    keypoints_2d = np.concatenate(
+        [keypoints_2d, np.ones((keypoints_2d.shape[0], 1))], axis=-1
+    )
+    img_keypoints = visualizer.draw_skeleton(img_keypoints, keypoints_2d)
+
+    # Get mean prediction vertices (original output)
+    mean_pred_vertices = person_output["pred_vertices"][0]
+    
+    # Get samples if available
+    vertex_colors = None
+    if 'mhr_samples' in outputs:
+        mhr_samples = outputs['mhr_samples']
+        if isinstance(mhr_samples, torch.Tensor):
+            mhr_samples = mhr_samples.cpu().detach().numpy()
+        
+        # Calculate average distance of each vertex from mean across all samples
+        # mhr_samples shape: (batch, num_samples, num_vertices, 3)
+        num_samples = mhr_samples.shape[1]
+        distances = []
+        for i in range(num_samples):
+            sample_vertices = mhr_samples[0, i]  # (num_vertices, 3)
+            vertex_distances = np.linalg.norm(sample_vertices - mean_pred_vertices, axis=1)
+            distances.append(vertex_distances)
+        
+        # Average distance across all samples for each vertex
+        avg_distances = np.mean(distances, axis=0)  # (num_vertices,)
+        
+        # Normalize distances to [0, 1] for colormap
+        min_dist = np.min(avg_distances)
+        max_dist = np.max(avg_distances)
+        if max_dist > min_dist:
+            normalized_distances = (avg_distances - min_dist) / (max_dist - min_dist)
+        else:
+            normalized_distances = np.zeros_like(avg_distances)
+        
+        # Map to viridis colormap
+        viridis = cm.get_cmap('viridis')
+        vertex_colors_rgb = viridis(normalized_distances)[:, :3]  # (num_vertices, 3) in [0, 1]
+        # Convert to format expected by trimesh: (N, 4) with RGBA in [0, 1] range
+        vertex_colors = np.ones((vertex_colors_rgb.shape[0], 4))
+        vertex_colors[:, :3] = vertex_colors_rgb
+
+    all_pred_vertices = (person_output["pred_vertices"][0] + person_output["pred_cam_t"][0])
+    all_faces = faces
+    
+    # Pull out a fake translation; take the closest two
+    fake_pred_cam_t = (np.max(all_pred_vertices[-2*18439:], axis=0) + np.min(all_pred_vertices[-2*18439:], axis=0)) / 2
+    all_pred_vertices = all_pred_vertices - fake_pred_cam_t
+
+    # Render front view
+    renderer = Renderer(focal_length=person_output["focal_length"][0], faces=all_faces)
+    img_mesh = (
+        renderer(
+            all_pred_vertices,
+            fake_pred_cam_t,
+            img_mesh,
+            mesh_base_color=LIGHT_BLUE,
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vertex_colors,
+        )
+        * 255
+    )
+
+    # Render side view
+    white_img = np.ones_like(img_cv2) * 255
+    img_mesh_side = (
+        renderer(
+            all_pred_vertices,
+            fake_pred_cam_t,
+            white_img,
+            mesh_base_color=LIGHT_BLUE,
+            scene_bg_color=(1, 1, 1),
+            side_view=True,
+            vertex_colors=vertex_colors,
+        )
+        * 255
+    )
+
+    cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_mesh_side], axis=1)
+
+    return cur_img
+
+
+
+
+def my_visualize_samples(img_cv2, outputs, faces):
+
+    img_mesh = img_cv2.copy()
+
+    mhr_samples = outputs['mhr_samples'].cpu().detach().numpy()
+
+    outputs = outputs['mhr']
+    for key in outputs:
+        try:
+            outputs[key] = outputs[key].cpu().detach().numpy()
+        except:
+            pass
+    person_output = outputs 
+
+    img_mesh_list = []
+    for i in range(mhr_samples.shape[1]):
+        img_mesh = img_cv2.copy()
+        all_pred_vertices = (mhr_samples[0, i] + person_output['pred_cam_t'][0])
+        all_faces = faces
+        
+        # Pull out a fake translation; take the closest two
+        fake_pred_cam_t = (np.max(all_pred_vertices[-2*18439:], axis=0) + np.min(all_pred_vertices[-2*18439:], axis=0)) / 2
+        all_pred_vertices = all_pred_vertices - fake_pred_cam_t
+
+        # Render front view
+
+        renderer = Renderer(focal_length=person_output["focal_length"][0], faces=all_faces)
+        img_mesh = (
+            renderer(
+                all_pred_vertices,
+                fake_pred_cam_t,
+                img_mesh,
+                mesh_base_color=LIGHT_BLUE,
+                scene_bg_color=(1, 1, 1),
+            )
+            * 255
+        )
+        img_mesh_list.append(img_mesh)
+
+    img_mesh_list = np.concatenate(img_mesh_list, axis=1)
+
+    cur_img = np.concatenate([img_cv2, img_mesh_list], axis=1)
+
+    return cur_img
+
+    
