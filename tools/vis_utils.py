@@ -152,7 +152,9 @@ def visualize_sample_together(img_cv2, outputs, faces):
 
     return cur_img
 
-
+import cv2 
+import torch
+import matplotlib.cm as cm
 def my_visualize(img_cv2, outputs, faces):
     # Render everything together
     img_keypoints = img_cv2.copy()
@@ -171,7 +173,7 @@ def my_visualize(img_cv2, outputs, faces):
     keypoints_2d = np.concatenate(
         [keypoints_2d, np.ones((keypoints_2d.shape[0], 1))], axis=-1
     )
-    img_keypoints = visualizer.draw_skeleton(img_keypoints, keypoints_2d)
+    # img_keypoints = visualizer.draw_skeleton(img_keypoints, keypoints_2d)
 
     # Get mean prediction vertices (original output)
     mean_pred_vertices = person_output["pred_vertices"][0]
@@ -246,7 +248,8 @@ def my_visualize(img_cv2, outputs, faces):
         * 255
     )
 
-    cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_mesh_side], axis=1)
+    # cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_mesh_side], axis=1)
+    cur_img = np.concatenate([img_cv2, img_mesh, img_mesh_side], axis=1)
 
     return cur_img
 

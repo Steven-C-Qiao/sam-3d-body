@@ -1,7 +1,129 @@
-import itertools
-from yacs.config import CfgNode as CN
-from typing import List, Union
-from flatten_dict import flatten, unflatten
+from yacs.config import CfgNode 
+
+INDICES_PATH = "/scratch/cq244/sam-3d-body/tinker/mhr_kp_sample_128.npy"
+
+_C = CfgNode()
+
+_C.TRAIN = CfgNode()
+_C.TRAIN.MODEL_TYPE = "full"  # Options: "full" (SAM3DBody) or "toy" (ToyModel)
+_C.TRAIN.USE_FP16 = True
+_C.TRAIN.FP16_TYPE = "high"
+_C.TRAIN.BATCH_SIZE = 64
+_C.TRAIN.LR = 5e-5
+_C.TRAIN.NUM_EPOCHS = 50
+_C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
+_C.TRAIN.PIN_MEMORY = True
+_C.TRAIN.NUM_WORKERS = 32
+
+
+_C.LOSS = CfgNode()
+_C.LOSS.SHAPE_PARAM_WEIGHT = 10.0
+_C.LOSS.SCALE_PARAM_WEIGHT = 10.0
+_C.LOSS.KP2D_WEIGHT = 1.0
+_C.LOSS.KP3D_WEIGHT = 0.0
+
+
+# Dataset hparams
+_C.DATASET = CfgNode()
+_C.DATASET.NOISE_FACTOR = 0.4
+_C.DATASET.SCALE_FACTOR = 0.0
+_C.DATASET.CROP_PROB = 0.0
+_C.DATASET.CROP_FACTOR = 0.0
+_C.DATASET.BATCH_SIZE = 64
+_C.DATASET.NUM_WORKERS = 32
+_C.DATASET.PIN_MEMORY = True
+_C.DATASET.SHUFFLE_TRAIN = True
+_C.DATASET.TRAIN_DS = 'all'
+_C.DATASET.VAL_DS = 'static-gym'
+_C.DATASET.IMG_RES = 256
+_C.DATASET.MESH_COLOR = 'pinkish'
+_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_zoom-gym-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-15_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
+_C.DATASET.CROP_PERCENT = 0.8
+_C.DATASET.ALB = True
+_C.DATASET.ALB_PROB = 0.3
+_C.DATASET.proj_verts = False
+_C.DATASET.FOCAL_LENGTH = 5000
+
+
+_C.MODEL = CfgNode()
+_C.MODEL.IMAGE_SIZE = [512, 512]
+_C.MODEL.IMAGE_MEAN = [0.485, 0.456, 0.406]
+_C.MODEL.IMAGE_STD = [0.229, 0.224, 0.225]
+_C.MODEL.ENABLE_BODY = True
+_C.MODEL.ENABLE_HAND = True
+_C.MODEL.DENSE_KEYPOINTS = True
+
+_C.MODEL.BACKBONE = CfgNode()
+_C.MODEL.BACKBONE.TYPE = "dinov3_vith16plus"
+_C.MODEL.BACKBONE.PRETRAINED_WEIGHTS = ""
+_C.MODEL.BACKBONE.FROZEN_STAGES = -1
+_C.MODEL.BACKBONE.DROP_PATH_RATE = 0.1
+
+_C.MODEL.DECODER = CfgNode()
+_C.MODEL.DECODER.TYPE = "sam"
+_C.MODEL.DECODER.DIM = 1024
+_C.MODEL.DECODER.DEPTH = 6
+_C.MODEL.DECODER.HEADS = 8
+_C.MODEL.DECODER.MLP_DIM = 1024
+_C.MODEL.DECODER.DIM_HEAD = 64
+_C.MODEL.DECODER.LAYER_SCALE_INIT = 0.0
+_C.MODEL.DECODER.DROP_RATE = 0.0
+_C.MODEL.DECODER.ATTN_DROP_RATE = 0.0
+_C.MODEL.DECODER.DROP_PATH_RATE = 0.0
+_C.MODEL.DECODER.FFN_TYPE = "origin"
+_C.MODEL.DECODER.ENABLE_TWOWAY = False
+_C.MODEL.DECODER.REPEAT_PE = True
+_C.MODEL.DECODER.FROZEN = False
+_C.MODEL.DECODER.CONDITION_TYPE = "cliff"
+_C.MODEL.DECODER.USE_INTRIN_CENTER = True
+_C.MODEL.DECODER.DO_INTERM_PREDS = True
+_C.MODEL.DECODER.DO_INTERM_SUP = True
+_C.MODEL.DECODER.DO_KEYPOINT_TOKENS = True
+_C.MODEL.DECODER.DO_HAND_DETECT_TOKENS = True
+_C.MODEL.DECODER.KEYPOINT_TOKEN_UPDATE = "v2"
+_C.MODEL.DECODER.KEYPOINT_TOKEN_UPDATE_COORD_EMB_USE_MLP = True
+_C.MODEL.DECODER.DO_KEYPOINT3D_TOKENS = True
+
+_C.MODEL.PROMPT_ENCODER = CfgNode()
+_C.MODEL.PROMPT_ENCODER.ENABLE = True
+_C.MODEL.PROMPT_ENCODER.MAX_NUM_CLICKS = 2
+_C.MODEL.PROMPT_ENCODER.PROMPT_KEYPOINTS = "mhr70"
+_C.MODEL.PROMPT_ENCODER.FROZEN = False
+_C.MODEL.PROMPT_ENCODER.KEYPOINT_SAMPLER = CfgNode()
+_C.MODEL.PROMPT_ENCODER.KEYPOINT_SAMPLER.TYPE = "v1"
+_C.MODEL.PROMPT_ENCODER.KEYPOINT_SAMPLER.WORST_RATIO = 0.8
+_C.MODEL.PROMPT_ENCODER.KEYPOINT_SAMPLER.KEYBODY_RATIO = 0.8
+_C.MODEL.PROMPT_ENCODER.KEYPOINT_SAMPLER.NEGATIVE_RATIO = 0.1
+_C.MODEL.PROMPT_ENCODER.KEYPOINT_SAMPLER.DUMMY_RATIO = 0.1
+_C.MODEL.PROMPT_ENCODER.KEYPOINT_SAMPLER.DISTANCE_THRESH = 0.0001
+_C.MODEL.PROMPT_ENCODER.MASK_EMBED_TYPE = "v2"
+_C.MODEL.PROMPT_ENCODER.MASK_PROMPT = "v1"
+
+_C.MODEL.PERSON_HEAD = CfgNode()
+_C.MODEL.PERSON_HEAD.POSE_TYPE = "uncertainty"
+_C.MODEL.PERSON_HEAD.CAMERA_ENABLE = True
+_C.MODEL.PERSON_HEAD.CAMERA_TYPE = "perspective"
+_C.MODEL.PERSON_HEAD.ZERO_POSE_INIT = True
+_C.MODEL.PERSON_HEAD.ZERO_POSE_INIT_BODY_FACTOR = 1
+
+_C.MODEL.MHR_HEAD = CfgNode()
+_C.MODEL.MHR_HEAD.MLP_DEPTH = 2
+_C.MODEL.MHR_HEAD.MLP_CHANNEL_DIV_FACTOR = 1
+_C.MODEL.MHR_HEAD.DEFAULT_SCALE_FACTOR_HAND = 10
+_C.MODEL.MHR_HEAD.ENABLE_BODY = True
+_C.MODEL.MHR_HEAD.ENABLE_HAND = True
+_C.MODEL.MHR_HEAD.MHR_MODEL_PATH = "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
+
+_C.MODEL.CAMERA_HEAD = CfgNode()
+_C.MODEL.CAMERA_HEAD.MLP_DEPTH = 2
+_C.MODEL.CAMERA_HEAD.MLP_CHANNEL_DIV_FACTOR = 1
+_C.MODEL.CAMERA_HEAD.DEFAULT_SCALE_FACTOR_HAND = 10
+
+
+
+def get_config_defaults():
+    return _C.clone()
+
 
 import os 
 PATH = "/scratch/cq244/BEDLAM/"
@@ -136,166 +258,3 @@ PRETRAINED_CKPT_FOLDER = {
     'hrnet_w48-scratch': '',
 
 }
-hparams = CN()
-# General settings
-# hparams.LOG_DIR = 'logs'
-# hparams.EXP_NAME = 'default'
-# hparams.SEED_VALUE = -1
-# hparams.RUN_TEST = False
-
-# Dataset hparams
-hparams.DATASET = CN()
-hparams.DATASET.NOISE_FACTOR = 0.4
-hparams.DATASET.SCALE_FACTOR = 0.25
-hparams.DATASET.CROP_PROB = 0.0
-hparams.DATASET.CROP_FACTOR = 0.0
-hparams.DATASET.BATCH_SIZE = 4
-hparams.DATASET.NUM_WORKERS = 8
-hparams.DATASET.PIN_MEMORY = True
-hparams.DATASET.SHUFFLE_TRAIN = True
-hparams.DATASET.TRAIN_DS = 'all'
-hparams.DATASET.VAL_DS = '3dpw-val-cam'
-hparams.DATASET.IMG_RES = 224
-hparams.DATASET.MESH_COLOR = 'pinkish'
-hparams.DATASET.DATASETS_AND_RATIOS = 'agora'
-hparams.DATASET.CROP_PERCENT = 1.0
-hparams.DATASET.ALB = False
-hparams.DATASET.ALB_PROB = 0.3
-hparams.DATASET.proj_verts = False
-hparams.DATASET.FOCAL_LENGTH = 5000
-
-# # optimizer config
-# hparams.OPTIMIZER = CN()
-# hparams.OPTIMIZER.TYPE = 'adam'
-# hparams.OPTIMIZER.LR = 5e-5 #0.0001 # 0.00003 
-# hparams.OPTIMIZER.WD = 0.0
-
-# # Training process hparams
-# hparams.TRAINING = CN()
-# hparams.TRAINING.RESUME = None
-# hparams.TRAINING.PRETRAINED_CKPT = None
-# hparams.TRAINING.PRETRAINED_LIT = None
-# hparams.TRAINING.MAX_EPOCHS = 100
-# hparams.TRAINING.LOG_SAVE_INTERVAL = 50
-# hparams.TRAINING.LOG_FREQ_TB_IMAGES = 500
-# hparams.TRAINING.CHECK_VAL_EVERY_N_EPOCH = 1
-# hparams.TRAINING.RELOAD_DATALOADERS_EVERY_EPOCH = True
-# hparams.TRAINING.TEST_BEFORE_TRAINING = False
-# hparams.TRAINING.SAVE_IMAGES = False
-# hparams.TRAINING.USE_AMP = False
-# hparams.TRAINING.GT_VIS = False
-# hparams.TRAINING.WP_VIS = False
-# hparams.TRAINING.FP_VIS = False
-# hparams.TRAINING.MESH_VIS = False
-# hparams.TRAINING.fullbody_mode = 'default'
-# hparams.TRAINING.ckpt_mode = ''
-# hparams.TRAINING.reduce_lr = False
-# hparams.TRAINING.increase_lr = False
-# hparams.TRAINING.hand_ckpt = ''
-# hparams.TRAINING.body_ckpt = ''
-# hparams.TRAINING.finetune = False
-
-# # Training process hparams
-# hparams.TESTING = CN()
-# hparams.TESTING.GT_VIS = False
-# hparams.TESTING.WP_VIS = False
-# hparams.TESTING.FP_VIS = False
-# hparams.TESTING.MESH_VIS = False
-
-# # MODEL  hparams
-# hparams.MODEL = CN()
-# hparams.MODEL.BACKBONE = 'resnet50'
-# hparams.MODEL.SHAPE_LOSS_WEIGHT = 0.
-# hparams.MODEL.JOINT_LOSS_WEIGHT = 5.
-# hparams.MODEL.KEYPOINT_LOSS_WEIGHT = 10.
-# hparams.MODEL.POSE_LOSS_WEIGHT = 1.
-# hparams.MODEL.BETA_LOSS_WEIGHT = 0.001
-# hparams.MODEL.LOSS_WEIGHT = 60.
-
-# hparams.TRIAL = CN()
-# hparams.TRIAL.visualize = False
-# hparams.TRIAL.bedlam_bbox = False
-# hparams.TRIAL.verts_loss = False
-# hparams.TRIAL.only_verts_loss = False
-# hparams.TRIAL.keypoints_loss = False
-# hparams.TRIAL.only_keypoints_loss = False
-# hparams.TRIAL.param_loss = False
-# hparams.TRIAL.losses_abl = 'None'
-# hparams.TRIAL.criterion = 'mse'
-# hparams.TRIAL.version = 'synthetic'
-# hparams.TRIAL.finetune_3dpw = False
-
-
-def get_hparams_defaults():
-    # Return a clone so that the defaults will not be altered
-    # This is for the "local variable" use pattern
-    return hparams.clone()
-
-
-def update_hparams(hparams_file):
-    hparams = get_hparams_defaults()
-    hparams.merge_from_file(hparams_file)
-    return hparams.clone()
-
-
-def update_hparams_from_dict(cfg_dict):
-    hparams = get_hparams_defaults()
-    cfg = hparams.load_cfg(str(cfg_dict))
-    hparams.merge_from_other_cfg(cfg)
-    return hparams.clone()
-
-
-def get_grid_search_configs(config, excluded_keys=[]):
-
-    def bool_to_string(x: Union[List[bool], bool]) -> Union[List[str], str]:
-        """
-        boolean to string conversion
-        :param x: list or bool to be converted
-        :return: string converted thinghat
-        """
-        if isinstance(x, bool):
-            return [str(x)]
-        for i, j in enumerate(x):
-            x[i] = str(j)
-        return x
-
-    # exclude from grid search
-
-    flattened_config_dict = flatten(config, reducer='path')
-    hyper_params = []
-
-    for k, v in flattened_config_dict.items():
-        if isinstance(v, list):
-            if k in excluded_keys:
-                flattened_config_dict[k] = ['+'.join(v)]
-            elif len(v) > 1:
-                hyper_params += [k]
-
-        if isinstance(v, list) and isinstance(v[0], bool) :
-            flattened_config_dict[k] = bool_to_string(v)
-
-        if not isinstance(v,list):
-            if isinstance(v, bool):
-                flattened_config_dict[k] = bool_to_string(v)
-            else:
-                flattened_config_dict[k] = [v]
-
-    keys, values = zip(*flattened_config_dict.items())
-    experiments = [dict(zip(keys, v)) for v in itertools.product(*values)]
-
-    for exp_id, exp in enumerate(experiments):
-        for param in excluded_keys:
-            exp[param] = exp[param].strip().split('+')
-        for param_name, param_value in exp.items():
-            # print(param_name,type(param_value))
-            if isinstance(param_value, list) and (param_value[0] in ['True', 'False']):
-                exp[param_name] = [True if x == 'True' else False for x in param_value]
-            if param_value in ['True', 'False']:
-                if param_value == 'True':
-                    exp[param_name] = True
-                else:
-                    exp[param_name] = False
-
-        experiments[exp_id] = unflatten(exp, splitter='path')
-
-    return experiments, hyper_params

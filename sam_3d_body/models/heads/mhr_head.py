@@ -334,7 +334,14 @@ class MHRHead(nn.Module):
 
         # Some existing code to get joints and fix camera system
         verts, j3d, jcoords, mhr_model_params, joint_global_rots = output
+        # First 70 MHR keypoints (sparse set)
         j3d = j3d[:, :70]  # 308 --> 70 keypoints
+
+        # Optionally append dense keypoints (indexed on the mesh vertices) so that
+        # downstream projections and metrics can use the full dense keypoint set.
+        if hasattr(self, "mhr_dense_kp_indices") and self.mhr_dense_kp_indices is not None:
+            dense_kp3d = verts[:, self.mhr_dense_kp_indices]
+            j3d = torch.cat([j3d, dense_kp3d], dim=1)
 
         if verts is not None:
             verts[..., [1, 2]] *= -1  # Camera system difference
@@ -364,6 +371,190 @@ class MHRHead(nn.Module):
             "faces": self.faces.cpu().numpy(),
             "joint_global_rots": joint_global_rots,
             "mhr_model_params": mhr_model_params,
+        }
+
+        return output
+
+
+
+
+class MHRUncertaintyHead(MHRHead):
+    def __init__(
+        self,
+        input_dim: int,
+        mlp_depth: int = 1,
+        mhr_model_path: str = "",
+        extra_joint_regressor: str = "",
+        ffn_zero_bias: bool = True,
+        mlp_channel_div_factor: int = 8,
+        enable_hand_model=False,
+    ):
+        super().__init__(
+            input_dim=input_dim,    
+            mlp_depth=mlp_depth,
+            mhr_model_path=mhr_model_path,
+            extra_joint_regressor=extra_joint_regressor,
+            ffn_zero_bias=ffn_zero_bias,
+            mlp_channel_div_factor=mlp_channel_div_factor,
+            enable_hand_model=enable_hand_model,
+        )
+
+        self.shape_uncertainty_proj = FFN(
+            embed_dims=input_dim,
+            feedforward_channels=input_dim // mlp_channel_div_factor,
+            output_dims=self.num_shape_comps,
+            num_fcs=6,
+            ffn_drop=0.0,
+            add_identity=False,
+        )
+
+        selected_scale_comps_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
+        num_scales = len(selected_scale_comps_indices)
+        """
+            These are manually selected from the actual scale components
+            Coarse definitions as follows determined by visual inspection:
+            0, 1, 2: eyeball 
+            3: torso length
+            4: neck length
+            5: sholder width
+            6: lower arm length
+            7: lower arm and hand scale ?
+            8: right hand scale 
+            9: left hand scale 
+            10: pelvis width
+            11: leg length
+            12: pelvis forwardness offset 
+            13: lower calf length ?
+            14: also lower calf length ?
+            15: leg inward bend (not used)
+            16: foot 'flatness' ?
+            17: foot 'thickness' ?
+            18~68: hand params
+        """
+        self.scale_uncertainty_proj = FFN(
+            embed_dims=input_dim,
+            feedforward_channels=input_dim // mlp_channel_div_factor,
+            output_dims=num_scales,
+            num_fcs=6,
+            ffn_drop=0.0,
+            add_identity=False,
+        )
+
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        init_estimate: Optional[torch.Tensor] = None,
+        do_pcblend=True,
+        slim_keypoints=False,
+    ):
+        """
+        Args:
+            x: pose token with shape [B, C], usually C=DECODER.DIM
+            init_estimate: [B, self.npose]
+        """
+        batch_size = x.shape[0]
+        pred = self.proj(x)
+        
+        shape_uncertainty = self.shape_uncertainty_proj(x)
+        shape_uncertainty = torch.exp(shape_uncertainty)
+        
+        scale_uncertainty = self.scale_uncertainty_proj(x)
+        scale_uncertainty = torch.exp(scale_uncertainty)
+
+        if init_estimate is not None:
+            pred = pred + init_estimate
+
+        # From pred, we want to pull out individual predictions.
+
+        ## First, get globals
+        ### Global rotation is first 6.
+        count = 6
+        global_rot_6d = pred[:, :count]
+        global_rot_rotmat = rot6d_to_rotmat(global_rot_6d)  # B x 3 x 3
+        global_rot_euler = roma.rotmat_to_euler("ZYX", global_rot_rotmat)  # B x 3
+        global_trans = torch.zeros_like(global_rot_euler)
+
+        ## Next, get body pose.
+        ### Hold onto raw, continuous version for iterative correction.
+        pred_pose_cont = pred[:, count : count + self.body_cont_dim]
+        count += self.body_cont_dim
+        ### Convert to eulers (and trans)
+        pred_pose_euler = compact_cont_to_model_params_body(pred_pose_cont)
+        ### Zero-out hands
+        pred_pose_euler[:, mhr_param_hand_mask] = 0
+        ### Zero-out jaw
+        pred_pose_euler[:, -3:] = 0
+
+        ## Get remaining parameters
+        pred_shape = pred[:, count : count + self.num_shape_comps]
+        count += self.num_shape_comps
+        pred_scale = pred[:, count : count + self.num_scale_comps]
+        count += self.num_scale_comps
+        pred_hand = pred[:, count : count + self.num_hand_comps * 2]
+        count += self.num_hand_comps * 2
+        pred_face = pred[:, count : count + self.num_face_comps] * 0
+        count += self.num_face_comps
+
+        # Run everything through mhr
+        output = self.mhr_forward(
+            global_trans=global_trans,
+            global_rot=global_rot_euler,
+            body_pose_params=pred_pose_euler,
+            hand_pose_params=pred_hand,
+            scale_params=pred_scale,
+            shape_params=pred_shape,
+            expr_params=pred_face,
+            do_pcblend=do_pcblend,
+            return_keypoints=True,
+            return_joint_coords=True,
+            return_model_params=True,
+            return_joint_rotations=True,
+        )
+
+
+        # Some existing code to get joints and fix camera system
+        verts, j3d, jcoords, mhr_model_params, joint_global_rots = output
+        # First 70 MHR keypoints (sparse set)
+        j3d = j3d[:, :70]  # 308 --> 70 keypoints
+
+        # Append dense keypoints (indexed on the mesh vertices) so that downstream
+        # 2D projections and metrics can use the full dense keypoint set.
+        if hasattr(self, "mhr_dense_kp_indices"):
+            dense_kp3d = verts[:, self.mhr_dense_kp_indices]
+            j3d = torch.cat([j3d, dense_kp3d], dim=1)
+
+        # Fix camera system
+        if verts is not None:
+            verts[..., [1, 2]] *= -1  # Camera system difference
+        j3d[..., [1, 2]] *= -1  # Camera system difference
+        if jcoords is not None:
+            jcoords[..., [1, 2]] *= -1
+
+        # Prep outputs
+        output = {
+            "pred_pose_raw": torch.cat(
+                [global_rot_6d, pred_pose_cont], dim=1
+            ),  # Both global rot and continuous pose
+            "pred_pose_rotmat": None,  # This normally used for mhr pose param rotmat supervision.
+            "global_rot": global_rot_euler,
+            "body_pose": pred_pose_euler,  # Unused during training
+            "shape": pred_shape,
+            "scale": pred_scale,
+            "hand": pred_hand,
+            "face": pred_face,
+            "pred_keypoints_3d": j3d.reshape(batch_size, -1, 3),
+            "pred_vertices": (
+                verts.reshape(batch_size, -1, 3) if verts is not None else None
+            ),
+            "pred_joint_coords": (
+                jcoords.reshape(batch_size, -1, 3) if jcoords is not None else None
+            ),
+            "faces": self.faces.cpu().numpy(),
+            "joint_global_rots": joint_global_rots,
+            "mhr_model_params": mhr_model_params,
+            "shape_uncertainty": shape_uncertainty,
+            "scale_uncertainty": scale_uncertainty,
         }
 
         return output

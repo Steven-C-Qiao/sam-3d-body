@@ -142,8 +142,11 @@ class Visualiser(pl.LightningModule):
         pred_keypoints_3d_samples = predictions.get('mhr_samples_keypoints_3d', None)
         self.visualise_keypoints_3d(gt_keypoints_3d, pred_keypoints_3d, pred_keypoints_3d_samples)
 
-        # Visualize 2D keypoints
-        self.visualise_2d_keypoints(predictions, batch)
+        # Visualize 2D keypoints on full image
+        self.visualise_2d_keypoints_full(predictions, batch)
+        
+        # Visualize 2D keypoints on cropped image
+        self.visualise_2d_keypoints_cropped(predictions, batch)
 
         predictions['mhr_samples'][..., [1, 2]] *= -1
         predictions['mhr']['pred_vertices'][..., [1, 2]] *= -1
@@ -588,7 +591,120 @@ class Visualiser(pl.LightningModule):
         
         return nodes
 
-    def visualise_2d_keypoints(self, predictions, batch):
+    def visualise_2d_keypoints_full(self, predictions, batch):
+        """
+        Visualize ground truth, predicted mean, and sampled 2D keypoints on the full original image.
+        
+        Args:
+            predictions: Model predictions dictionary (already converted to numpy)
+            batch: Input batch dictionary (already converted to numpy)
+        """
+        if 'mhr_samples_keypoints_2d' not in predictions:
+            logger.warning("No sample keypoints found in predictions. Skipping 2D keypoint visualization on full image.")
+            return
+
+        # For consistency with other visualisation functions, only visualise the first element in the batch
+        batch_idx = 0
+
+        # Get full original image
+        image_original = batch['img_ori'][batch_idx]  # (H, W, 3) e.g., (720, 1280, 3)
+        if image_original.max() <= 1.0:
+            image_original = (image_original * 255).astype(np.uint8)
+        else:
+            image_original = image_original.astype(np.uint8)
+
+        # Get predicted keypoints in full image coordinates
+        pred_kp2d_full = predictions['mhr']['pred_keypoints_2d'][batch_idx]  # [70, 2] in original pixel coords
+
+        # Get GT keypoints - need to convert from cropped to full image coords
+        gt_kp2d_cropped = batch['keypoints_2d'][batch_idx, :, :]  # [N, 2] in cropped pixel coords
+        
+        # Convert GT keypoints from cropped to full image coordinates
+        gt_kp2d_full = None
+        if 'affine_trans' in batch and 'img_size' in batch:
+            try:
+                affine_trans = batch['affine_trans'][batch_idx, 0]  # [2, 3] or [3, 3]
+                img_size = batch['img_size'][batch_idx, 0]  # [2] (width, height)
+                
+                # Ensure img_size is a 2-element array
+                if isinstance(img_size, np.ndarray):
+                    if img_size.shape == ():
+                        img_size = np.array([img_size, img_size])
+                    elif len(img_size.shape) == 1 and len(img_size) >= 2:
+                        img_size = img_size[:2]
+                    else:
+                        img_size = np.array([256, 256])
+                else:
+                    img_size = np.array([256, 256])
+                
+                # Convert cropped coords to normalized [-0.5, 0.5]
+                gt_kp2d_normalized = gt_kp2d_cropped / 256.0 - 0.5  # [N, 2]
+                
+                # Denormalize using img_size: (normalized + 0.5) * img_size
+                gt_kp2d_denormalized = (gt_kp2d_normalized + 0.5) * img_size.reshape(1, 2)  # [N, 2]
+                
+                # Convert to homogeneous coordinates and apply inverse affine transformation
+                gt_kp2d_homogeneous = np.ones((gt_kp2d_cropped.shape[0], 3))
+                gt_kp2d_homogeneous[:, :2] = gt_kp2d_denormalized
+                
+                # Inverse affine transformation: need to compute inverse of affine_trans
+                if affine_trans.shape == (2, 3):
+                    # For 2x3 matrix, we need to augment it to 3x3 for inversion
+                    affine_3x3 = np.eye(3)
+                    affine_3x3[:2, :] = affine_trans
+                    affine_inv = np.linalg.inv(affine_3x3)
+                    gt_kp2d_transformed = gt_kp2d_homogeneous @ affine_inv.T
+                    gt_kp2d_full = gt_kp2d_transformed[:, :2]
+                elif affine_trans.shape == (3, 3):
+                    affine_inv = np.linalg.inv(affine_trans)
+                    gt_kp2d_transformed = gt_kp2d_homogeneous @ affine_inv.T
+                    gt_kp2d_full = gt_kp2d_transformed[:, :2]
+                else:
+                    # Fallback: assume no transformation needed
+                    gt_kp2d_full = gt_kp2d_denormalized
+            except Exception as e:
+                logger.warning(f"Failed to convert GT keypoints to full image coords: {e}. Skipping GT visualization.")
+                gt_kp2d_full = None
+        else:
+            logger.warning("affine_trans or img_size not found in batch. Cannot convert GT keypoints to full image coords.")
+            gt_kp2d_full = None
+
+        # Extract sample keypoints (already in full image coords)
+        sample_kp2d_full = predictions['mhr_samples_keypoints_2d'][batch_idx]  # [num_samples, 70, 2]
+        num_samples = sample_kp2d_full.shape[0]
+
+        # Create visualization
+        plt.figure(figsize=(15, 10))
+        plt.imshow(image_original)
+
+        # Plot GT keypoints if available
+        if gt_kp2d_full is not None:
+            plt.scatter(gt_kp2d_full[:, 0], gt_kp2d_full[:, 1],
+                       color='blue', s=20, marker='x', label='GT', linewidths=2)
+
+        # Plot predicted mean keypoints
+        plt.scatter(pred_kp2d_full[:, 0], pred_kp2d_full[:, 1],
+                   color='red', s=20, marker='o', label='Pred Mean',
+                   linewidths=2, edgecolors='darkred')
+
+        # Plot sample keypoints
+        colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
+        for i in range(num_samples):
+            plt.scatter(sample_kp2d_full[i, :, 0], sample_kp2d_full[i, :, 1],
+                       color=colors[i], s=10, marker='.', alpha=0.6,
+                       label=f'Sample {i+1}' if i < 5 else None)  # Only label first 5
+
+        plt.legend()
+        plt.title(f'2D Keypoints Visualization on Full Image (Batch {batch_idx})')
+        plt.tight_layout()
+
+        # Save using the visualiser's filename convention
+        filename = self._get_filename('_keypoints_2d_full')
+        save_path = os.path.join(self.save_dir, filename)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+    def visualise_2d_keypoints_cropped(self, predictions, batch):
         """
         Visualize ground truth, predicted mean, and sampled 2D keypoints on the cropped image.
         
@@ -603,20 +719,23 @@ class Visualiser(pl.LightningModule):
         # For consistency with other visualisation functions, only visualise the first element in the batch
         batch_idx = 0
 
+        
+
         # Extract keypoints for this batch item
         gt_kp2d = batch['keypoints_2d'][batch_idx, :, :]  # [N, 2] in cropped pixel coords
-
+        
         # Predicted keypoints in cropped normalized coords [-0.5, 0.5]
-        pred_kp2d_cropped_normalised = predictions['mhr']['pred_keypoints_2d_cropped'][batch_idx]  # [70, 2]
+        pred_kp2d_cropped_normalised = predictions['mhr']['pred_keypoints_2d_cropped'][batch_idx]  # [N, 2]
         # Convert to pixel coordinates
-        pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * 256  # [70, 2]
-
+        pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * 256  # [N, 2]
+        
         # Extract sample keypoints (in full image coords)
-        sample_kp2d_full = predictions['mhr_samples_keypoints_2d'][batch_idx]  # [num_samples, 70, 2]
+        sample_kp2d_full = predictions['mhr_samples_keypoints_2d'][batch_idx]  # [num_samples, N, 2]
 
         # Convert samples to cropped coordinates
         num_samples = sample_kp2d_full.shape[0]
         sample_kp2d_cropped_coords = []
+
 
         # Get affine transformation and image size from batch
         # Note: batch may have been converted to numpy, so we need to handle both cases
@@ -642,18 +761,19 @@ class Visualiser(pl.LightningModule):
 
                 # Convert sample keypoints from full image coords to cropped coords
                 for i in range(num_samples):
-                    # Convert to homogeneous coordinates [70, 3]
-                    sample_kp2d_homogeneous = np.ones((70, 3))
-                    sample_kp2d_homogeneous[:, :2] = sample_kp2d_full[i]  # [70, 2]
+                    # Convert to homogeneous coordinates [N, 3]
+                    N_kp = sample_kp2d_full.shape[1]
+                    sample_kp2d_homogeneous = np.ones((N_kp, 3))
+                    sample_kp2d_homogeneous[:, :2] = sample_kp2d_full[i]  # [N, 2]
 
                     # Apply affine transformation
                     if affine_trans.shape == (2, 3):
                         # 2x3 affine matrix: [x', y'] = [x, y, 1] @ affine_trans.T
-                        sample_kp2d_cropped = (sample_kp2d_homogeneous @ affine_trans.T)  # [70, 2]
+                        sample_kp2d_cropped = (sample_kp2d_homogeneous @ affine_trans.T)  # [N, 2]
                     elif affine_trans.shape == (3, 3):
                         # 3x3 affine matrix: take first 2 columns
-                        sample_kp2d_transformed = (sample_kp2d_homogeneous @ affine_trans.T)  # [70, 3]
-                        sample_kp2d_cropped = sample_kp2d_transformed[:, :2]  # [70, 2]
+                        sample_kp2d_transformed = (sample_kp2d_homogeneous @ affine_trans.T)  # [N, 3]
+                        sample_kp2d_cropped = sample_kp2d_transformed[:, :2]  # [N, 2]
                     else:
                         # Fallback: assume no transformation needed
                         sample_kp2d_cropped = sample_kp2d_full[i]
@@ -676,7 +796,7 @@ class Visualiser(pl.LightningModule):
             sample_kp2d_cropped_coords = None
 
         if sample_kp2d_cropped_coords is not None:
-            sample_kp2d_cropped_coords = np.array(sample_kp2d_cropped_coords)  # [num_samples, 70, 2]
+            sample_kp2d_cropped_coords = np.array(sample_kp2d_cropped_coords)  # [num_samples, N, 2]
 
         # Get cropped image
         img = batch['img'][batch_idx, 0]  # [3, 256, 256] or [256, 256, 3]
@@ -715,7 +835,7 @@ class Visualiser(pl.LightningModule):
         plt.tight_layout()
 
         # Save using the visualiser's filename convention
-        filename = self._get_filename('_keypoints_2d')
+        filename = self._get_filename('_keypoints_2d_cropped')
         save_path = os.path.join(self.save_dir, filename)
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()

@@ -10,10 +10,11 @@ from torchvision.transforms import ToTensor
 from torch.utils.data import default_collate
 
 
-from .bedlam import bedlam_config, constants 
+from .bedlam import constants 
 from .bedlam.constants import NUM_JOINTS_SMPLX
-from .bedlam.bedlam_config import DATASET_FILES, DATASET_FOLDERS
 from .bedlam.utils.image_utils import random_crop, read_img
+from ..configs.config import DATASET_FILES, DATASET_FOLDERS
+from ..configs.config import SMPL_MODEL_DIR, SMPLX_MODEL_DIR, JOINT_REGRESSOR_H36M, SMPLX2SMPL
 from smplx import SMPL, SMPLX
 
 
@@ -77,7 +78,7 @@ class DatasetHMR(Dataset):
         super(DatasetHMR, self).__init__()
 
         self.dataset = dataset
-        self.is_train = is_train
+        self.is_train = True
         self.options = options
         self.img_dir = DATASET_FOLDERS[dataset]
         self.data = np.load(DATASET_FILES[is_train][dataset],
@@ -174,18 +175,18 @@ class DatasetHMR(Dataset):
             self.joint_mapper_h36m = constants.H36M_TO_J14
             self.joint_mapper_gt = constants.J24_TO_J14
             self.J_regressor = torch.from_numpy(np.load(
-                               bedlam_config.JOINT_REGRESSOR_H36M)).float()
-            self.smpl_male = SMPL(bedlam_config.SMPL_MODEL_DIR,
+                               JOINT_REGRESSOR_H36M)).float()
+            self.smpl_male = SMPL(SMPL_MODEL_DIR,
                                   gender='male',
                                   create_transl=False)
-            self.smpl_female = SMPL(bedlam_config.SMPL_MODEL_DIR,
+            self.smpl_female = SMPL(SMPL_MODEL_DIR,
                                     gender='female',
                                     create_transl=False)
-            self.smplx_male = SMPLX(bedlam_config.SMPLX_MODEL_DIR,
+            self.smplx_male = SMPLX(SMPLX_MODEL_DIR,
                                     gender='male')
-            self.smplx_female = SMPLX(bedlam_config.SMPLX_MODEL_DIR,
+            self.smplx_female = SMPLX(SMPLX_MODEL_DIR,
                                       gender='female')
-            self.smplx2smpl = pickle.load(open(bedlam_config.SMPLX2SMPL, 'rb'))
+            self.smplx2smpl = pickle.load(open(SMPLX2SMPL, 'rb'))
             self.smplx2smpl = torch.tensor(self.smplx2smpl['matrix'][None],
                                            dtype=torch.float32)
         if self.is_train and 'agora' not in self.dataset and '3dpw' not in self.dataset: # first 80% is training set 20% is validation

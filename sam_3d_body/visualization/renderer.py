@@ -159,6 +159,7 @@ class Renderer:
         tri_color_lights=False,
         return_rgba=False,
         camera_center=None,
+        vertex_colors=None,
     ) -> np.array:
         """
         Render meshes on input image
@@ -193,7 +194,10 @@ class Renderer:
                 1.0,
             ),  # Swap RGB to BGR for pyrender
         )
-        mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy())
+        if vertex_colors is not None:
+            mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy(), vertex_colors=vertex_colors)
+        else:
+            mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy())
 
         if side_view:
             rot = trimesh.transformations.rotation_matrix(
@@ -209,7 +213,10 @@ class Renderer:
         rot = trimesh.transformations.rotation_matrix(np.radians(180), [1, 0, 0])
         mesh.apply_transform(rot)
 
-        mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
+        if vertex_colors is not None:
+            mesh = pyrender.Mesh.from_trimesh(mesh)
+        else:
+            mesh = pyrender.Mesh.from_trimesh(mesh, material=material)
 
         scene = pyrender.Scene(
             bg_color=[*scene_bg_color, 0.0], ambient_light=(0.3, 0.3, 0.3)

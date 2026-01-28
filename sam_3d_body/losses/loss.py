@@ -10,20 +10,6 @@ class Loss(pl.LightningModule):
         self.cfg = cfg
         self.register_buffer('scale_mean', scale_mean, persistent=False)
         self.register_buffer('scale_comps', scale_comps, persistent=False)
-        # self.register_buffer('scale_comps_pinv', torch.pinverse(scale_comps), persistent=False)
-        self.scale_comps_pinv = torch.pinverse(self.scale_comps)
-
-        import matplotlib.pyplot as plt
-        plt.figure()
-        # plt.imshow((self.scale_comps@self.scale_comps_pinv).numpy())
-        plt.imshow(self.scale_comps.numpy())
-        plt.savefig('scale_comps.png')
-        plt.close()
-        plt.figure()
-        plt.imshow(self.scale_comps_pinv.numpy())
-        plt.savefig('scale_comps_pinv.png')
-        plt.close()
-
 
         self.mse_loss = nn.MSELoss(reduction='none')
         self.kp2d_loss = nn.L1Loss(reduction='none')
@@ -36,10 +22,10 @@ class Loss(pl.LightningModule):
         # Get hand weight from config if present, otherwise default to 0.1
         hand_weight = getattr(self.cfg.LOSS, "HAND_WEIGHT", 0.1)
 
-        # Keypoint weights: 1.0 for body, hand_weight for hands
-        kp_weights = torch.ones(70)
-        kp_weights[self.hand_keypoint_indices] = hand_weight
-        self.register_buffer("kp_weights", kp_weights, persistent=False)
+        # Store hand weight; full keypoint count (70 + dense) will be inferred
+        # dynamically from tensors during training so we don't assume a fixed
+        # dense keypoint length.
+        self.hand_weight = hand_weight
 
     def forward(self, predictions, batch):
         loss_dict = {}
@@ -72,8 +58,10 @@ class Loss(pl.LightningModule):
             per_kp2d_loss = per_kp2d_loss.mean(dim=-1)
 
             # Apply keypoint weights to downweight hands.
-            # kp_weights: [70] -> [1, 1, 70] for broadcasting.
-            kp_weights_expanded = self.kp_weights[None, None, :]
+            # kp_weights: [N_kp] -> [1, 1, N_kp] for broadcasting.
+            kp_weights_expanded = self._get_kp_weights(per_kp2d_loss.shape[-1], per_kp2d_loss.device)[
+                None, None, :
+            ]
             weighted_kp2d_loss = per_kp2d_loss * kp_weights_expanded
 
             # Final scalar loss.
@@ -106,7 +94,9 @@ class Loss(pl.LightningModule):
             per_kp3d_loss = per_kp3d_loss.mean(dim=-1)
 
             # Apply keypoint weights to downweight hands.
-            kp_weights_expanded = self.kp_weights[None, None, :]
+            kp_weights_expanded = self._get_kp_weights(per_kp3d_loss.shape[-1], per_kp3d_loss.device)[
+                None, None, :
+            ]
             weighted_kp3d_loss = per_kp3d_loss * kp_weights_expanded
 
             # Final scalar loss.
@@ -154,10 +144,6 @@ class Loss(pl.LightningModule):
             # Only compute loss for selected scale component indices
             selected_scale_comps_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
 
-            # gt_scale_params = (gt_scale_params - self.scale_mean[None, :]) @ self.scale_comps_pinv.to(gt_scale_params.device)
-            # NOTE: now use pred actual scale for stability. 
-            # Works with uncertainty since scale_comps first 28 are 1 to 1 mapping.
-
             # Handle batch dimensions: flatten person dimension if needed
             if gt_scale_params.dim() == 3:  # [B, N, num_scale_comps]
                 B, N = gt_scale_params.shape[:2]
@@ -195,3 +181,19 @@ class Loss(pl.LightningModule):
         # import ipdb; ipdb.set_trace()
 
         return loss_dict
+
+    def _get_kp_weights(self, num_kp: int, device: torch.device) -> torch.Tensor:
+        """
+        Construct per-keypoint weights of length `num_kp`.
+        - First 70 keypoints follow the canonical MHR70 layout; hand indices
+          (21–62) get `self.hand_weight`.
+        - Any additional dense keypoints beyond index 69 get weight 1.0.
+        """
+        kp_weights = torch.ones(num_kp, device=device)
+
+        # Apply hand weight only where indices exist within current keypoint set
+        for idx in self.hand_keypoint_indices:
+            if idx < num_kp:
+                kp_weights[idx] = self.hand_weight
+
+        return kp_weights

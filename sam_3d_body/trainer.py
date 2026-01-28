@@ -17,9 +17,17 @@ from .data.bedlam_dataset import DatasetHMR as BEDLAMDataset
 from .data.bedlam_dataset import MultiViewEvaluationDataset
 from .metrics.metrics_tracker import Metrics
 from .visualization.my_vis import Visualiser 
+from .configs.config import INDICES_PATH
 
-from ..tools.vis_utils import my_visualize
-from ..tools.vis_utils import my_visualize_samples
+import sys
+from pathlib import Path
+# Add project root to path for tools import
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from tools.vis_utils import my_visualize
+from tools.vis_utils import my_visualize_samples
 
 
 
@@ -37,6 +45,7 @@ class Trainer(BaseLightningModule):
         # Select model based on config
         self.model_type = cfg.TRAIN.get("MODEL_TYPE", "full")
         if self.model_type == "toy":
+            assert False 
             self.model = ToyModel(cfg)
         elif self.model_type == "full":
             self.model = SAM3DBody(cfg)
@@ -48,6 +57,17 @@ class Trainer(BaseLightningModule):
         self.train_ds = self.train_dataset()
         self.val_ds = self.val_dataset()
 
+        # Optionally enable dense keypoints based on config; if disabled, the model
+        # will only use the canonical 70 MHR keypoints.
+        self.use_dense_keypoints = bool(getattr(self.cfg.MODEL, "DENSE_KEYPOINTS", False))
+        self.mhr_dense_kp_indices = None
+        if self.use_dense_keypoints:
+            mhr_dense_kp_indices_np = np.load(INDICES_PATH)
+            self.mhr_dense_kp_indices = torch.from_numpy(mhr_dense_kp_indices_np).long()
+            # Expose to the meta-arch and the MHR head for dense keypoint extraction
+            setattr(self.model, "mhr_dense_kp_indices", self.mhr_dense_kp_indices)
+            setattr(self.model.head_pose, "mhr_dense_kp_indices", self.mhr_dense_kp_indices)
+
 
         # Load checkpoint only for full model (toy model doesn't have pretrained weights)
         if self.model_type == "full":
@@ -58,24 +78,6 @@ class Trainer(BaseLightningModule):
                 state_dict = checkpoint
             self.model.load_state_dict(state_dict, strict=False)
 
-
-        self.mhr_model = self.model.head_pose 
-
-
-        self.scale_mean = self.model.head_pose.scale_mean.float()
-        self.scale_comps = self.model.head_pose.scale_comps.float()
-        self.scale_comps_pinv = torch.pinverse(self.scale_comps).float() 
-        
-        
-        self.criterion = Loss(cfg, scale_mean=self.scale_mean, scale_comps=self.scale_comps)
-
-        self.faces = self.model.head_pose.faces.cpu().detach().numpy()
-        
-        self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
-        
-        # Freeze all parameters
-        # Unfreeze only the uncertainty projection layer in mhr_uncertainty head (only for full model)
-        if self.model_type == "full" and hasattr(self.model.head_pose, 'shape_uncertainty_proj'):
             for param in self.model.parameters():
                 param.requires_grad = False
             for param in self.model.head_pose.shape_uncertainty_proj.parameters():
@@ -84,8 +86,100 @@ class Trainer(BaseLightningModule):
                 param.requires_grad = True
 
 
+        self.scale_mean = self.model.head_pose.scale_mean.float()
+        self.scale_comps = self.model.head_pose.scale_comps.float()
+        
+        
+        self.criterion = Loss(cfg, scale_mean=self.scale_mean, scale_comps=self.scale_comps)
+
+        self.faces = self.model.head_pose.faces.cpu().detach().numpy()
+        
+        self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
+        
+
+    def training_step(self, batch: Dict, batch_idx: int):
+        batch = self.preprocess(batch)
+        
+        outputs = self(batch, num_samples=5)
+
+        loss_dict = self.criterion(outputs, batch)
+
+        metrics = self.metrics(outputs, batch)
+
+
+        self.log_metrics(loss_dict, metrics, batch, outputs)
+
+        return loss_dict['total_loss']
+
+    def log_metrics(self, loss_dict: Dict, metrics: Dict, batch: Dict, outputs: Dict):
+        prog_bar_keys = ['kp2d_l1', 'kp2d_l1_samples', 'pampjpe', 'pampjpe_samples']
+        prog_bar_metrics = {key: metrics.pop(key) for key in prog_bar_keys if key in metrics}
+
+        if prog_bar_metrics:
+            self.log_dict(prog_bar_metrics, on_step=True, on_epoch=True, prog_bar=True, rank_zero_only=True, sync_dist=True)
+        
+        if metrics:
+            self.log_dict(metrics, on_step=True, on_epoch=True, prog_bar=False, rank_zero_only=True, sync_dist=True)
+
+        # Log images every 500 steps to reduce overhead
+        if self.global_step % 500 == 0:
+        # if True:
+            image = batch['img_ori'][0].data # H W 3, bedlam 720 1280 3 
+            # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
+            image = image.cpu().detach().numpy() # [3, H, W]
+            
+            # Generate visualizations
+            rend_img = my_visualize(image, outputs, self.faces)
+            rend_img_samples = my_visualize_samples(image, outputs, self.faces)
+
+            rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
+            rend_img_samples_bgr = cv2.cvtColor(rend_img_samples, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(os.path.join(self.vis_save_dir, f'{self.global_step:06d}_img.png'), rend_img_bgr)
+            cv2.imwrite(os.path.join(self.vis_save_dir, f'{self.global_step:06d}_samples.png'), rend_img_samples_bgr)
+
+            self.visualiser.visualise(outputs, batch, batch_idx=None, global_step=self.global_step)
+
+        self.log('train_loss', loss_dict['total_loss'], prog_bar=True)
+        # self.model._log_metric('train_loss', loss_dict['total_loss'], step=batch_idx)
+        self.log_dict(loss_dict)
+
+        # import ipdb; ipdb.set_trace()
+
+        return loss_dict['total_loss']
+
+
+    def forward(self, batch: Dict, num_samples: int = 0) -> Dict:
+        return self.model(batch, num_samples)
+    
+
+
+    def validation_step(self, batch: Dict, batch_idx: int):
+        batch = self.preprocess(batch)
+
+        outputs = self(batch, num_samples=5)
+
+        loss_dict = self.criterion(outputs, batch)
+        loss = loss_dict['total_loss']
+
+        self.model._log_metric('val_loss', loss, step=batch_idx)
+        
+        metrics = self.metrics(outputs, batch)
+        
+        prog_bar_keys = ['kp2d_l1', 'kp2d_l1_samples', 'pampjpe', 'pampjpe_samples']
+        prog_bar_metrics = {key: metrics.pop(key) for key in prog_bar_keys if key in metrics}
+        
+        if prog_bar_metrics:
+            self.log_dict(prog_bar_metrics, on_step=False, on_epoch=True, prog_bar=True, rank_zero_only=True, sync_dist=True)
+        if metrics:
+            self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=False, rank_zero_only=True, sync_dist=True)
+
+        return loss
+    
+
+
     def preprocess(self, batch: Dict):
-        gt_mhr_output = self.mhr_model.mhr(
+        mhr_model = self.model.head_pose 
+        gt_mhr_output = mhr_model.mhr(
             identity_coeffs=batch['shape_params'],
             model_parameters=batch['model_params'],
             face_expr_coeffs=batch['face_expr_coeffs'],
@@ -102,7 +196,7 @@ class Trainer(BaseLightningModule):
         )  # B x (num_verts + 127) x 3
         gt_keypoints_3d = (
             (
-                self.mhr_model.keypoint_mapping
+                mhr_model.keypoint_mapping
                 @ gt_vert_joints.permute(1, 0, 2).flatten(1, 2)
             )
             .reshape(-1, gt_vert_joints.shape[0], 3)
@@ -123,8 +217,21 @@ class Trainer(BaseLightningModule):
         
         keypoints_2d_by_projection = project(gt_keypoints_3d, trans_cam.unsqueeze(1), cam_int)[:, :70, :2]
 
+        # Ground-truth 2D keypoints: 70 canonical + optional dense vertices projected
+        if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
+            dense_kp2d = project(
+                gt_verts[:, self.mhr_dense_kp_indices, :],
+                trans_cam.unsqueeze(1),
+                cam_int,
+            )[:, :, :2]
+            kp2d = torch.cat([keypoints_2d_by_projection, dense_kp2d], dim=1)
+        else:
+            kp2d = keypoints_2d_by_projection
+
+        
+
         gt_kp2d_h = torch.cat(
-            [keypoints_2d_by_projection, torch.ones_like(keypoints_2d_by_projection[..., :1])], dim=-1
+            [kp2d, torch.ones_like(kp2d[..., :1])], dim=-1
         ).float()
         affine = batch["affine_trans"][:, 0].float()
         img_size = batch["img_size"][:, 0]
@@ -137,18 +244,15 @@ class Trainer(BaseLightningModule):
         # gt_kp2d_crop = gt_kp2d_crop / img_size.unsqueeze(1) - 0.5  # [B, 70, 2]
 
         batch['keypoints_2d'] = gt_kp2d_crop
-
+        
 
         model_parameters = batch['model_params']
         model_parameters[:, :3] = 0
         global_rot = batch['model_params'][:, 3:6]
         
         # Add 180-degree rotation around X-axis
-        # Convert Euler angles to rotation matrix (assuming "xyz" convention like in mhr_head)
         global_rot_mat = roma.euler_to_rotmat("xyz", global_rot)  # B x 3 x 3
         
-        # Create 180-degree rotation around X-axis
-        # R_x(180°) = [[1, 0, 0], [0, -1, 0], [0, 0, -1]]
         batch_size = global_rot.shape[0]
         rot_180_x = torch.tensor([
             [1.0, 0.0, 0.0],
@@ -165,7 +269,7 @@ class Trainer(BaseLightningModule):
         # Update model_parameters with the new global_rot
         model_parameters[:, 3:6] = global_rot
         
-        gt_mhr_output = self.mhr_model.mhr(
+        gt_mhr_output = mhr_model.mhr(
             identity_coeffs=batch['shape_params'],
             model_parameters=model_parameters,
             face_expr_coeffs=batch['face_expr_coeffs'],
@@ -180,199 +284,29 @@ class Trainer(BaseLightningModule):
         gt_vert_joints = torch.cat(
             [gt_verts, gt_joint_coords], dim=1
         )  # B x (num_verts + 127) x 3
-        gt_keypoints_3d = (
+        gt_keypoints_3d_all = (
             (
-                self.mhr_model.keypoint_mapping
+                mhr_model.keypoint_mapping
                 @ gt_vert_joints.permute(1, 0, 2).flatten(1, 2)
             )
             .reshape(-1, gt_vert_joints.shape[0], 3)
             .permute(1, 0, 2)
         )
+
+        # Ground-truth 3D keypoints: always include the canonical 70 MHR keypoints,
+        # and optionally append dense keypoints if enabled.
+        gt_kp3d_70 = gt_keypoints_3d_all[:, :70]  # [B, 70, 3]
+        if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
+            dense_kp3d_gt = gt_verts[:, self.mhr_dense_kp_indices, :]  # [B, N_dense, 3]
+            gt_keypoints_3d = torch.cat([gt_kp3d_70, dense_kp3d_gt], dim=1)  # [B, 70+N_dense, 3]
+        else:
+            gt_keypoints_3d = gt_kp3d_70
+
         batch['joints_3d'] = gt_joint_coords
         batch['vertices'] = gt_verts
-        batch['keypoints_3d'] = gt_keypoints_3d[:, :70] # 308 --> 70 keypoints
-
-
+        batch['keypoints_3d'] = gt_keypoints_3d
 
         return batch 
-
-    def training_step(self, batch: Dict, batch_idx: int):
-        batch = self.preprocess(batch)
-        
-        outputs = self(batch, num_samples=5)
-
-        # shape_uncertainty = outputs['mhr']['shape_uncertainty']
-        # scale_uncertainty = outputs['mhr']['scale_uncertainty']
-        # print(shape_uncertainty.shape)
-        # print(scale_uncertainty.shape)
-        # print(scale_uncertainty[0])
-        # import ipdb; ipdb.set_trace()
-
-        loss_dict = self.criterion(outputs, batch)
-
-        metrics = self.metrics(outputs, batch)
-        
-        # Extract metrics for progress bar: 2D keypoint L1 and PA-MPJPE (mean and samples)
-        prog_bar_keys = ['kp2d_l1', 'kp2d_l1_samples', 'pampjpe', 'pampjpe_samples']
-        prog_bar_metrics = {key: metrics.pop(key) for key in prog_bar_keys if key in metrics}
-        
-        # Log progress bar metrics
-        if prog_bar_metrics:
-            self.log_dict(prog_bar_metrics, on_step=True, on_epoch=True, prog_bar=True, rank_zero_only=True, sync_dist=True)
-        
-        # Log remaining metrics to logger (not on progress bar)
-        if metrics:
-            self.log_dict(metrics, on_step=True, on_epoch=True, prog_bar=False, rank_zero_only=True, sync_dist=True)
-
-        # Visualize 2D keypoints (optional, uncomment to enable)
-        # self.visualize_keypoints_2d(batch, outputs, save_path='temp_vis.png')
-        # self.visualize_keypoints_2d_samples(batch, outputs, save_path='temp_vis_samples.png')
-
-        # Log images every 500 steps to reduce overhead
-        if self.global_step % 500 == 0:
-        # if True:
-            image = batch['img_ori'][0].data # H W 3, bedlam 720 1280 3 
-            # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
-            image = image.cpu().detach().numpy() # [3, H, W]
-            
-            # Generate visualizations
-            rend_img = my_visualize(image, outputs, self.faces)
-            rend_img_samples = my_visualize_samples(image, outputs, self.faces)
-            
-            # Convert to tensor format (H, W, C) -> (C, H, W) and normalize to [0, 1]
-            rend_img_tensor = torch.from_numpy(rend_img.astype(np.float32) / 255.0).permute(2, 0, 1)
-            rend_img_samples_tensor = torch.from_numpy(rend_img_samples.astype(np.float32) / 255.0).permute(2, 0, 1)
-
-            rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
-            rend_img_samples_bgr = cv2.cvtColor(rend_img_samples, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(os.path.join(self.vis_save_dir, f'{self.global_step:06d}_img.png'), rend_img_bgr)
-            cv2.imwrite(os.path.join(self.vis_save_dir, f'{self.global_step:06d}_samples.png'), rend_img_samples_bgr)
-
-            self.visualiser.visualise(outputs, batch, batch_idx=None, global_step=self.global_step)
-
-            # Log images using _log_image (handles both TensorBoard and W&B)
-            # Use global_step for consistent logging across epochs
-            # self._log_image('train/visualization', rend_img_tensor, dataformats="CHW", step_count=self.global_step)
-            # self._log_image('train/visualization_samples', rend_img_samples_tensor, dataformats="CHW", step_count=self.global_step)
-
-            # import ipdb; ipdb.set_trace()
-
-        self.log('train_loss', loss_dict['total_loss'], prog_bar=True)
-        self.model._log_metric('train_loss', loss_dict['total_loss'], step=batch_idx)
-        self.log_dict(loss_dict)
-
-        # import ipdb; ipdb.set_trace()
-
-        return loss_dict['total_loss']
-
-
-    def forward(self, batch: Dict, num_samples: int = 0) -> Dict:
-        return self.model(batch, num_samples)
-    
-
-    
-
-
-
-    def validation_step(self, batch: Dict, batch_idx: int):
-        batch = self.preprocess(batch)
-        # print(batch['mask'].shape)
-        # batch = self.data_preprocess(batch['img'])
-        outputs = self(batch, num_samples=5)
-
-        loss_dict = self.criterion(outputs, batch)
-        loss = loss_dict['total_loss']
-
-        self.model._log_metric('val_loss', loss, step=batch_idx)
-        
-        # Compute and log metrics
-        metrics = self.metrics(outputs, batch)
-        
-        # Extract metrics for progress bar: 2D keypoint L1 and PA-MPJPE (mean and samples)
-        prog_bar_keys = ['kp2d_l1', 'kp2d_l1_samples', 'pampjpe', 'pampjpe_samples']
-        prog_bar_metrics = {key: metrics.pop(key) for key in prog_bar_keys if key in metrics}
-        
-        # Log progress bar metrics
-        if prog_bar_metrics:
-            self.log_dict(prog_bar_metrics, on_step=False, on_epoch=True, prog_bar=True, rank_zero_only=True, sync_dist=True)
-        
-        # Log remaining metrics to logger (not on progress bar)
-        if metrics:
-            self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=False, rank_zero_only=True, sync_dist=True)
-
-        return loss
-
-
-    def temp_vis(self, batch, pred):
-        import cv2
-        import numpy as np
-        import matplotlib.pyplot as plt
-        
-        # Get cropped image (first in batch, first crop)
-        img = batch['img'][0, 0].cpu().detach().numpy() 
-        img = img.transpose(1, 2, 0)
-        
-        # Get keypoints in original image coordinates
-        pred_kp2d_orig = pred['mhr']['pred_keypoints_2d'][0].cpu().detach().numpy()
-        
-        # Get affine transform to convert from original to crop coordinates
-        affine_trans = batch['affine_trans'][0, 0].cpu().detach().numpy()  # [2, 3]
-        img_size = batch['img_size'][0, 0].cpu().detach().numpy()  # [w, h]
-        
-        # Transform predicted keypoints from original to crop coordinates
-        # affine_trans transforms: original -> crop
-        pred_kp2d_homogeneous = np.concatenate(
-            [pred_kp2d_orig, np.ones((pred_kp2d_orig.shape[0], 1))], axis=-1
-        )
-        pred_kp2d_crop = (pred_kp2d_homogeneous @ affine_trans.T)[:, :2]
-        
-
-        # Fallback: get from annotations and transform from original to crop
-        gt_kp2d = batch['annotations'][0][0]['keypoints_2d']
-        if isinstance(gt_kp2d, torch.Tensor):
-            gt_kp2d = gt_kp2d.cpu().detach().numpy()
-        else:
-            gt_kp2d = np.array(gt_kp2d)
-        
-        # Handle keypoints that might have shape (N, 2) or (N, 3) with visibility
-        gt_kp2d_xy = gt_kp2d[:, :2] if gt_kp2d.shape[1] > 2 else gt_kp2d
-        
-        # Transform from original to crop coordinates
-        gt_kp2d_homogeneous = np.concatenate(
-            [gt_kp2d_xy, np.ones((gt_kp2d_xy.shape[0], 1))], axis=-1
-        )
-        gt_kp2d_crop = (gt_kp2d_homogeneous @ affine_trans.T)[:, :2]
-        
-        # Denormalize image if needed (from [-1, 1] or [0, 1] to [0, 255])
-        if img.max() <= 1.0:
-            img = (img * 255).astype(np.uint8)
-        else:
-            img = img.astype(np.uint8)
-        
-        # Clip keypoints to image bounds (only x, y coordinates)
-        # img_size is [w, h], so clip x to [0, w-1] and y to [0, h-1]
-        pred_kp2d_crop[:, 0] = np.clip(pred_kp2d_crop[:, 0], 0, img_size[0] - 1)
-        pred_kp2d_crop[:, 1] = np.clip(pred_kp2d_crop[:, 1], 0, img_size[1] - 1)
-        gt_kp2d_crop[:, 0] = np.clip(gt_kp2d_crop[:, 0], 0, img_size[0] - 1)
-        gt_kp2d_crop[:, 1] = np.clip(gt_kp2d_crop[:, 1], 0, img_size[1] - 1)
-        
-        print(f"Image shape: {img.shape}")
-        print(f"Image size (w, h): {img_size}")
-        print(f"Pred kp2d crop range: [{pred_kp2d_crop.min():.1f}, {pred_kp2d_crop.max():.1f}]")
-        print(f"GT kp2d crop range: [{gt_kp2d_crop.min():.1f}, {gt_kp2d_crop.max():.1f}]")
-        
-        plt.figure(figsize=(10, 10))
-        plt.imshow(img)
-        plt.scatter(pred_kp2d_crop[:, 0], pred_kp2d_crop[:, 1], color='red', s=10, marker='o', label='Pred')
-        plt.scatter(gt_kp2d_crop[:, 0], gt_kp2d_crop[:, 1], color='blue', s=10, marker='x', label='GT')
-        plt.legend()
-        plt.axis('off')
-        plt.tight_layout()
-        plt.show()
-        plt.savefig('temp_vis.png', dpi=150, bbox_inches='tight')
-        plt.close()
-
-        return None 
 
 
     def configure_optimizers(self):

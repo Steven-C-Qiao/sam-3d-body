@@ -85,12 +85,13 @@ class Metrics(pl.LightningModule):
         
     def forward(self, predictions, batch):
         metrics = {}
+        
 
-        # Compute metrics for mean prediction
+        # Compute metrics for mean prediction (always use 70 + dense 3D keypoints)
         if 'mhr' in predictions and 'pred_keypoints_3d' in predictions['mhr']:
-            gt_kp3d_mean = batch['keypoints_3d']  # [B, N, 3]
-            pred_kp3d_mean = predictions['mhr']['pred_keypoints_3d']  # [B, N, 3]
-            
+            gt_kp3d_mean = batch['keypoints_3d']  # [B, N, 3] (70 + dense)
+            pred_kp3d_mean = predictions['mhr']['pred_keypoints_3d']  # [B, N, 3] (70 + dense)
+
             # Ensure shapes match (handle batch dimension if needed)
             if gt_kp3d_mean.shape[0] != pred_kp3d_mean.shape[0]:
                 gt_kp3d_mean = gt_kp3d_mean[:pred_kp3d_mean.shape[0]]
@@ -102,14 +103,15 @@ class Metrics(pl.LightningModule):
             )
             metrics['mpjpe'] = mpjpe_mean
 
-            # For pampjpe, reshape to [B*N, 70, 3] for batch processing
+            # For pampjpe, reshape to [B*N, N_kp, 3] for batch processing
+            N_kp = pred_kp3d_mean.shape[1]
             pampjpe_mean = self.pampjpe(
-                pred_kp3d_mean.reshape(-1, 70, 3).cpu().detach().numpy(), 
-                gt_kp3d_mean.reshape(-1, 70, 3).cpu().detach().numpy()
+                pred_kp3d_mean.reshape(-1, N_kp, 3).cpu().detach().numpy(), 
+                gt_kp3d_mean.reshape(-1, N_kp, 3).cpu().detach().numpy()
             )
             metrics['pampjpe'] = pampjpe_mean
 
-        # Compute metrics for samples
+        # Compute metrics for samples (always use 70 + dense 3D keypoints)
         if 'mhr_samples_keypoints_3d' in predictions:
             num_samples = predictions['mhr_samples_keypoints_3d'].shape[1]
             gt_kp3d_samples = batch['keypoints_3d'][:, None].expand(-1, num_samples, -1, -1)  # [B, num_samples, N, 3]
@@ -121,9 +123,10 @@ class Metrics(pl.LightningModule):
             )
             metrics['mpjpe_samples'] = mpjpe_samples
 
+            N_kp_samples = pred_kp3d_samples.shape[2]
             pampjpe_samples = self.pampjpe(
-                pred_kp3d_samples.reshape(-1, 70, 3).cpu().detach().numpy(), 
-                gt_kp3d_samples.reshape(-1, 70, 3).cpu().detach().numpy()
+                pred_kp3d_samples.reshape(-1, N_kp_samples, 3).cpu().detach().numpy(), 
+                gt_kp3d_samples.reshape(-1, N_kp_samples, 3).cpu().detach().numpy()
             )
             metrics['pampjpe_samples'] = pampjpe_samples
 
@@ -132,7 +135,7 @@ class Metrics(pl.LightningModule):
             gt_kp2d_mean = batch['keypoints_2d']  # [B, N, 2] (in cropped pixel space)
             pred_kp2d_mean = predictions['mhr']['pred_keypoints_2d_cropped']  # [B, N, 2]
             pred_kp2d_mean = (pred_kp2d_mean + 0.5) * 256.
-            
+
             # Ensure shapes match (handle batch dimension if needed)
             if gt_kp2d_mean.shape[0] != pred_kp2d_mean.shape[0]:
                 gt_kp2d_mean = gt_kp2d_mean[:pred_kp2d_mean.shape[0]]
