@@ -1,6 +1,14 @@
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
+import roma
+from pytorch3d.transforms import matrix_to_axis_angle
+from sam_3d_body.models.modules import rot6d_to_rotmat
+from sam_3d_body.models.modules.mhr_utils import (
+    NUM_BODY_3DOF_JOINTS,
+    BODY_1DOF_ROT_IDXS,
+    NUM_BODY_1DOF_ANGLES,
+)
 
 
 class Loss(pl.LightningModule):
@@ -77,7 +85,7 @@ class Loss(pl.LightningModule):
             gt_kp3d = batch['keypoints_3d'][..., :3]
             pred_kp3d = pred_mhr['pred_keypoints_3d']
 
-            pred_kp3d[..., [1, 2]] *= -1
+            # pred_kp3d[..., [1, 2]] *= -1
 
             # loss_kp3d = self.loss_fn(pred_kp3d, gt_kp3d)
             # loss_dict['loss_kp3d'] = self.cfg.LOSS.KP3D_WEIGHT * loss_kp3d
@@ -86,7 +94,7 @@ class Loss(pl.LightningModule):
                 -1, predictions['mhr_samples_keypoints_3d'].shape[1], -1, -1
             )
             pred_kp3d_samples = predictions['mhr_samples_keypoints_3d']
-            pred_kp3d_samples[..., [1, 2]] *= -1
+            # pred_kp3d_samples[..., [1, 2]] *= -1
 
             # Per-keypoint MSE loss (no reduction): [B, S, 70, 3]
             per_kp3d_loss = self.mse_loss(pred_kp3d_samples, gt_kp3d)
@@ -171,6 +179,107 @@ class Loss(pl.LightningModule):
                 pred_scale_uncertainty
             )
             loss_dict['loss_scale_params'] = self.cfg.LOSS.SCALE_PARAM_WEIGHT * loss_scale_params
+
+        # Gaussian NLL loss on pose parameters in axis-angle space:
+        # - Global rotation (3D axis-angle)
+        # - 3-DoF body joints (3*NUM_BODY_3DOF_JOINTS axis-angle)
+        # - 1-DoF body joint angles (NUM_BODY_1DOF_ANGLES scalars)
+        if getattr(self.cfg.LOSS, "POSE_PARAM_WEIGHT", 0.0) > 0:
+            gt_model_params = batch["model_params"]
+            pred_body_pose = pred_mhr["body_pose"]  # [B*N, 133]
+            pred_pose_uncertainty = pred_mhr["pose_uncertainty"]  # [B*N, pose_uncertainty_dim]
+
+            # Flatten batch/person dims if needed to match prediction layout.
+            if gt_model_params.dim() == 3:  # [B, N, D]
+                B, N = gt_model_params.shape[:2]
+                gt_model_params = gt_model_params.view(B * N, -1)
+            else:
+                gt_model_params = gt_model_params.view(-1, gt_model_params.shape[-1])
+
+            pred_body_pose = pred_body_pose.view(-1, pred_body_pose.shape[-1])
+            pred_pose_uncertainty = pred_pose_uncertainty.view(-1, pred_pose_uncertainty.shape[-1])
+
+            # Body pose parameters occupy 133 dims starting after 3 trans + 3 global rot.
+            gt_body_pose = gt_model_params[:, 6 : 6 + pred_body_pose.shape[-1]]
+            gt_global_rot_euler = gt_model_params[:, 3:6]  # Global rotation in Euler (ZYX)
+
+            # Convert global rotation from Euler to axis-angle
+            # roma expects signature: euler_to_rotmat(convention, angles)
+            gt_global_rot_mat = roma.euler_to_rotmat("ZYX", gt_global_rot_euler)
+            gt_global_rot_axis_angle = matrix_to_axis_angle(gt_global_rot_mat)  # [B*N, 3]
+
+            # Get predicted global rotation from pred_pose_raw (6D) and convert to axis-angle
+            pred_pose_raw = pred_mhr["pred_pose_raw"]  # [B*N, 6 + body_cont_dim]
+            pred_global_rot_6d = pred_pose_raw[:, :6]
+            # Convert 6D to rotation matrix, then to axis-angle
+            pred_global_rot_mat = rot6d_to_rotmat(pred_global_rot_6d)
+            pred_global_rot_axis_angle = matrix_to_axis_angle(pred_global_rot_mat)  # [B*N, 3]
+
+            # Extract 3-DoF body joint rotations and convert to axis-angle
+            # all_param_3dof_rot_idxs defines which indices in body_pose correspond to 3-DoF joints
+            all_param_3dof_rot_idxs = torch.LongTensor([
+                (0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20),
+                (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39),
+                (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79),
+                (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106),
+                (114, 98, 109), (115, 99, 103), (130, 131, 132)
+            ]).to(gt_body_pose.device)
+
+            # Extract 3-DoF Euler angles from body pose
+            gt_body_3dof_euler = gt_body_pose[:, all_param_3dof_rot_idxs.flatten()]  # [B*N, 69]
+            pred_body_3dof_euler = pred_body_pose[:, all_param_3dof_rot_idxs.flatten()]  # [B*N, 69]
+
+            # Reshape to [B*N, NUM_BODY_3DOF_JOINTS, 3] and convert to axis-angle
+            gt_body_3dof_euler_reshaped = gt_body_3dof_euler.view(-1, NUM_BODY_3DOF_JOINTS, 3)
+            pred_body_3dof_euler_reshaped = pred_body_3dof_euler.view(-1, NUM_BODY_3DOF_JOINTS, 3)
+
+            # Convert each 3-DoF joint from Euler to axis-angle
+            gt_body_3dof_rot_mat = roma.euler_to_rotmat(
+                "ZYX", gt_body_3dof_euler_reshaped.view(-1, 3)
+            ).view(-1, NUM_BODY_3DOF_JOINTS, 3, 3)
+            pred_body_3dof_rot_mat = roma.euler_to_rotmat(
+                "ZYX", pred_body_3dof_euler_reshaped.view(-1, 3)
+            ).view(-1, NUM_BODY_3DOF_JOINTS, 3, 3)
+
+            gt_body_3dof_axis_angle = matrix_to_axis_angle(
+                gt_body_3dof_rot_mat.view(-1, 3, 3)
+            ).view(-1, NUM_BODY_3DOF_JOINTS, 3)  # [B*N, NUM_BODY_3DOF_JOINTS, 3]
+            pred_body_3dof_axis_angle = matrix_to_axis_angle(
+                pred_body_3dof_rot_mat.view(-1, 3, 3)
+            ).view(-1, NUM_BODY_3DOF_JOINTS, 3)  # [B*N, NUM_BODY_3DOF_JOINTS, 3]
+
+            # Flatten 3-DoF axis-angle to [B*N, 3*NUM_BODY_3DOF_JOINTS]
+            gt_body_3dof_axis_angle_flat = gt_body_3dof_axis_angle.view(-1, 3 * NUM_BODY_3DOF_JOINTS)
+            pred_body_3dof_axis_angle_flat = pred_body_3dof_axis_angle.view(-1, 3 * NUM_BODY_3DOF_JOINTS)
+
+            # Extract 1-DoF angles (already in angle space, no conversion needed)
+            BODY_1DOF_ROT_IDXS_device = BODY_1DOF_ROT_IDXS.to(gt_body_pose.device)
+            gt_body_1dof_angles = gt_body_pose[:, BODY_1DOF_ROT_IDXS_device]  # [B*N, NUM_BODY_1DOF_ANGLES]
+            pred_body_1dof_angles = pred_body_pose[:, BODY_1DOF_ROT_IDXS_device]  # [B*N, NUM_BODY_1DOF_ANGLES]
+
+            # Concatenate: [global (3), body_3dof (3*23), body_1dof (NUM_BODY_1DOF_ANGLES)]
+            gt_pose_axis_angle = torch.cat([
+                gt_global_rot_axis_angle,
+                gt_body_3dof_axis_angle_flat,
+                gt_body_1dof_angles
+            ], dim=-1)  # [B*N, 3 + 3*NUM_BODY_3DOF_JOINTS + NUM_BODY_1DOF_ANGLES]
+
+            pred_pose_axis_angle = torch.cat([
+                pred_global_rot_axis_angle,
+                pred_body_3dof_axis_angle_flat,
+                pred_body_1dof_angles
+            ], dim=-1)  # [B*N, 3 + 3*NUM_BODY_3DOF_JOINTS + NUM_BODY_1DOF_ANGLES]
+
+            # Use Gaussian NLL loss: assumes target ~ N(pred, uncertainty)
+            # uncertainty is already positive exp(...) and represents variance
+            loss_pose_params = self.gaussian_nll_loss(
+                pred_pose_axis_angle,
+                gt_pose_axis_angle,
+                pred_pose_uncertainty
+            )
+            loss_dict["loss_pose_params"] = (
+                self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_pose_params
+            )
             
         assert 'total_loss' not in loss_dict
         loss_dict['total_loss'] = sum(v for k, v in loss_dict.items() if k != 'total_loss')

@@ -14,6 +14,8 @@ from ..modules.mhr_utils import (
     compact_cont_to_model_params_hand,
     compact_model_params_to_cont_body,
     mhr_param_hand_mask,
+    NUM_BODY_3DOF_JOINTS,
+    NUM_BODY_1DOF_ANGLES,
 )
 
 from ..modules.transformer import FFN
@@ -54,6 +56,11 @@ class MHRHead(nn.Module):
         self.enable_hand_model = enable_hand_model
 
         self.body_cont_dim = 260
+        # 3-DoF body joints represented as 6D rotations in the continuous space.
+        self.num_body_3dof_joints = NUM_BODY_3DOF_JOINTS
+        self.num_body_3dof_cont_dims = self.num_body_3dof_joints * 6
+        # 1-DoF body joint rotations represented as single angles in model space.
+        self.num_body_1dof_angles = NUM_BODY_1DOF_ANGLES
         self.npose = (
             6  # Global Rotation
             + self.body_cont_dim  # then body
@@ -408,6 +415,45 @@ class MHRUncertaintyHead(MHRHead):
             add_identity=False,
         )
 
+        # Pose uncertainty in axis-angle space:
+        # - 3 for global rotation
+        # - 3 per 3-DoF body joint (NUM_BODY_3DOF_JOINTS)
+        # - 1 per 1-DoF body joint angle (NUM_BODY_1DOF_ANGLES) in angle space
+        self.axis_angle_pose_dim = 3 * (1 + self.num_body_3dof_joints) + self.num_body_1dof_angles
+        
+        # Create series of FFNs with gradually smaller channels, each with 4 layers
+        # Channel progression: input_dim -> input_dim//2 -> input_dim//4 -> output_dim
+        self.pose_uncertainty_proj = nn.Sequential(
+            # First FFN: input_dim -> input_dim//2 (4 layers)
+            FFN(
+                embed_dims=input_dim,
+                feedforward_channels=input_dim // 2,
+                output_dims=input_dim // 2,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+            # Second FFN: input_dim//2 -> input_dim//4 (4 layers)
+            FFN(
+                embed_dims=input_dim // 2,
+                feedforward_channels=input_dim // 4,
+                output_dims=input_dim // 4,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+            # Third FFN: input_dim//4 -> output_dim (4 layers)
+            FFN(
+                embed_dims=input_dim // 4,
+                feedforward_channels=input_dim // 4,
+                output_dims=self.axis_angle_pose_dim,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+        )
+
+
         selected_scale_comps_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
         num_scales = len(selected_scale_comps_indices)
         """
@@ -461,6 +507,9 @@ class MHRUncertaintyHead(MHRHead):
         
         scale_uncertainty = self.scale_uncertainty_proj(x)
         scale_uncertainty = torch.exp(scale_uncertainty)
+
+        pose_uncertainty = self.pose_uncertainty_proj(x)
+        pose_uncertainty = torch.exp(pose_uncertainty)
 
         if init_estimate is not None:
             pred = pred + init_estimate
@@ -555,6 +604,7 @@ class MHRUncertaintyHead(MHRHead):
             "mhr_model_params": mhr_model_params,
             "shape_uncertainty": shape_uncertainty,
             "scale_uncertainty": scale_uncertainty,
+            "pose_uncertainty": pose_uncertainty,
         }
 
         return output

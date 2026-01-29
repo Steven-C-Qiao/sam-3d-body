@@ -132,9 +132,9 @@ class Visualiser(pl.LightningModule):
         # gt_keypoints_3d[..., [1, 2]] *= -1
         # pred_keypoints_3d[..., [1, 2]] *= -1
 
-        gt_keypoints_2d = batch['keypoints_2d'] # (B, N, 24, 2) is in cropped pixel coords, some can be outside the image
+        gt_keypoints_2d = batch['keypoints_2d'] # (B, N, 24, 2) is in normalized cropped coords [-0.5, 0.5]
         pred_keypoints_2d_full = predictions['mhr']['pred_keypoints_2d'] # (B, 70, 2) is in original pixel coords
-        pred_keypoints_2d = predictions['mhr']['pred_keypoints_2d_cropped'] # (B, 70, 2) is in cropped pixel coords
+        pred_keypoints_2d = predictions['mhr']['pred_keypoints_2d_cropped'] # (B, 70, 2) is in normalized cropped coords [-0.5, 0.5]
 
         pred_mhr_shape_params = predictions['mhr']['shape'] # (B, 45)
 
@@ -616,58 +616,47 @@ class Visualiser(pl.LightningModule):
         # Get predicted keypoints in full image coordinates
         pred_kp2d_full = predictions['mhr']['pred_keypoints_2d'][batch_idx]  # [70, 2] in original pixel coords
 
-        # Get GT keypoints - need to convert from cropped to full image coords
-        gt_kp2d_cropped = batch['keypoints_2d'][batch_idx, :, :]  # [N, 2] in cropped pixel coords
+        # Get GT keypoints - they are now normalized to [-0.5, 0.5] in cropped coordinate space
+        gt_kp2d_normalized = batch['keypoints_2d'][batch_idx, :, :]  # [N, 2] in normalized cropped coords [-0.5, 0.5]
         
-        # Convert GT keypoints from cropped to full image coordinates
-        gt_kp2d_full = None
-        if 'affine_trans' in batch and 'img_size' in batch:
-            try:
-                affine_trans = batch['affine_trans'][batch_idx, 0]  # [2, 3] or [3, 3]
-                img_size = batch['img_size'][batch_idx, 0]  # [2] (width, height)
-                
-                # Ensure img_size is a 2-element array
-                if isinstance(img_size, np.ndarray):
-                    if img_size.shape == ():
-                        img_size = np.array([img_size, img_size])
-                    elif len(img_size.shape) == 1 and len(img_size) >= 2:
-                        img_size = img_size[:2]
-                    else:
-                        img_size = np.array([256, 256])
-                else:
-                    img_size = np.array([256, 256])
-                
-                # Convert cropped coords to normalized [-0.5, 0.5]
-                gt_kp2d_normalized = gt_kp2d_cropped / 256.0 - 0.5  # [N, 2]
-                
-                # Denormalize using img_size: (normalized + 0.5) * img_size
-                gt_kp2d_denormalized = (gt_kp2d_normalized + 0.5) * img_size.reshape(1, 2)  # [N, 2]
-                
-                # Convert to homogeneous coordinates and apply inverse affine transformation
-                gt_kp2d_homogeneous = np.ones((gt_kp2d_cropped.shape[0], 3))
-                gt_kp2d_homogeneous[:, :2] = gt_kp2d_denormalized
-                
-                # Inverse affine transformation: need to compute inverse of affine_trans
-                if affine_trans.shape == (2, 3):
-                    # For 2x3 matrix, we need to augment it to 3x3 for inversion
-                    affine_3x3 = np.eye(3)
-                    affine_3x3[:2, :] = affine_trans
-                    affine_inv = np.linalg.inv(affine_3x3)
-                    gt_kp2d_transformed = gt_kp2d_homogeneous @ affine_inv.T
-                    gt_kp2d_full = gt_kp2d_transformed[:, :2]
-                elif affine_trans.shape == (3, 3):
-                    affine_inv = np.linalg.inv(affine_trans)
-                    gt_kp2d_transformed = gt_kp2d_homogeneous @ affine_inv.T
-                    gt_kp2d_full = gt_kp2d_transformed[:, :2]
-                else:
-                    # Fallback: assume no transformation needed
-                    gt_kp2d_full = gt_kp2d_denormalized
-            except Exception as e:
-                logger.warning(f"Failed to convert GT keypoints to full image coords: {e}. Skipping GT visualization.")
-                gt_kp2d_full = None
+        # Convert GT keypoints from normalized cropped coords to full image coordinates
+        affine_trans = batch['affine_trans'][batch_idx, 0]  # [2, 3] or [3, 3]
+        img_size = batch['img_size'][batch_idx, 0]  # [2] (width, height)
+        
+        # Ensure img_size is a 2-element array
+        if isinstance(img_size, np.ndarray):
+            if img_size.shape == ():
+                img_size = np.array([img_size, img_size])
+            elif len(img_size.shape) == 1 and len(img_size) >= 2:
+                img_size = img_size[:2]
+            else:
+                img_size = np.array([256, 256])
         else:
-            logger.warning("affine_trans or img_size not found in batch. Cannot convert GT keypoints to full image coords.")
-            gt_kp2d_full = None
+            img_size = np.array([256, 256])
+        
+        # Denormalize using img_size: (normalized + 0.5) * img_size
+        # This gives cropped pixel coordinates
+        gt_kp2d_denormalized = (gt_kp2d_normalized + 0.5) * img_size.reshape(1, 2)  # [N, 2]
+        
+        # Convert to homogeneous coordinates and apply inverse affine transformation
+        gt_kp2d_homogeneous = np.ones((gt_kp2d_normalized.shape[0], 3))
+        gt_kp2d_homogeneous[:, :2] = gt_kp2d_denormalized
+        
+        # Inverse affine transformation: need to compute inverse of affine_trans
+        if affine_trans.shape == (2, 3):
+            # For 2x3 matrix, we need to augment it to 3x3 for inversion
+            affine_3x3 = np.eye(3)
+            affine_3x3[:2, :] = affine_trans
+            affine_inv = np.linalg.inv(affine_3x3)
+            gt_kp2d_transformed = gt_kp2d_homogeneous @ affine_inv.T
+            gt_kp2d_full = gt_kp2d_transformed[:, :2]
+        elif affine_trans.shape == (3, 3):
+            affine_inv = np.linalg.inv(affine_trans)
+            gt_kp2d_transformed = gt_kp2d_homogeneous @ affine_inv.T
+            gt_kp2d_full = gt_kp2d_transformed[:, :2]
+        else:
+            # Fallback: assume no transformation needed
+            gt_kp2d_full = gt_kp2d_denormalized
 
         # Extract sample keypoints (already in full image coords)
         sample_kp2d_full = predictions['mhr_samples_keypoints_2d'][batch_idx]  # [num_samples, 70, 2]
@@ -677,10 +666,9 @@ class Visualiser(pl.LightningModule):
         plt.figure(figsize=(15, 10))
         plt.imshow(image_original)
 
-        # Plot GT keypoints if available
-        if gt_kp2d_full is not None:
-            plt.scatter(gt_kp2d_full[:, 0], gt_kp2d_full[:, 1],
-                       color='blue', s=20, marker='x', label='GT', linewidths=2)
+        # Plot GT keypoints
+        plt.scatter(gt_kp2d_full[:, 0], gt_kp2d_full[:, 1],
+                   color='blue', s=20, marker='x', label='GT', linewidths=2)
 
         # Plot predicted mean keypoints
         plt.scatter(pred_kp2d_full[:, 0], pred_kp2d_full[:, 1],
@@ -722,81 +710,72 @@ class Visualiser(pl.LightningModule):
         
 
         # Extract keypoints for this batch item
-        gt_kp2d = batch['keypoints_2d'][batch_idx, :, :]  # [N, 2] in cropped pixel coords
+        # GT keypoints are now normalized to [-0.5, 0.5] in cropped coordinate space
+        gt_kp2d_normalized = batch['keypoints_2d'][batch_idx, :, :]  # [N, 2] in normalized coords [-0.5, 0.5]
+        # Unnormalize GT to pixel coordinates [0, 256]
+        gt_kp2d = (gt_kp2d_normalized + 0.5) * 256  # [N, 2]
         
         # Predicted keypoints in cropped normalized coords [-0.5, 0.5]
         pred_kp2d_cropped_normalised = predictions['mhr']['pred_keypoints_2d_cropped'][batch_idx]  # [N, 2]
         # Convert to pixel coordinates
         pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * 256  # [N, 2]
         
-        # Extract sample keypoints (in full image coords)
-        sample_kp2d_full = predictions['mhr_samples_keypoints_2d'][batch_idx]  # [num_samples, N, 2]
-
-        # Convert samples to cropped coordinates
-        num_samples = sample_kp2d_full.shape[0]
-        sample_kp2d_cropped_coords = []
-
-
-        # Get affine transformation and image size from batch
-        # Note: batch may have been converted to numpy, so we need to handle both cases
-        if 'affine_trans' in batch and 'img_size' in batch:
-            try:
-                # Handle the case where batch might be numpy or might need flattening
-                # affine_trans shape: (B, N, 2, 3) or (B, N, 3, 3) or flattened
-                # img_size shape: (B, N, 2) or flattened
-                affine_trans = batch['affine_trans'][batch_idx, 0]  # [2, 3] or [3, 3]
-                img_size = batch['img_size'][batch_idx, 0]  # [2] (width, height)
-
-                # Ensure img_size is a 2-element array
-                if isinstance(img_size, np.ndarray):
-                    if img_size.shape == ():
-                        # Scalar, use for both dimensions
-                        img_size = np.array([img_size, img_size])
-                    elif len(img_size.shape) == 1 and len(img_size) >= 2:
-                        img_size = img_size[:2]
-                    elif len(img_size.shape) == 0:
-                        img_size = np.array([256, 256])  # Default
-                else:
-                    img_size = np.array([256, 256])  # Default
-
-                # Convert sample keypoints from full image coords to cropped coords
-                for i in range(num_samples):
-                    # Convert to homogeneous coordinates [N, 3]
-                    N_kp = sample_kp2d_full.shape[1]
-                    sample_kp2d_homogeneous = np.ones((N_kp, 3))
-                    sample_kp2d_homogeneous[:, :2] = sample_kp2d_full[i]  # [N, 2]
-
-                    # Apply affine transformation
-                    if affine_trans.shape == (2, 3):
-                        # 2x3 affine matrix: [x', y'] = [x, y, 1] @ affine_trans.T
-                        sample_kp2d_cropped = (sample_kp2d_homogeneous @ affine_trans.T)  # [N, 2]
-                    elif affine_trans.shape == (3, 3):
-                        # 3x3 affine matrix: take first 2 columns
-                        sample_kp2d_transformed = (sample_kp2d_homogeneous @ affine_trans.T)  # [N, 3]
-                        sample_kp2d_cropped = sample_kp2d_transformed[:, :2]  # [N, 2]
-                    else:
-                        # Fallback: assume no transformation needed
-                        sample_kp2d_cropped = sample_kp2d_full[i]
-
-                    # Normalize to [-0.5, 0.5] following model's _full_to_crop logic
-                    # The model does: pred_keypoints_2d_cropped[..., :2] / img_size - 0.5
-                    # img_size is [width, height], so we divide x by width, y by height
-                    sample_kp2d_cropped_normalized = sample_kp2d_cropped / img_size.reshape(1, 2) - 0.5
-
-                    # Convert to pixel coordinates [0, 256]
-                    sample_kp2d_cropped_pixel = (sample_kp2d_cropped_normalized + 0.5) * 256
-                    sample_kp2d_cropped_coords.append(sample_kp2d_cropped_pixel)
-            except Exception as e:
-                # If conversion fails, skip samples but still visualize GT and pred mean
-                logger.warning(f"Failed to convert sample keypoints to cropped coords: {e}. Skipping samples.")
-                sample_kp2d_cropped_coords = None
+        # Use pre-computed normalized cropped sample keypoints if available
+        if 'mhr_samples_keypoints_2d_cropped' in predictions:
+            sample_kp2d_cropped_normalized = predictions['mhr_samples_keypoints_2d_cropped'][batch_idx]  # [num_samples, N, 2]
+            num_samples = sample_kp2d_cropped_normalized.shape[0]
+            # Unnormalize to pixel coordinates [0, 256]
+            sample_kp2d_cropped_coords = (sample_kp2d_cropped_normalized + 0.5) * 256  # [num_samples, N, 2]
         else:
-            # If affine_trans is not available, skip sample conversion
-            logger.warning("affine_trans or img_size not found in batch. Skipping sample keypoint conversion.")
-            sample_kp2d_cropped_coords = None
+            # Fallback: convert from full image coordinates (old method)
+            sample_kp2d_full = predictions['mhr_samples_keypoints_2d'][batch_idx]  # [num_samples, N, 2]
+            num_samples = sample_kp2d_full.shape[0]
+            sample_kp2d_cropped_coords = []
 
-        if sample_kp2d_cropped_coords is not None:
-            sample_kp2d_cropped_coords = np.array(sample_kp2d_cropped_coords)  # [num_samples, N, 2]
+            # Get affine transformation and image size from batch
+            if 'affine_trans' in batch and 'img_size' in batch:
+                try:
+                    affine_trans = batch['affine_trans'][batch_idx, 0]  # [2, 3] or [3, 3]
+                    img_size = batch['img_size'][batch_idx, 0]  # [2] (width, height)
+
+                    # Ensure img_size is a 2-element array
+                    if isinstance(img_size, np.ndarray):
+                        if img_size.shape == ():
+                            img_size = np.array([img_size, img_size])
+                        elif len(img_size.shape) == 1 and len(img_size) >= 2:
+                            img_size = img_size[:2]
+                        else:
+                            img_size = np.array([256, 256])  # Default
+                    else:
+                        img_size = np.array([256, 256])  # Default
+
+                    # Convert sample keypoints from full image coords to cropped coords
+                    for i in range(num_samples):
+                        N_kp = sample_kp2d_full.shape[1]
+                        sample_kp2d_homogeneous = np.ones((N_kp, 3))
+                        sample_kp2d_homogeneous[:, :2] = sample_kp2d_full[i]  # [N, 2]
+
+                        # Apply affine transformation
+                        if affine_trans.shape == (2, 3):
+                            sample_kp2d_cropped = (sample_kp2d_homogeneous @ affine_trans.T)  # [N, 2]
+                        elif affine_trans.shape == (3, 3):
+                            sample_kp2d_transformed = (sample_kp2d_homogeneous @ affine_trans.T)  # [N, 3]
+                            sample_kp2d_cropped = sample_kp2d_transformed[:, :2]  # [N, 2]
+                        else:
+                            sample_kp2d_cropped = sample_kp2d_full[i]
+
+                        # Normalize to [-0.5, 0.5] then unnormalize to pixel coords
+                        sample_kp2d_cropped_normalized = sample_kp2d_cropped / img_size.reshape(1, 2) - 0.5
+                        sample_kp2d_cropped_pixel = (sample_kp2d_cropped_normalized + 0.5) * 256
+                        sample_kp2d_cropped_coords.append(sample_kp2d_cropped_pixel)
+                    
+                    sample_kp2d_cropped_coords = np.array(sample_kp2d_cropped_coords)  # [num_samples, N, 2]
+                except Exception as e:
+                    logger.warning(f"Failed to convert sample keypoints to cropped coords: {e}. Skipping samples.")
+                    sample_kp2d_cropped_coords = None
+            else:
+                logger.warning("affine_trans or img_size not found in batch. Skipping sample keypoint conversion.")
+                sample_kp2d_cropped_coords = None
 
         # Get cropped image
         img = batch['img'][batch_idx, 0]  # [3, 256, 256] or [256, 256, 3]
@@ -867,6 +846,8 @@ class Visualiser(pl.LightningModule):
         merged_verts_all_views = predictions['mu_star_vertices']  # [N_views, N_verts, 3] or [B, N_views, N_verts, 3]
         print(gt_verts_all_views.shape, pred_verts_all_views.shape, merged_verts_all_views.shape)
 
+        # Apply camera coordinate system transformation to all vertices for consistent visualization
+        gt_verts_all_views[..., [1, 2]] *= -1
         pred_verts_all_views[..., [1, 2]] *= -1
         merged_verts_all_views[..., [1, 2]] *= -1
 
@@ -887,6 +868,31 @@ class Visualiser(pl.LightningModule):
             gt_verts_all_views = gt_verts_all_views[0]  # [N_views, N_verts, 3]
         
         num_views = pred_verts_all_views.shape[0]
+        
+        # For neutral pose, apply scale and translation correction (like PVETSC)
+        if suffix == 'neutral':
+            from sam_3d_body.metrics.metrics_tracker import scale_and_translation_transform_batch
+            
+            # Apply scale and translation correction to predicted and merged vertices
+            for view_idx in range(num_views):
+                gt_verts = gt_verts_all_views[view_idx]  # [N_verts, 3]
+                pred_verts = pred_verts_all_views[view_idx]  # [N_verts, 3]
+                merged_verts = merged_verts_all_views[view_idx]  # [N_verts, 3]
+                
+                # Apply scale and translation correction: normalize pred/merged to match GT scale and translation
+                pred_verts_corrected = scale_and_translation_transform_batch(
+                    pred_verts[np.newaxis, :, :],  # [1, N_verts, 3]
+                    gt_verts[np.newaxis, :, :]     # [1, N_verts, 3]
+                )[0]  # [N_verts, 3]
+                
+                merged_verts_corrected = scale_and_translation_transform_batch(
+                    merged_verts[np.newaxis, :, :],  # [1, N_verts, 3]
+                    gt_verts[np.newaxis, :, :]       # [1, N_verts, 3]
+                )[0]  # [N_verts, 3]
+                
+                # Replace with corrected vertices
+                pred_verts_all_views[view_idx] = pred_verts_corrected
+                merged_verts_all_views[view_idx] = merged_verts_corrected
         
         # Normalize height of meshes relative to GT if requested
         if normalise:

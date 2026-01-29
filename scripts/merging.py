@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import torch
 import argparse
@@ -15,6 +13,11 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.strategies import DDPStrategy
+
+import sys
+
+sys.path.append(".")
 
 import sys
 
@@ -23,21 +26,32 @@ from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
 
+CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
+CONFIG_PATH = "checkpoints/sam-3d-body-dinov3/model_config.yaml"
+
+
 def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
 
-    torch.set_float32_matmul_precision(cfg.TRAIN.FP16_TYPE)
-
     if dev:
-        cfg.TRAIN.NUM_EPOCHS = 5
+        cfg.TRAIN.NUM_EPOCHS = 1
         cfg.TRAIN.BATCH_SIZE = 2
-        cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
         exp_dir = "exp/exp_test"
         num_sanity_val_steps = 0
     else:
         num_sanity_val_steps = 2
+
+    # In dev mode, restrict BEDLAM training datasets to a single small subset
+    if dev:
+        cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
+
+    cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH = (
+        "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
+    )
+
+    torch.set_float32_matmul_precision(cfg.TRAIN.FP16_TYPE)
 
     # Create directories
     model_save_dir = os.path.join(exp_dir, "saved_models")
@@ -48,32 +62,23 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     if not os.path.exists(vis_save_dir):
         os.makedirs(vis_save_dir)
 
-    model = Trainer(
+    trainer = Trainer(
         cfg=cfg,
         vis_save_dir=vis_save_dir,
-    )
-
-    checkpoint_kwargs = {
-        "dirpath": model_save_dir,
-        "filename": "val_loss_{epoch:03d}",
-        "save_top_k": 1,
-        "every_n_epochs": 5,  # Save checkpoint every 5 epochs
-        "save_last": True,
-        "verbose": True,
-        "monitor": "loss_shape_params",
-        "mode": "min",
-    }
-    checkpoint_callbacks = [ModelCheckpoint(**checkpoint_kwargs)]
-
-    tensorboard_logger = TensorBoardLogger(exp_dir, name="lightning_logs")
+    ).to(device)
 
     if load_path is not None:
         logger.info(f"Loading checkpoint: {load_path}")
         ckpt = torch.load(load_path, weights_only=False, map_location="cpu")
 
         # Extract state_dict from checkpoint
-        state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+        if "state_dict" in ckpt:
+            state_dict = ckpt["state_dict"]
+        else:
+            state_dict = ckpt
 
+        # PyTorch Lightning checkpoints have keys prefixed with 'model.'
+        # We need to strip this prefix when loading into model.model
         model_state_dict = {}
         for key, value in state_dict.items():
             if key.startswith("model."):
@@ -94,7 +99,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
                 model_state_dict[key] = value
 
         if model_state_dict:
-            missing_keys, unexpected_keys = model.model.load_state_dict(
+            missing_keys, unexpected_keys = trainer.model.load_state_dict(
                 model_state_dict, strict=False
             )
             logger.info(f"Loaded {len(model_state_dict)} parameters from checkpoint")
@@ -107,15 +112,12 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         else:
             logger.warning("No model parameters found in checkpoint state_dict!")
 
-    trainer = pl.Trainer(
-        max_epochs=cfg.TRAIN.NUM_EPOCHS,
-        devices="auto",
-        strategy="auto",
-        callbacks=checkpoint_callbacks,
-        logger=tensorboard_logger,
-        num_sanity_val_steps=num_sanity_val_steps,
-    )
-    trainer.fit(model, ckpt_path=resume_path)
+    results = trainer.run_multiview_prediction(num_view=4, max_batches=10)
+
+    import ipdb
+
+    ipdb.set_trace()
+    print("")
 
 
 if __name__ == "__main__":
