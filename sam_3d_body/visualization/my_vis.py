@@ -119,49 +119,36 @@ class Visualiser(pl.LightningModule):
 
 
     def visualise_full(self, predictions, batch):
-        # print(predictions.keys())
-        # print(batch.keys())
-        # print(predictions['mhr'].keys())
-
-
-        image_original = batch['img_ori'] # (B, 720, 1280, 3)
-        image_crop = batch['img'] # (B, N=1, 3, 256, 256)
-
-        gt_keypoints_3d = batch['keypoints_3d']
-        pred_keypoints_3d = predictions['mhr']['pred_keypoints_3d'] # (B, 70, 3)
-        # gt_keypoints_3d[..., [1, 2]] *= -1
-        # pred_keypoints_3d[..., [1, 2]] *= -1
-
-        gt_keypoints_2d = batch['keypoints_2d'] # (B, N, 24, 2) is in normalized cropped coords [-0.5, 0.5]
-        pred_keypoints_2d_full = predictions['mhr']['pred_keypoints_2d'] # (B, 70, 2) is in original pixel coords
-        pred_keypoints_2d = predictions['mhr']['pred_keypoints_2d_cropped'] # (B, 70, 2) is in normalized cropped coords [-0.5, 0.5]
-
-        pred_mhr_shape_params = predictions['mhr']['shape'] # (B, 45)
-
-        # Visualize 3D keypoints
-        pred_keypoints_3d_samples = predictions.get('mhr_samples_keypoints_3d', None)
-        self.visualise_keypoints_3d(gt_keypoints_3d, pred_keypoints_3d, pred_keypoints_3d_samples)
-
-        # Visualize 2D keypoints on full image
-        self.visualise_2d_keypoints_full(predictions, batch)
-        
-        # Visualize 2D keypoints on cropped image
-        self.visualise_2d_keypoints_cropped(predictions, batch)
-
+        batch['keypoints_3d'][..., [1, 2]] *= -1
+        predictions['mhr']['pred_keypoints_3d'][..., [1, 2]] *= -1
+        predictions['mhr_samples_keypoints_3d'][..., [1, 2]] *= -1
         predictions['mhr_samples'][..., [1, 2]] *= -1
         predictions['mhr']['pred_vertices'][..., [1, 2]] *= -1
+
+        self.visualise_keypoints_3d(predictions, batch)
+
+        self.visualise_2d_keypoints_full(predictions, batch)
+        
+        self.visualise_2d_keypoints_cropped(predictions, batch)
+
         self.visualise_mesh(predictions, batch)
+
         self.visualise_mesh_pyplot(predictions, batch)
 
-    def visualise_keypoints_3d(self, gt_keypoints_3d, pred_keypoints_3d, pred_keypoints_3d_samples=None):
+    def visualise_keypoints_3d(self, predictions, batch):
         """
         Generate 3D scatter plots visualizing GT, predicted, and sample keypoints.
         
         Args:
-            gt_keypoints_3d: Ground truth 3D keypoints, shape (B, N, 70, 3) or (B, 70, 3)
-            pred_keypoints_3d: Predicted 3D keypoints, shape (B, 70, 3)
-            pred_keypoints_3d_samples: Sample 3D keypoints, shape (B, num_samples, 70, 3) or None
+            predictions: Dictionary containing model predictions
+            batch: Dictionary containing batch data including ground truth
         """
+        # Extract keypoints from batch and predictions
+        gt_keypoints_3d = batch['keypoints_3d']
+        pred_keypoints_3d = predictions['mhr']['pred_keypoints_3d']  # (B, 70, 3)
+        pred_keypoints_3d_samples = predictions.get('mhr_samples_keypoints_3d', None)
+
+        
         # Handle different input shapes
         if gt_keypoints_3d.ndim == 4:  # (B, N, 70, 3)
             gt_kp = gt_keypoints_3d[0, 0]  # First batch, first person

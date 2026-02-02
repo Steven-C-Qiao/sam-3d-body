@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
 import torch
 import argparse
 import glob
@@ -32,7 +33,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
 
     if dev:
         cfg.TRAIN.NUM_EPOCHS = 5
-        cfg.TRAIN.BATCH_SIZE = 2
+        cfg.DATASET.BATCH_SIZE = 2
         cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
         exp_dir = "exp/exp_test"
         num_sanity_val_steps = 0
@@ -47,6 +48,12 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     vis_save_dir = os.path.join(exp_dir, "vis")
     if not os.path.exists(vis_save_dir):
         os.makedirs(vis_save_dir)
+
+    config_src = "sam_3d_body/configs/config.py"
+    config_dst = Path(exp_dir) / "config.py"
+    if not config_dst.exists():
+        shutil.copy2(config_src, config_dst)
+        logger.info(f"Copied config to {config_dst}")
 
     model = Trainer(
         cfg=cfg,

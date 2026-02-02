@@ -754,9 +754,9 @@ class SAM3DBody(BaseModel):
         """
         # Initialize batch indices for body decoder
         self._initialize_batch(batch)
-        batch_size, num_person = batch["img"].shape[:2]
+        B, N = batch["img"].shape[:2]
         self.hand_batch_idx = []
-        self.body_batch_idx = list(range(batch_size * num_person))
+        self.body_batch_idx = list(range(B * N))
 
 
         outputs = self.forward_pose_branch(batch)
@@ -764,190 +764,63 @@ class SAM3DBody(BaseModel):
         if num_samples > 0:
             output_mhr = outputs["mhr"]
 
-            shape_params = output_mhr["shape"]
-            shape_uncertainty = output_mhr["shape_uncertainty"]
+            from sam_3d_body.models.sampling import gen_samples
 
-            scale_params = output_mhr["scale"]
-            scale_uncertainty = output_mhr["scale_uncertainty"]
-
-            # Pose mean and uncertainty are defined over the raw pose vector used by the head:
-            # [global_rot_6d, body_pose_cont]. We keep the global rotation deterministic
-            # (no sampling) and only sample body 3-DoF joints.
-            pred_pose_raw = output_mhr["pred_pose_raw"]
-            pose_uncertainty = output_mhr["pose_uncertainty"]
-
-            # Split raw pose into global and body parts
-            global_rot_6d_mean = pred_pose_raw[:, :6]
-            body_pose_cont_mean = pred_pose_raw[:, 6:]
-
-            # Deterministic global rotation: use mean only.
+            global_rot_6d_mean = output_mhr["pred_pose_raw"][:, :6]
             global_rot_mat_mean = rot6d_to_rotmat(global_rot_6d_mean)
             global_rot_euler_mean = roma.rotmat_to_euler("ZYX", global_rot_mat_mean)
+            global_rot_euler_mean = global_rot_euler_mean.repeat_interleave(num_samples, dim=0)
+            global_trans = torch.zeros_like(global_rot_euler_mean)
 
-            # --- Body 3-DoF rotations sampling in axis-angle space ---
-            # First `NUM_BODY_3DOF_CONT_DIMS` in cont space correspond to 3-DoF joint rotations (6D per joint).
-            body_cont_3dof_mean = body_pose_cont_mean[..., :NUM_BODY_3DOF_CONT_DIMS]
-            body_cont_rest = body_pose_cont_mean[..., NUM_BODY_3DOF_CONT_DIMS:]
 
-            # [B, J, 6] where J = NUM_BODY_3DOF_JOINTS
-            body_cont_3dof_mean_joints = body_cont_3dof_mean.unflatten(-1, (-1, 6))
-            body_rotmat_mean = rot6d_to_rotmat(
-                body_cont_3dof_mean_joints.reshape(-1, 6)
-            ).reshape(
-                body_cont_3dof_mean_joints.shape[0],
-                body_cont_3dof_mean_joints.shape[1],
-                3,
-                3,
+            shape_samples, scale_samples, pose_samples = gen_samples(
+                output_mhr, num_samples, sample_pose=self.sample_pose
             )
-            body_axis_angle_mean = matrix_to_axis_angle(
-                body_rotmat_mean.reshape(-1, 3, 3)
-            ).reshape(
-                body_cont_3dof_mean_joints.shape[0],
-                body_cont_3dof_mean_joints.shape[1],
-                3,
-            )  # [B, J, 3]
+            shape_samples = shape_samples.view(-1, shape_samples.shape[-1])
+            scale_samples = scale_samples.view(-1, scale_samples.shape[-1])
+            pose_samples = pose_samples.view(-1, pose_samples.shape[-1])
 
-            # Uncertainty for body 3-DoF joints in axis-angle space:
-            # the next 3 * NUM_BODY_3DOF_JOINTS entries after the (unused) global term.
-            axis_len = 3 * NUM_BODY_3DOF_JOINTS
-            body_axis_angle_var = pose_uncertainty[:, 3 : 3 + axis_len].view(
-                body_axis_angle_mean.shape[0], NUM_BODY_3DOF_JOINTS, 3
-            )  # [B, J, 3]
-            body_axis_angle_std = torch.sqrt(body_axis_angle_var.clamp_min(1e-8))  # [B, J, 3]
 
-            # Mean 1-DoF joint angles in model-parameter (Euler/trans) space.
-            body_pose_params_mean = compact_cont_to_model_params_body(body_pose_cont_mean)
-            theta_1dof_mean = body_pose_params_mean[:, BODY_1DOF_ROT_IDXS]  # [B, J1]
+            mhr_output = self.head_pose.mhr_forward(
+                scale_params=torch.zeros_like(scale_samples),
+                shape_params=shape_samples,
+                global_trans=global_trans,
+                global_rot=global_rot_euler_mean,
+                body_pose_params=pose_samples,
+                hand_pose_params=output_mhr["hand"].repeat_interleave(num_samples, dim=0),
+                expr_params=output_mhr["face"].repeat_interleave(num_samples, dim=0),
+                do_pcblend=True,
+                return_keypoints=True,
+                return_joint_coords=True,
+                return_model_params=True,
+                return_joint_rotations=True,
+                scale_offsets=scale_samples,
+            )
+            verts, j3d, jcoords, mhr_model_params, joint_global_rots = mhr_output
+            verts[..., [1, 2]] *= -1  # Camera system difference
+            j3d[..., [1, 2]] *= -1
+            j3d = j3d[:, :70]
+            if hasattr(self, "mhr_dense_kp_indices") and self.mhr_dense_kp_indices is not None:
+                dense_kp3d = verts[:, self.mhr_dense_kp_indices]
+                j3d = torch.cat([j3d, dense_kp3d], dim=1)
 
-            # Uncertainty for 1-DoF joint angles in angle space: last NUM_BODY_1DOF_ANGLES entries.
-            theta_1dof_var = pose_uncertainty[:, 3 + axis_len :]  # [B, J1]
-            theta_1dof_std = torch.sqrt(theta_1dof_var.clamp_min(1e-8))  # [B, J1]
-
-            mhr_sample_verts = []
-            mhr_sample_keypoints_3d = []
-            for _ in range(num_samples):
-                # --- Shape sampling (optional) ---
-                if self.sample_shape:
-                    # Note: shape_uncertainty represents variance, so we sample using sqrt(variance).
-                    shape_params_sample = (
-                        shape_params
-                        + torch.sqrt(shape_uncertainty) * torch.randn_like(shape_params)
-                    )
-                else:
-                    shape_params_sample = shape_params
-
-                # --- Scale sampling (optional, only selected components) ---
-                selected_scale_comps_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
-                if self.sample_scale:
-                    scale_params_sample = scale_params.clone()
-                    scale_params_sample[:, selected_scale_comps_indices] = (
-                        scale_params[:, selected_scale_comps_indices]
-                        + torch.sqrt(scale_uncertainty)
-                        * torch.randn_like(scale_params[:, selected_scale_comps_indices])
-                    )
-                else:
-                    scale_params_sample = scale_params
-
-                # --- Pose sampling (optional) ---
-                # Global rotation: always deterministic (no sampling)
-                global_rot_euler_sample = global_rot_euler_mean
-
-                if self.sample_pose:
-                    # Sample only 3-DoF body joint rotations in axis-angle space
-                    eps_body = torch.randn_like(body_axis_angle_mean)
-                    body_axis_angle_sample = (
-                        body_axis_angle_mean + body_axis_angle_std * eps_body
-                    )  # [B, J, 3]
-                    body_rotmat_sample = axis_angle_to_matrix(
-                        body_axis_angle_sample.reshape(-1, 3)
-                    ).reshape(
-                        body_axis_angle_sample.shape[0],
-                        body_axis_angle_sample.shape[1],
-                        3,
-                        3,
-                    )
-                    body_cont_3dof_sample = rotmat_to_rot6d(
-                        body_rotmat_sample.reshape(-1, 3, 3)
-                    ).reshape(body_axis_angle_sample.shape[0], -1)
-
-                    # Reassemble full continuous body pose: sampled 3-DoF + deterministic remainder.
-                    body_pose_cont_sample = torch.cat(
-                        [body_cont_3dof_sample, body_cont_rest], dim=-1
-                    )
-
-                    # Convert continuous body pose to model parameters (Euler)
-                    body_pose_euler_sample = compact_cont_to_model_params_body(
-                        body_pose_cont_sample
-                    )
-
-                    # Sample 1-DoF joint rotations directly in angle space
-                    eps_theta = torch.randn_like(theta_1dof_mean)
-                    theta_1dof_sample = (
-                        theta_1dof_mean + theta_1dof_std * eps_theta
-                    )  # [B, J1]
-                    body_pose_euler_sample[:, BODY_1DOF_ROT_IDXS] = theta_1dof_sample
-                else:
-                    # No pose sampling: reuse deterministic mean body pose parameters
-                    body_pose_euler_sample = body_pose_params_mean.clone()
-
-                # Match the deterministic path: zero hands and jaw
-                body_pose_euler_sample[:, mhr_param_hand_mask] = 0
-                body_pose_euler_sample[:, -3:] = 0
-
-                mhr_output = self.head_pose.mhr_forward(
-                    scale_params=scale_params_sample,
-                    shape_params=shape_params_sample,
-                    global_trans=torch.zeros_like(global_rot_euler_sample),
-                    global_rot=global_rot_euler_sample,
-                    body_pose_params=body_pose_euler_sample,
-                    hand_pose_params=output_mhr["hand"],
-                    expr_params=output_mhr["face"],
-                    do_pcblend=True,
-                    return_keypoints=True,
-                    return_joint_coords=True,
-                    return_model_params=True,
-                    return_joint_rotations=True,
-                )
-                verts, j3d, jcoords, mhr_model_params, joint_global_rots = mhr_output
-                verts[..., [1, 2]] *= -1  # Camera system difference
-                j3d[..., [1, 2]] *= -1
-                # First 70 canonical keypoints
-                j3d = j3d[:, :70]
-                # Optionally append dense keypoints from mesh vertices
-                if hasattr(self, "mhr_dense_kp_indices") and self.mhr_dense_kp_indices is not None:
-                    dense_kp3d = verts[:, self.mhr_dense_kp_indices]
-                    j3d = torch.cat([j3d, dense_kp3d], dim=1)
-                mhr_sample_verts.append(verts)
-                mhr_sample_keypoints_3d.append(j3d)
-            mhr_sample_verts = torch.stack(mhr_sample_verts, dim=1)
-            mhr_sample_keypoints_3d = torch.stack(mhr_sample_keypoints_3d, dim=1)
-
-            outputs['mhr_samples'] = mhr_sample_verts
-            outputs['mhr_samples_keypoints_3d'] = mhr_sample_keypoints_3d
+            outputs['mhr_samples'] = verts.view(B, num_samples, -1, 3)
+            outputs['mhr_samples_keypoints_3d'] = j3d.view(B, num_samples, -1, 3)
             
-            # Project sampled 3D keypoints to 2D
-            # Reshape samples from [B, num_samples, N, 3] to [B * num_samples, N, 3]
-            B, num_samples, N, _ = mhr_sample_keypoints_3d.shape
-            mhr_sample_keypoints_3d_flat = mhr_sample_keypoints_3d.view(B * num_samples, N, 3)
+            j3d_flat = j3d.view(B * num_samples, -1, 3) # 
             
-            # Get camera parameters and batch info for projection
+
             pred_cam = output_mhr['pred_cam']  # [B, 3]
-            # Expand camera params to match flattened samples
-            pred_cam_expanded = pred_cam.unsqueeze(1).expand(-1, num_samples, -1).contiguous()
-            pred_cam_flat = pred_cam_expanded.view(B * num_samples, -1)
+            pred_cam_flat = pred_cam.repeat_interleave(num_samples, dim=0)
             
-            # Get batch info for projection
             bbox_center_flat = self._flatten_person(batch["bbox_center"])[self.body_batch_idx]
-            bbox_center_expanded = bbox_center_flat.unsqueeze(1).expand(-1, num_samples, -1).contiguous()
-            bbox_center_flat_samples = bbox_center_expanded.view(B * num_samples, -1)
+            bbox_center_expanded = bbox_center_flat.repeat_interleave(num_samples, dim=0)
             
             bbox_scale_flat = self._flatten_person(batch["bbox_scale"])[self.body_batch_idx, 0]
-            bbox_scale_expanded = bbox_scale_flat.unsqueeze(1).expand(-1, num_samples).contiguous()
-            bbox_scale_flat_samples = bbox_scale_expanded.view(B * num_samples)
+            bbox_scale_expanded = bbox_scale_flat.repeat_interleave(num_samples, dim=0)
             
             ori_img_size_flat = self._flatten_person(batch["ori_img_size"])[self.body_batch_idx]
-            ori_img_size_expanded = ori_img_size_flat.unsqueeze(1).expand(-1, num_samples, -1).contiguous()
-            ori_img_size_flat_samples = ori_img_size_expanded.view(B * num_samples, -1)
+            ori_img_size_expanded = ori_img_size_flat.repeat_interleave(num_samples, dim=0)
             
             cam_int_flat = self._flatten_person(
                 batch["cam_int"]
@@ -955,17 +828,16 @@ class SAM3DBody(BaseModel):
                 .expand(-1, batch["img"].shape[1], -1, -1)
                 .contiguous()
             )[self.body_batch_idx]
-            cam_int_expanded = cam_int_flat.unsqueeze(1).expand(-1, num_samples, -1, -1).contiguous()
-            cam_int_flat_samples = cam_int_expanded.view(B * num_samples, 3, 3)
+            cam_int_expanded = cam_int_flat.repeat_interleave(num_samples, dim=0)
             
             # Project to 2D (full image coordinates)
             cam_out_samples = self.head_camera.perspective_projection(
-                mhr_sample_keypoints_3d_flat,
+                j3d_flat,
                 pred_cam_flat,
-                bbox_center_flat_samples,
-                bbox_scale_flat_samples,
-                ori_img_size_flat_samples,
-                cam_int_flat_samples,
+                bbox_center_expanded,
+                bbox_scale_expanded,
+                ori_img_size_expanded,
+                cam_int_expanded,
                 use_intrin_center=self.cfg.MODEL.DECODER.get("USE_INTRIN_CENTER", False),
             )
             
@@ -973,7 +845,7 @@ class SAM3DBody(BaseModel):
             mhr_sample_keypoints_2d_full = cam_out_samples["pred_keypoints_2d"]
             
             # Reshape full image keypoints to [B, num_samples, N, 2]
-            mhr_sample_keypoints_2d = mhr_sample_keypoints_2d_full.view(B, num_samples, N, 2)
+            mhr_sample_keypoints_2d = mhr_sample_keypoints_2d_full.view(B, num_samples, -1, 2)
             outputs['mhr_samples_keypoints_2d'] = mhr_sample_keypoints_2d
             
             # Convert from full image coordinates to cropped pixel space
@@ -1002,10 +874,9 @@ class SAM3DBody(BaseModel):
             mhr_sample_keypoints_2d_crop = mhr_sample_keypoints_2d_crop / img_size_flat_samples - 0.5
             
             # Reshape back to [B, num_samples, N, 2]
-            mhr_sample_keypoints_2d_cropped = mhr_sample_keypoints_2d_crop.view(B, num_samples, N, 2)
+            mhr_sample_keypoints_2d_cropped = mhr_sample_keypoints_2d_crop.view(B, num_samples, -1, 2)
             outputs['mhr_samples_keypoints_2d_cropped'] = mhr_sample_keypoints_2d_cropped
         
-        # Single forward pass through pose branch
         return outputs
 
 

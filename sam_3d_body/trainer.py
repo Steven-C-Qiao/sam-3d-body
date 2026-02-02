@@ -87,8 +87,9 @@ class Trainer(BaseLightningModule):
                 state_dict = checkpoint
             self.model.load_state_dict(state_dict, strict=False)
 
-            for param in self.model.parameters():
-                param.requires_grad = False
+            if self.cfg.TRAIN.FREEZE_BACKBONE:
+                for param in self.model.parameters():
+                    param.requires_grad = False
             for param in self.model.head_pose.shape_uncertainty_proj.parameters():
                 param.requires_grad = True
             for param in self.model.head_pose.scale_uncertainty_proj.parameters():
@@ -119,6 +120,7 @@ class Trainer(BaseLightningModule):
 
         self.log_metrics(loss_dict, metrics, batch, outputs)
 
+
         return loss_dict["total_loss"]
 
     def log_metrics(self, loss_dict: Dict, metrics: Dict, batch: Dict, outputs: Dict):
@@ -147,8 +149,11 @@ class Trainer(BaseLightningModule):
                 sync_dist=True,
             )
 
-        # Log images every 500 steps to reduce overhead
-        if self.global_step % 1000 == 0:
+        should_visualize = (
+            self.global_step in [0, 1000, 2000, 3000, 4000] or
+            (self.global_step > 4000 and self.global_step % 5000 == 0)
+        )
+        if should_visualize:
             # if True:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized

@@ -211,9 +211,12 @@ class MHRHead(nn.Module):
         if len(shape_params.shape) == 1:
             shape_params = shape_params[None]
         ## Convert scale...
-        scales = self.scale_mean[None, :] + scale_params @ self.scale_comps
         if scale_offsets is not None:
-            scales = scales + scale_offsets
+            # modifying to serve as workaround 
+            # scales = scales + scale_offsets
+            scales = scale_offsets 
+        else:
+            scales = self.scale_mean[None, :] + scale_params @ self.scale_comps
 
         # Now, figure out the pose.
         ## 10 here is because it's more stable to optimize global translation in meters.
@@ -355,6 +358,7 @@ class MHRHead(nn.Module):
         j3d[..., [1, 2]] *= -1  # Camera system difference
         if jcoords is not None:
             jcoords[..., [1, 2]] *= -1
+        # These are now the wrong way up in 3D space, and projects correctly onto the image.
 
         # Prep outputs
         output = {
@@ -416,10 +420,10 @@ class MHRUncertaintyHead(MHRHead):
         )
 
         # Pose uncertainty in axis-angle space:
-        # - 3 for global rotation
+        ### # - 3 for global rotation
         # - 3 per 3-DoF body joint (NUM_BODY_3DOF_JOINTS)
         # - 1 per 1-DoF body joint angle (NUM_BODY_1DOF_ANGLES) in angle space
-        self.axis_angle_pose_dim = 3 * (1 + self.num_body_3dof_joints) + self.num_body_1dof_angles
+        self.axis_angle_pose_dim = 3 * (self.num_body_3dof_joints) + self.num_body_1dof_angles
         
         # Create series of FFNs with gradually smaller channels, each with 4 layers
         # Channel progression: input_dim -> input_dim//2 -> input_dim//4 -> output_dim
