@@ -132,121 +132,81 @@ class Metrics(pl.LightningModule):
     def forward(self, predictions, batch):
         metrics = {}
 
-        # Compute metrics for mean prediction (70 sapiens + dense 3D keypoints)
-        if "mhr" in predictions and "pred_keypoints_3d" in predictions["mhr"]:
-            gt_kp3d_mean = batch["keypoints_3d"]  # [B, N, 3] (70 + dense)
-            pred_kp3d_mean = predictions["mhr"][
-                "pred_keypoints_3d"
-            ]  # [B, N, 3] (70 + dense)
+        if "pred_keypoints_3d" in predictions["mhr"]:
+            gt_kp3d = batch["keypoints_3d"]
+            pred_kp3d = predictions["mhr"]["pred_keypoints_3d"]
 
-            # Ensure shapes match (handle batch dimension if needed)
-            if gt_kp3d_mean.shape[0] != pred_kp3d_mean.shape[0]:
-                gt_kp3d_mean = gt_kp3d_mean[: pred_kp3d_mean.shape[0]]
-
-            # Apply camera coordinate system transformation to GT keypoints to match predictions
-            # Predictions have [1, 2] *= -1 applied (camera system difference)
-            gt_kp3d_mean = gt_kp3d_mean.clone()
-            gt_kp3d_mean[..., [1, 2]] *= -1
-
-            # MPJPE: use only first 70 keypoints (sapiens keypoints)
-            gt_kp3d_70 = gt_kp3d_mean[:, :70]  # [B, 70, 3]
-            pred_kp3d_70 = pred_kp3d_mean[:, :70]  # [B, 70, 3]
             mpjpe_mean = self.mpjpe(
-                pred_kp3d_70.unsqueeze(1),  # [B, 1, 70, 3]
-                gt_kp3d_70.unsqueeze(1),  # [B, 1, 70, 3]
+                pred_kp3d[:, :70, :],
+                gt_kp3d[:, :70, :],
             )
             metrics["mpjpe"] = mpjpe_mean
 
-            # PAMPJPE: use only first 70 keypoints (sapiens keypoints)
             pampjpe_mean = self.pampjpe(
-                pred_kp3d_70.reshape(-1, 70, 3).cpu().detach().numpy(),
-                gt_kp3d_70.reshape(-1, 70, 3).cpu().detach().numpy(),
+                pred_kp3d[:, :70, :].cpu().detach().numpy(),
+                gt_kp3d[:, :70, :].cpu().detach().numpy(),
             )
             metrics["pampjpe"] = pampjpe_mean
 
-            # PVE: use dense keypoints (indices 70:)
-            if pred_kp3d_mean.shape[1] > 70:
-                gt_kp3d_dense = gt_kp3d_mean[:, 70:]  # [B, N_dense, 3]
-                pred_kp3d_dense = pred_kp3d_mean[:, 70:]  # [B, N_dense, 3]
-                pve_mean = self.pve(
-                    pred_kp3d_dense, gt_kp3d_dense  # [B, N_dense, 3]  # [B, N_dense, 3]
-                )
+            if pred_kp3d.shape[1] > 70:
+                pve_mean = self.pve(pred_kp3d[:, 70:, :], gt_kp3d[:, 70:, :])
                 metrics["pve"] = pve_mean
 
-        # Compute metrics for samples (70 sapiens + dense 3D keypoints)
         if "mhr_samples_keypoints_3d" in predictions:
-            num_samples = predictions["mhr_samples_keypoints_3d"].shape[1]
+            pred_kp3d_samples = predictions["mhr_samples_keypoints_3d"]
+            num_samples = pred_kp3d_samples.shape[1]
             gt_kp3d_samples = batch["keypoints_3d"][:, None].expand(
                 -1, num_samples, -1, -1
-            )  # [B, num_samples, N, 3]
-            pred_kp3d_samples = predictions[
-                "mhr_samples_keypoints_3d"
-            ]  # [B, num_samples, N, 3]
+            )
 
-            # Apply camera coordinate system transformation to GT keypoints to match predictions
-            # Predictions have [1, 2] *= -1 applied (camera system difference)
-            gt_kp3d_samples = gt_kp3d_samples.clone()
-            gt_kp3d_samples[..., [1, 2]] *= -1
-
-            # MPJPE: use only first 70 keypoints (sapiens keypoints)
-            gt_kp3d_samples_70 = gt_kp3d_samples[:, :, :70]  # [B, num_samples, 70, 3]
-            pred_kp3d_samples_70 = pred_kp3d_samples[
-                :, :, :70
-            ]  # [B, num_samples, 70, 3]
-            mpjpe_samples = self.mpjpe(pred_kp3d_samples_70, gt_kp3d_samples_70)
+            mpjpe_samples = self.mpjpe(
+                pred_kp3d_samples[:, :, :70, :], gt_kp3d_samples[:, :, :70, :]
+            )
             metrics["mpjpe_samples"] = mpjpe_samples
 
-            # PAMPJPE: use only first 70 keypoints (sapiens keypoints)
             pampjpe_samples = self.pampjpe(
-                pred_kp3d_samples_70.reshape(-1, 70, 3).cpu().detach().numpy(),
-                gt_kp3d_samples_70.reshape(-1, 70, 3).cpu().detach().numpy(),
+                pred_kp3d_samples[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
+                gt_kp3d_samples[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
             )
             metrics["pampjpe_samples"] = pampjpe_samples
 
-            # PVE: use dense keypoints (indices 70:)
             if pred_kp3d_samples.shape[2] > 70:
-                gt_kp3d_samples_dense = gt_kp3d_samples[
-                    :, :, 70:
-                ]  # [B, num_samples, N_dense, 3]
-                pred_kp3d_samples_dense = pred_kp3d_samples[
-                    :, :, 70:
-                ]  # [B, num_samples, N_dense, 3]
                 pve_samples = self.pve(
-                    pred_kp3d_samples_dense,  # [B, num_samples, N_dense, 3]
-                    gt_kp3d_samples_dense,  # [B, num_samples, N_dense, 3]
+                    pred_kp3d_samples[:, :, 70:, :],
+                    gt_kp3d_samples[:, :, 70:, :],
                 )
                 metrics["pve_samples"] = pve_samples
 
-        # Compute 2D keypoint L1 distance metrics for mean prediction
-        if "mhr" in predictions and "pred_keypoints_2d_cropped" in predictions["mhr"]:
-            gt_kp2d_mean = batch[
-                "keypoints_2d"
-            ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
-            pred_kp2d_mean = predictions["mhr"][
-                "pred_keypoints_2d_cropped"
-            ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
+        # # Compute 2D keypoint L1 distance metrics for mean prediction
+        # if "mhr" in predictions and "pred_keypoints_2d_cropped" in predictions["mhr"]:
+        #     gt_kp2d_mean = batch[
+        #         "keypoints_2d"
+        #     ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
+        #     pred_kp2d_mean = predictions["mhr"][
+        #         "pred_keypoints_2d_cropped"
+        #     ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
 
-            # Ensure shapes match (handle batch dimension if needed)
-            if gt_kp2d_mean.shape[0] != pred_kp2d_mean.shape[0]:
-                gt_kp2d_mean = gt_kp2d_mean[: pred_kp2d_mean.shape[0]]
+        #     # Ensure shapes match (handle batch dimension if needed)
+        #     if gt_kp2d_mean.shape[0] != pred_kp2d_mean.shape[0]:
+        #         gt_kp2d_mean = gt_kp2d_mean[: pred_kp2d_mean.shape[0]]
 
-            # Compute L1 distance for mean prediction
-            kp2d_l1_mean = self.avg_kp2d_l1_dist(pred_kp2d_mean, gt_kp2d_mean)
-            metrics["kp2d_l1"] = kp2d_l1_mean
+        #     # Compute L1 distance for mean prediction
+        #     kp2d_l1_mean = self.avg_kp2d_l1_dist(pred_kp2d_mean, gt_kp2d_mean)
+        #     metrics["kp2d_l1"] = kp2d_l1_mean
 
-        # Compute 2D keypoint L1 distance metrics for samples
-        if "mhr_samples_keypoints_2d_cropped" in predictions:
-            num_samples = predictions["mhr_samples_keypoints_2d_cropped"].shape[1]
-            gt_kp2d_samples = batch["keypoints_2d"][:, None].expand(
-                -1, num_samples, -1, -1
-            )  # [B, num_samples, N, 2]
-            pred_kp2d_samples = predictions[
-                "mhr_samples_keypoints_2d_cropped"
-            ]  # [B, num_samples, N, 2]
+        # # Compute 2D keypoint L1 distance metrics for samples
+        # if "mhr_samples_keypoints_2d_cropped" in predictions:
+        #     num_samples = predictions["mhr_samples_keypoints_2d_cropped"].shape[1]
+        #     gt_kp2d_samples = batch["keypoints_2d"][:, None].expand(
+        #         -1, num_samples, -1, -1
+        #     )  # [B, num_samples, N, 2]
+        #     pred_kp2d_samples = predictions[
+        #         "mhr_samples_keypoints_2d_cropped"
+        #     ]  # [B, num_samples, N, 2]
 
-            # Compute L1 distance for samples
-            kp2d_l1_samples = self.avg_kp2d_l1_dist(pred_kp2d_samples, gt_kp2d_samples)
-            metrics["kp2d_l1_samples"] = kp2d_l1_samples
+        #     # Compute L1 distance for samples
+        #     kp2d_l1_samples = self.avg_kp2d_l1_dist(pred_kp2d_samples, gt_kp2d_samples)
+        #     metrics["kp2d_l1_samples"] = kp2d_l1_samples
 
         # print(metrics)
         # import ipdb; ipdb.set_trace()

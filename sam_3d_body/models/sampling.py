@@ -144,10 +144,10 @@ def gen_samples(
     """
     shape_mean = output["shape"]
     shape_var = output["shape_uncertainty"]
-    shape_var = torch.zeros_like(shape_var)
+
     scale_mean = output["scale"]
     scale_var = output["scale_uncertainty"]
-    scale_var = torch.zeros_like(scale_var)
+
     pose_mean = output["pred_pose_raw"][:, 6:]
     pose_var = output["pose_uncertainty"]
     shape_samples = sample_shape(shape_mean, shape_var, num_samples)
