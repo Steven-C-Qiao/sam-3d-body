@@ -120,7 +120,6 @@ class Trainer(BaseLightningModule):
 
         self.log_metrics(loss_dict, metrics, batch, outputs)
 
-
         return loss_dict["total_loss"]
 
     def log_metrics(self, loss_dict: Dict, metrics: Dict, batch: Dict, outputs: Dict):
@@ -149,9 +148,8 @@ class Trainer(BaseLightningModule):
                 sync_dist=True,
             )
 
-        should_visualize = (
-            self.global_step in [0, 1000, 2000, 3000, 4000] or
-            (self.global_step > 4000 and self.global_step % 5000 == 0)
+        should_visualize = self.global_step in [0, 1000, 2000, 3000, 4000] or (
+            self.global_step > 4000 and self.global_step % 5000 == 0
         )
         if should_visualize:
             # if True:

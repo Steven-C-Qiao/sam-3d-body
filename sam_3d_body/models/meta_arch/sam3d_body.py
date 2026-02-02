@@ -54,6 +54,7 @@ KEY_RIGHT_HAND = list(range(21, 42))
 
 
 class SAM3DBody(BaseModel):
+    # fmt: off
     pelvis_idx = [9, 10]  # left_hip, right_hip
 
     def _initialze_model(self):
@@ -743,8 +744,7 @@ class SAM3DBody(BaseModel):
             "image_embeddings": image_embeddings,
         }
         return output
-
-
+    # fmt: on
 
     def forward(self, batch: Dict, num_samples: int = 0) -> Dict:
         """
@@ -758,7 +758,6 @@ class SAM3DBody(BaseModel):
         self.hand_batch_idx = []
         self.body_batch_idx = list(range(B * N))
 
-
         outputs = self.forward_pose_branch(batch)
 
         if num_samples > 0:
@@ -769,9 +768,10 @@ class SAM3DBody(BaseModel):
             global_rot_6d_mean = output_mhr["pred_pose_raw"][:, :6]
             global_rot_mat_mean = rot6d_to_rotmat(global_rot_6d_mean)
             global_rot_euler_mean = roma.rotmat_to_euler("ZYX", global_rot_mat_mean)
-            global_rot_euler_mean = global_rot_euler_mean.repeat_interleave(num_samples, dim=0)
+            global_rot_euler_mean = global_rot_euler_mean.repeat_interleave(
+                num_samples, dim=0
+            )
             global_trans = torch.zeros_like(global_rot_euler_mean)
-
 
             shape_samples, scale_samples, pose_samples = gen_samples(
                 output_mhr, num_samples, sample_pose=self.sample_pose
@@ -780,14 +780,15 @@ class SAM3DBody(BaseModel):
             scale_samples = scale_samples.view(-1, scale_samples.shape[-1])
             pose_samples = pose_samples.view(-1, pose_samples.shape[-1])
 
-
             mhr_output = self.head_pose.mhr_forward(
                 scale_params=torch.zeros_like(scale_samples),
                 shape_params=shape_samples,
                 global_trans=global_trans,
                 global_rot=global_rot_euler_mean,
                 body_pose_params=pose_samples,
-                hand_pose_params=output_mhr["hand"].repeat_interleave(num_samples, dim=0),
+                hand_pose_params=output_mhr["hand"].repeat_interleave(
+                    num_samples, dim=0
+                ),
                 expr_params=output_mhr["face"].repeat_interleave(num_samples, dim=0),
                 do_pcblend=True,
                 return_keypoints=True,
@@ -800,28 +801,40 @@ class SAM3DBody(BaseModel):
             verts[..., [1, 2]] *= -1  # Camera system difference
             j3d[..., [1, 2]] *= -1
             j3d = j3d[:, :70]
-            if hasattr(self, "mhr_dense_kp_indices") and self.mhr_dense_kp_indices is not None:
+            if (
+                hasattr(self, "mhr_dense_kp_indices")
+                and self.mhr_dense_kp_indices is not None
+            ):
                 dense_kp3d = verts[:, self.mhr_dense_kp_indices]
                 j3d = torch.cat([j3d, dense_kp3d], dim=1)
 
-            outputs['mhr_samples'] = verts.view(B, num_samples, -1, 3)
-            outputs['mhr_samples_keypoints_3d'] = j3d.view(B, num_samples, -1, 3)
-            
-            j3d_flat = j3d.view(B * num_samples, -1, 3) # 
-            
+            outputs["mhr_samples"] = verts.view(B, num_samples, -1, 3)
+            outputs["mhr_samples_keypoints_3d"] = j3d.view(B, num_samples, -1, 3)
 
-            pred_cam = output_mhr['pred_cam']  # [B, 3]
+            j3d_flat = j3d.view(B * num_samples, -1, 3)  #
+
+            pred_cam = output_mhr["pred_cam"]  # [B, 3]
             pred_cam_flat = pred_cam.repeat_interleave(num_samples, dim=0)
-            
-            bbox_center_flat = self._flatten_person(batch["bbox_center"])[self.body_batch_idx]
-            bbox_center_expanded = bbox_center_flat.repeat_interleave(num_samples, dim=0)
-            
-            bbox_scale_flat = self._flatten_person(batch["bbox_scale"])[self.body_batch_idx, 0]
+
+            bbox_center_flat = self._flatten_person(batch["bbox_center"])[
+                self.body_batch_idx
+            ]
+            bbox_center_expanded = bbox_center_flat.repeat_interleave(
+                num_samples, dim=0
+            )
+
+            bbox_scale_flat = self._flatten_person(batch["bbox_scale"])[
+                self.body_batch_idx, 0
+            ]
             bbox_scale_expanded = bbox_scale_flat.repeat_interleave(num_samples, dim=0)
-            
-            ori_img_size_flat = self._flatten_person(batch["ori_img_size"])[self.body_batch_idx]
-            ori_img_size_expanded = ori_img_size_flat.repeat_interleave(num_samples, dim=0)
-            
+
+            ori_img_size_flat = self._flatten_person(batch["ori_img_size"])[
+                self.body_batch_idx
+            ]
+            ori_img_size_expanded = ori_img_size_flat.repeat_interleave(
+                num_samples, dim=0
+            )
+
             cam_int_flat = self._flatten_person(
                 batch["cam_int"]
                 .unsqueeze(1)
@@ -829,7 +842,7 @@ class SAM3DBody(BaseModel):
                 .contiguous()
             )[self.body_batch_idx]
             cam_int_expanded = cam_int_flat.repeat_interleave(num_samples, dim=0)
-            
+
             # Project to 2D (full image coordinates)
             cam_out_samples = self.head_camera.perspective_projection(
                 j3d_flat,
@@ -838,48 +851,77 @@ class SAM3DBody(BaseModel):
                 bbox_scale_expanded,
                 ori_img_size_expanded,
                 cam_int_expanded,
-                use_intrin_center=self.cfg.MODEL.DECODER.get("USE_INTRIN_CENTER", False),
+                use_intrin_center=self.cfg.MODEL.DECODER.get(
+                    "USE_INTRIN_CENTER", False
+                ),
             )
-            
+
             # Get full image 2D keypoints: [B * num_samples, N, 2]
             mhr_sample_keypoints_2d_full = cam_out_samples["pred_keypoints_2d"]
-            
+
             # Reshape full image keypoints to [B, num_samples, N, 2]
-            mhr_sample_keypoints_2d = mhr_sample_keypoints_2d_full.view(B, num_samples, -1, 2)
-            outputs['mhr_samples_keypoints_2d'] = mhr_sample_keypoints_2d
-            
+            mhr_sample_keypoints_2d = mhr_sample_keypoints_2d_full.view(
+                B, num_samples, -1, 2
+            )
+            outputs["mhr_samples_keypoints_2d"] = mhr_sample_keypoints_2d
+
             # Convert from full image coordinates to cropped pixel space
             # Add homogeneous coordinate for affine transformation
             mhr_sample_keypoints_2d_h = torch.cat(
-                [mhr_sample_keypoints_2d_full, torch.ones_like(mhr_sample_keypoints_2d_full[..., :1])], 
-                dim=-1
+                [
+                    mhr_sample_keypoints_2d_full,
+                    torch.ones_like(mhr_sample_keypoints_2d_full[..., :1]),
+                ],
+                dim=-1,
             )  # [B * num_samples, N, 3]
-            
+
             # Get affine transformation for samples
             # affine_trans shape: [B*N, 2, 3] (from _flatten_person)
-            affine_trans_flat = self._flatten_person(batch["affine_trans"])[self.body_batch_idx]
-            affine_trans_expanded = affine_trans_flat.unsqueeze(1).expand(-1, num_samples, -1, -1).float().contiguous()
-            affine_trans_flat_samples = affine_trans_expanded.view(B * num_samples, 2, 3)
-            
+            affine_trans_flat = self._flatten_person(batch["affine_trans"])[
+                self.body_batch_idx
+            ]
+            affine_trans_expanded = (
+                affine_trans_flat.unsqueeze(1)
+                .expand(-1, num_samples, -1, -1)
+                .float()
+                .contiguous()
+            )
+            affine_trans_flat_samples = affine_trans_expanded.view(
+                B * num_samples, 2, 3
+            )
+
             # Apply affine transformation to convert to cropped pixel space
             # [B * num_samples, N, 3] @ [B * num_samples, 3, 2] = [B * num_samples, N, 2]
-            mhr_sample_keypoints_2d_crop = mhr_sample_keypoints_2d_h @ affine_trans_flat_samples.mT
+            mhr_sample_keypoints_2d_crop = (
+                mhr_sample_keypoints_2d_h @ affine_trans_flat_samples.mT
+            )
             mhr_sample_keypoints_2d_crop = mhr_sample_keypoints_2d_crop[..., :2]
-            
+
             # Normalize to [-0.5, 0.5] to match pred_keypoints_2d_cropped coordinate space
             # Get img_size for samples: [B * num_samples, 1, 2]
             img_size_flat = self._flatten_person(batch["img_size"])[self.body_batch_idx]
-            img_size_expanded = img_size_flat.unsqueeze(1).expand(-1, num_samples, -1).float().contiguous()
+            img_size_expanded = (
+                img_size_flat.unsqueeze(1)
+                .expand(-1, num_samples, -1)
+                .float()
+                .contiguous()
+            )
             img_size_flat_samples = img_size_expanded.view(B * num_samples, 1, 2)
-            mhr_sample_keypoints_2d_crop = mhr_sample_keypoints_2d_crop / img_size_flat_samples - 0.5
-            
+            mhr_sample_keypoints_2d_crop = (
+                mhr_sample_keypoints_2d_crop / img_size_flat_samples - 0.5
+            )
+
             # Reshape back to [B, num_samples, N, 2]
-            mhr_sample_keypoints_2d_cropped = mhr_sample_keypoints_2d_crop.view(B, num_samples, -1, 2)
-            outputs['mhr_samples_keypoints_2d_cropped'] = mhr_sample_keypoints_2d_cropped
-        
+            mhr_sample_keypoints_2d_cropped = mhr_sample_keypoints_2d_crop.view(
+                B, num_samples, -1, 2
+            )
+            outputs["mhr_samples_keypoints_2d_cropped"] = (
+                mhr_sample_keypoints_2d_cropped
+            )
+
         return outputs
 
-
+    # fmt: off
     def run_keypoint_prompt(self, batch, output, keypoint_prompt):
         image_embeddings = output["image_embeddings"]
         condition_info = output["condition_info"]
@@ -1257,3 +1299,4 @@ class SAM3DBody(BaseModel):
         ] = self.keypoint3d_posemb_linear_hand(pred_keypoints_3d)
 
         return token_embeddings, token_augment, pose_output, layer_idx
+    # fmt: on

@@ -1,4 +1,4 @@
-import torch 
+import torch
 import pytorch_lightning as pl
 import numpy as np
 
@@ -16,14 +16,14 @@ def compute_similarity_transform(S1, S2):
         S1 = S1.T
         S2 = S2.T
         transposed = True
-    assert(S2.shape[1] == S1.shape[1])
+    assert S2.shape[1] == S1.shape[1]
 
     # 1. Remove mean.
     mu1 = S1.mean(axis=1, keepdims=True)
     mu2 = S2.mean(axis=1, keepdims=True)
     X1 = S1 - mu1
     X2 = S2 - mu2
-    
+
     # 2. Compute variance of X1 used for scale.
     var1 = np.sum(X1**2)
 
@@ -40,15 +40,14 @@ def compute_similarity_transform(S1, S2):
     # Construct R.
     R = V.dot(Z.dot(U.T))
 
-
     # 5. Recover scale.
     scale = np.trace(R.dot(K)) / var1
 
     # 6. Recover translation.
-    t = mu2 - scale*(R.dot(mu1))
+    t = mu2 - scale * (R.dot(mu1))
 
     # 7. Error:
-    S1_hat = scale*R.dot(S1) + t
+    S1_hat = scale * R.dot(S1) + t
 
     if transposed:
         S1_hat = S1_hat.T
@@ -63,15 +62,16 @@ def compute_similarity_transform_batch(S1, S2):
         S1_hat[i] = compute_similarity_transform(S1[i], S2[i])
     return S1_hat
 
-def reconstruction_error(S1, S2, reduction='mean'):
+
+def reconstruction_error(S1, S2, reduction="mean"):
     """Do Procrustes alignment and compute reconstruction error."""
     S1_hat = compute_similarity_transform_batch(S1, S2)
 
-    re_per_joint = np.sqrt( ((S1_hat - S2)** 2).sum(axis=-1))
+    re_per_joint = np.sqrt(((S1_hat - S2) ** 2).sum(axis=-1))
     re = re_per_joint
-    if reduction == 'mean':
+    if reduction == "mean":
         re = re.mean()
-    elif reduction == 'sum':
+    elif reduction == "sum":
         re = re.sum()
     else:
         re = re
@@ -89,14 +89,17 @@ def scale_and_translation_transform_batch(P, T):
     """
     P_mean = np.mean(P, axis=-2, keepdims=True)
     P_trans = P - P_mean
-    P_scale = np.sqrt(np.sum(P_trans ** 2, axis=(-2, -1), keepdims=True) / P.shape[-2])
+    P_scale = np.sqrt(np.sum(P_trans**2, axis=(-2, -1), keepdims=True) / P.shape[-2])
     P_normalised = P_trans / P_scale
 
     T_mean = np.mean(T, axis=-2, keepdims=True)
-    T_scale = np.sqrt(np.sum((T - T_mean) ** 2, axis=(-2, -1), keepdims=True) / T.shape[-2])
+    T_scale = np.sqrt(
+        np.sum((T - T_mean) ** 2, axis=(-2, -1), keepdims=True) / T.shape[-2]
+    )
     P_transformed = P_normalised * T_scale + T_mean
 
     return P_transformed
+
 
 def scale_and_translation_transform_batch_torch(P, T):
     """
@@ -109,69 +112,76 @@ def scale_and_translation_transform_batch_torch(P, T):
     """
     P_mean = torch.mean(P, dim=1, keepdim=True)
     P_trans = P - P_mean
-    P_scale = torch.sqrt(torch.sum(P_trans ** 2, dim=(1, 2), keepdim=True) / P.shape[1])
+    P_scale = torch.sqrt(torch.sum(P_trans**2, dim=(1, 2), keepdim=True) / P.shape[1])
     P_normalised = P_trans / P_scale
 
     T_mean = torch.mean(T, dim=1, keepdim=True)
-    T_scale = torch.sqrt(torch.sum((T - T_mean) ** 2, dim=(1, 2), keepdim=True) / T.shape[1])
+    T_scale = torch.sqrt(
+        torch.sum((T - T_mean) ** 2, dim=(1, 2), keepdim=True) / T.shape[1]
+    )
 
     P_transformed = P_normalised * T_scale + T_mean
 
     return P_transformed
 
+
 class Metrics(pl.LightningModule):
     def __init__(self):
         super().__init__()
-        
+
     def forward(self, predictions, batch):
         metrics = {}
-        
 
         # Compute metrics for mean prediction (70 sapiens + dense 3D keypoints)
-        if 'mhr' in predictions and 'pred_keypoints_3d' in predictions['mhr']:
-            gt_kp3d_mean = batch['keypoints_3d']  # [B, N, 3] (70 + dense)
-            pred_kp3d_mean = predictions['mhr']['pred_keypoints_3d']  # [B, N, 3] (70 + dense)
+        if "mhr" in predictions and "pred_keypoints_3d" in predictions["mhr"]:
+            gt_kp3d_mean = batch["keypoints_3d"]  # [B, N, 3] (70 + dense)
+            pred_kp3d_mean = predictions["mhr"][
+                "pred_keypoints_3d"
+            ]  # [B, N, 3] (70 + dense)
 
             # Ensure shapes match (handle batch dimension if needed)
             if gt_kp3d_mean.shape[0] != pred_kp3d_mean.shape[0]:
-                gt_kp3d_mean = gt_kp3d_mean[:pred_kp3d_mean.shape[0]]
-            
+                gt_kp3d_mean = gt_kp3d_mean[: pred_kp3d_mean.shape[0]]
+
             # Apply camera coordinate system transformation to GT keypoints to match predictions
             # Predictions have [1, 2] *= -1 applied (camera system difference)
             gt_kp3d_mean = gt_kp3d_mean.clone()
             gt_kp3d_mean[..., [1, 2]] *= -1
-            
+
             # MPJPE: use only first 70 keypoints (sapiens keypoints)
             gt_kp3d_70 = gt_kp3d_mean[:, :70]  # [B, 70, 3]
             pred_kp3d_70 = pred_kp3d_mean[:, :70]  # [B, 70, 3]
             mpjpe_mean = self.mpjpe(
                 pred_kp3d_70.unsqueeze(1),  # [B, 1, 70, 3]
-                gt_kp3d_70.unsqueeze(1)      # [B, 1, 70, 3]
+                gt_kp3d_70.unsqueeze(1),  # [B, 1, 70, 3]
             )
-            metrics['mpjpe'] = mpjpe_mean
+            metrics["mpjpe"] = mpjpe_mean
 
             # PAMPJPE: use only first 70 keypoints (sapiens keypoints)
             pampjpe_mean = self.pampjpe(
-                pred_kp3d_70.reshape(-1, 70, 3).cpu().detach().numpy(), 
-                gt_kp3d_70.reshape(-1, 70, 3).cpu().detach().numpy()
+                pred_kp3d_70.reshape(-1, 70, 3).cpu().detach().numpy(),
+                gt_kp3d_70.reshape(-1, 70, 3).cpu().detach().numpy(),
             )
-            metrics['pampjpe'] = pampjpe_mean
+            metrics["pampjpe"] = pampjpe_mean
 
             # PVE: use dense keypoints (indices 70:)
             if pred_kp3d_mean.shape[1] > 70:
                 gt_kp3d_dense = gt_kp3d_mean[:, 70:]  # [B, N_dense, 3]
                 pred_kp3d_dense = pred_kp3d_mean[:, 70:]  # [B, N_dense, 3]
                 pve_mean = self.pve(
-                    pred_kp3d_dense,  # [B, N_dense, 3]
-                    gt_kp3d_dense     # [B, N_dense, 3]
+                    pred_kp3d_dense, gt_kp3d_dense  # [B, N_dense, 3]  # [B, N_dense, 3]
                 )
-                metrics['pve'] = pve_mean
+                metrics["pve"] = pve_mean
 
         # Compute metrics for samples (70 sapiens + dense 3D keypoints)
-        if 'mhr_samples_keypoints_3d' in predictions:
-            num_samples = predictions['mhr_samples_keypoints_3d'].shape[1]
-            gt_kp3d_samples = batch['keypoints_3d'][:, None].expand(-1, num_samples, -1, -1)  # [B, num_samples, N, 3]
-            pred_kp3d_samples = predictions['mhr_samples_keypoints_3d']  # [B, num_samples, N, 3]
+        if "mhr_samples_keypoints_3d" in predictions:
+            num_samples = predictions["mhr_samples_keypoints_3d"].shape[1]
+            gt_kp3d_samples = batch["keypoints_3d"][:, None].expand(
+                -1, num_samples, -1, -1
+            )  # [B, num_samples, N, 3]
+            pred_kp3d_samples = predictions[
+                "mhr_samples_keypoints_3d"
+            ]  # [B, num_samples, N, 3]
 
             # Apply camera coordinate system transformation to GT keypoints to match predictions
             # Predictions have [1, 2] *= -1 applied (camera system difference)
@@ -180,78 +190,87 @@ class Metrics(pl.LightningModule):
 
             # MPJPE: use only first 70 keypoints (sapiens keypoints)
             gt_kp3d_samples_70 = gt_kp3d_samples[:, :, :70]  # [B, num_samples, 70, 3]
-            pred_kp3d_samples_70 = pred_kp3d_samples[:, :, :70]  # [B, num_samples, 70, 3]
-            mpjpe_samples = self.mpjpe(
-                pred_kp3d_samples_70, 
-                gt_kp3d_samples_70
-            )
-            metrics['mpjpe_samples'] = mpjpe_samples
+            pred_kp3d_samples_70 = pred_kp3d_samples[
+                :, :, :70
+            ]  # [B, num_samples, 70, 3]
+            mpjpe_samples = self.mpjpe(pred_kp3d_samples_70, gt_kp3d_samples_70)
+            metrics["mpjpe_samples"] = mpjpe_samples
 
             # PAMPJPE: use only first 70 keypoints (sapiens keypoints)
             pampjpe_samples = self.pampjpe(
-                pred_kp3d_samples_70.reshape(-1, 70, 3).cpu().detach().numpy(), 
-                gt_kp3d_samples_70.reshape(-1, 70, 3).cpu().detach().numpy()
+                pred_kp3d_samples_70.reshape(-1, 70, 3).cpu().detach().numpy(),
+                gt_kp3d_samples_70.reshape(-1, 70, 3).cpu().detach().numpy(),
             )
-            metrics['pampjpe_samples'] = pampjpe_samples
+            metrics["pampjpe_samples"] = pampjpe_samples
 
             # PVE: use dense keypoints (indices 70:)
             if pred_kp3d_samples.shape[2] > 70:
-                gt_kp3d_samples_dense = gt_kp3d_samples[:, :, 70:]  # [B, num_samples, N_dense, 3]
-                pred_kp3d_samples_dense = pred_kp3d_samples[:, :, 70:]  # [B, num_samples, N_dense, 3]
+                gt_kp3d_samples_dense = gt_kp3d_samples[
+                    :, :, 70:
+                ]  # [B, num_samples, N_dense, 3]
+                pred_kp3d_samples_dense = pred_kp3d_samples[
+                    :, :, 70:
+                ]  # [B, num_samples, N_dense, 3]
                 pve_samples = self.pve(
                     pred_kp3d_samples_dense,  # [B, num_samples, N_dense, 3]
-                    gt_kp3d_samples_dense     # [B, num_samples, N_dense, 3]
+                    gt_kp3d_samples_dense,  # [B, num_samples, N_dense, 3]
                 )
-                metrics['pve_samples'] = pve_samples
+                metrics["pve_samples"] = pve_samples
 
         # Compute 2D keypoint L1 distance metrics for mean prediction
-        if 'mhr' in predictions and 'pred_keypoints_2d_cropped' in predictions['mhr']:
-            gt_kp2d_mean = batch['keypoints_2d']  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
-            pred_kp2d_mean = predictions['mhr']['pred_keypoints_2d_cropped']  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
+        if "mhr" in predictions and "pred_keypoints_2d_cropped" in predictions["mhr"]:
+            gt_kp2d_mean = batch[
+                "keypoints_2d"
+            ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
+            pred_kp2d_mean = predictions["mhr"][
+                "pred_keypoints_2d_cropped"
+            ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
 
             # Ensure shapes match (handle batch dimension if needed)
             if gt_kp2d_mean.shape[0] != pred_kp2d_mean.shape[0]:
-                gt_kp2d_mean = gt_kp2d_mean[:pred_kp2d_mean.shape[0]]
-            
+                gt_kp2d_mean = gt_kp2d_mean[: pred_kp2d_mean.shape[0]]
+
             # Compute L1 distance for mean prediction
             kp2d_l1_mean = self.avg_kp2d_l1_dist(pred_kp2d_mean, gt_kp2d_mean)
-            metrics['kp2d_l1'] = kp2d_l1_mean
+            metrics["kp2d_l1"] = kp2d_l1_mean
 
         # Compute 2D keypoint L1 distance metrics for samples
-        if 'mhr_samples_keypoints_2d_cropped' in predictions:
-            num_samples = predictions['mhr_samples_keypoints_2d_cropped'].shape[1]
-            gt_kp2d_samples = batch['keypoints_2d'][:, None].expand(-1, num_samples, -1, -1)  # [B, num_samples, N, 2]
-            pred_kp2d_samples = predictions['mhr_samples_keypoints_2d_cropped']  # [B, num_samples, N, 2]
+        if "mhr_samples_keypoints_2d_cropped" in predictions:
+            num_samples = predictions["mhr_samples_keypoints_2d_cropped"].shape[1]
+            gt_kp2d_samples = batch["keypoints_2d"][:, None].expand(
+                -1, num_samples, -1, -1
+            )  # [B, num_samples, N, 2]
+            pred_kp2d_samples = predictions[
+                "mhr_samples_keypoints_2d_cropped"
+            ]  # [B, num_samples, N, 2]
 
             # Compute L1 distance for samples
             kp2d_l1_samples = self.avg_kp2d_l1_dist(pred_kp2d_samples, gt_kp2d_samples)
-            metrics['kp2d_l1_samples'] = kp2d_l1_samples
-
+            metrics["kp2d_l1_samples"] = kp2d_l1_samples
 
         # print(metrics)
         # import ipdb; ipdb.set_trace()
 
         return metrics
-    
 
     def mpjpe(self, pred, gt):
         return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).mean()
-    
+
     def pampjpe(self, pred, gt):
         r_error, _ = reconstruction_error(pred, gt, reduction=None)
         return r_error.mean()
-    
+
     def pve(self, pred, gt):
         return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).mean()
-    
+
     def avg_kp2d_l1_dist(self, pred, gt):
         return torch.abs(pred - gt).mean()
 
-
-
     def pvetsc(self, pred, gt):
         pred_tpose_vertices_sc = scale_and_translation_transform_batch(pred, gt)
-        pvet_sc_batch = np.linalg.norm(pred_tpose_vertices_sc - gt, axis=-1)  # (bs, 6890)
+        pvet_sc_batch = np.linalg.norm(
+            pred_tpose_vertices_sc - gt, axis=-1
+        )  # (bs, 6890)
         import matplotlib.pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
 
@@ -262,7 +281,7 @@ class Metrics(pl.LightningModule):
         else:
             pred_plot = pred
             gt_plot = gt
-        
+
         # fig = plt.figure()
         # ax = fig.add_subplot(111, projection='3d')
         # ax.scatter(pred_plot[:, 0], pred_plot[:, 1], pred_plot[:, 2], c='r', label='pred', alpha=0.6)
@@ -273,4 +292,3 @@ class Metrics(pl.LightningModule):
         # plt.close()
         # import ipdb; ipdb.set_trace()
         return pvet_sc_batch.mean()
-    

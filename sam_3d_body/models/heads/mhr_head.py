@@ -36,7 +36,7 @@ except:
 
 
 class MHRHead(nn.Module):
-
+    # fmt: off
     def __init__(
         self,
         input_dim: int,
@@ -276,7 +276,8 @@ class MHRHead(nn.Module):
         if isinstance(to_return, list) and len(to_return) == 1:
             return to_return[0]
         else:
-            return tuple(to_return)
+            return tuple(to_return)    
+    # fmt: on
 
     def forward(
         self,
@@ -349,7 +350,10 @@ class MHRHead(nn.Module):
 
         # Optionally append dense keypoints (indexed on the mesh vertices) so that
         # downstream projections and metrics can use the full dense keypoint set.
-        if hasattr(self, "mhr_dense_kp_indices") and self.mhr_dense_kp_indices is not None:
+        if (
+            hasattr(self, "mhr_dense_kp_indices")
+            and self.mhr_dense_kp_indices is not None
+        ):
             dense_kp3d = verts[:, self.mhr_dense_kp_indices]
             j3d = torch.cat([j3d, dense_kp3d], dim=1)
 
@@ -387,8 +391,6 @@ class MHRHead(nn.Module):
         return output
 
 
-
-
 class MHRUncertaintyHead(MHRHead):
     def __init__(
         self,
@@ -401,7 +403,7 @@ class MHRUncertaintyHead(MHRHead):
         enable_hand_model=False,
     ):
         super().__init__(
-            input_dim=input_dim,    
+            input_dim=input_dim,
             mlp_depth=mlp_depth,
             mhr_model_path=mhr_model_path,
             extra_joint_regressor=extra_joint_regressor,
@@ -423,8 +425,10 @@ class MHRUncertaintyHead(MHRHead):
         ### # - 3 for global rotation
         # - 3 per 3-DoF body joint (NUM_BODY_3DOF_JOINTS)
         # - 1 per 1-DoF body joint angle (NUM_BODY_1DOF_ANGLES) in angle space
-        self.axis_angle_pose_dim = 3 * (self.num_body_3dof_joints) + self.num_body_1dof_angles
-        
+        self.axis_angle_pose_dim = (
+            3 * (self.num_body_3dof_joints) + self.num_body_1dof_angles
+        )
+
         # Create series of FFNs with gradually smaller channels, each with 4 layers
         # Channel progression: input_dim -> input_dim//2 -> input_dim//4 -> output_dim
         self.pose_uncertainty_proj = nn.Sequential(
@@ -456,7 +460,6 @@ class MHRUncertaintyHead(MHRHead):
                 add_identity=False,
             ),
         )
-
 
         selected_scale_comps_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
         num_scales = len(selected_scale_comps_indices)
@@ -490,7 +493,6 @@ class MHRUncertaintyHead(MHRHead):
             add_identity=False,
         )
 
-
     def forward(
         self,
         x: torch.Tensor,
@@ -505,10 +507,10 @@ class MHRUncertaintyHead(MHRHead):
         """
         batch_size = x.shape[0]
         pred = self.proj(x)
-        
+
         shape_uncertainty = self.shape_uncertainty_proj(x)
         shape_uncertainty = torch.exp(shape_uncertainty)
-        
+
         scale_uncertainty = self.scale_uncertainty_proj(x)
         scale_uncertainty = torch.exp(scale_uncertainty)
 
@@ -564,7 +566,6 @@ class MHRUncertaintyHead(MHRHead):
             return_model_params=True,
             return_joint_rotations=True,
         )
-
 
         # Some existing code to get joints and fix camera system
         verts, j3d, jcoords, mhr_model_params, joint_global_rots = output
