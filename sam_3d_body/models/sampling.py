@@ -17,7 +17,7 @@ from pytorch3d.transforms import (
     matrix_to_euler_angles,
 )
 
-path = "/scratch/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/"
+path = "/scratches/juban/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/"
 
 scale_bias = np.load(os.path.join(path, "scale_mean.npy"))
 scale_comps = np.load(os.path.join(path, "scale_comps.npy"))
@@ -65,15 +65,15 @@ def sample_scale(scale_mean, scale_var, num_samples=4):
     return scale_68D
 
 
-def sample_pose(body_pose_cont, var, num_samples=4):
+def gen_pose_samples(body_pose_cont, var, num_samples=4):
     # fmt: off
     all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
     all_param_1dof_rot_idxs = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 74, 75, 77, 78, 80, 81, 83, 84, 89, 90, 94, 95, 101, 102, 104, 105, 107, 108, 110, 111, 116, 117, 118, 119, 120, 121, 122, 123])
     all_param_1dof_trans_idxs = torch.LongTensor([124, 125, 126, 127, 128, 129])
     # fmt: on
-    num_3dof_angles = len(all_param_3dof_rot_idxs) * 3
-    num_1dof_angles = len(all_param_1dof_rot_idxs)
-    num_1dof_trans = len(all_param_1dof_trans_idxs)
+    num_3dof_angles = len(all_param_3dof_rot_idxs) * 3  # 69
+    num_1dof_angles = len(all_param_1dof_rot_idxs)  # 58
+    num_1dof_trans = len(all_param_1dof_trans_idxs)  # 6
     assert body_pose_cont.shape[-1] == (
         2 * num_3dof_angles + 2 * num_1dof_angles + num_1dof_trans
     )
@@ -150,10 +150,11 @@ def gen_samples(
 
     pose_mean = output["pred_pose_raw"][:, 6:]
     pose_var = output["pose_uncertainty"]
+    
     shape_samples = sample_shape(shape_mean, shape_var, num_samples)
     scale_samples = sample_scale(scale_mean, scale_var, num_samples)
     if pose_mean is not None and pose_var is not None and sample_pose:
-        pose_samples = sample_pose(pose_mean, pose_var, num_samples)
+        pose_samples = gen_pose_samples(pose_mean, pose_var, num_samples)
     elif pose_mean is not None:
         # Use mean pose repeated for each sample (no pose sampling)
         body_pose_mean_133 = compact_cont_to_model_params_body(pose_mean)

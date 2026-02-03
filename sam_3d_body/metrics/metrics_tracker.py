@@ -177,38 +177,8 @@ class Metrics(pl.LightningModule):
                 )
                 metrics["pve_samples"] = pve_samples
 
-        # # Compute 2D keypoint L1 distance metrics for mean prediction
-        # if "mhr" in predictions and "pred_keypoints_2d_cropped" in predictions["mhr"]:
-        #     gt_kp2d_mean = batch[
-        #         "keypoints_2d"
-        #     ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
-        #     pred_kp2d_mean = predictions["mhr"][
-        #         "pred_keypoints_2d_cropped"
-        #     ]  # [B, N, 2] (in normalized cropped coords [-0.5, 0.5])
-
-        #     # Ensure shapes match (handle batch dimension if needed)
-        #     if gt_kp2d_mean.shape[0] != pred_kp2d_mean.shape[0]:
-        #         gt_kp2d_mean = gt_kp2d_mean[: pred_kp2d_mean.shape[0]]
-
-        #     # Compute L1 distance for mean prediction
-        #     kp2d_l1_mean = self.avg_kp2d_l1_dist(pred_kp2d_mean, gt_kp2d_mean)
-        #     metrics["kp2d_l1"] = kp2d_l1_mean
-
-        # # Compute 2D keypoint L1 distance metrics for samples
-        # if "mhr_samples_keypoints_2d_cropped" in predictions:
-        #     num_samples = predictions["mhr_samples_keypoints_2d_cropped"].shape[1]
-        #     gt_kp2d_samples = batch["keypoints_2d"][:, None].expand(
-        #         -1, num_samples, -1, -1
-        #     )  # [B, num_samples, N, 2]
-        #     pred_kp2d_samples = predictions[
-        #         "mhr_samples_keypoints_2d_cropped"
-        #     ]  # [B, num_samples, N, 2]
-
-        #     # Compute L1 distance for samples
-        #     kp2d_l1_samples = self.avg_kp2d_l1_dist(pred_kp2d_samples, gt_kp2d_samples)
-        #     metrics["kp2d_l1_samples"] = kp2d_l1_samples
-
-        # print(metrics)
+        # for k, v in metrics.items():
+        #     print(f"{k}: {v:.4f}")
         # import ipdb; ipdb.set_trace()
 
         return metrics

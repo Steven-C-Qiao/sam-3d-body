@@ -10,7 +10,7 @@ from pathlib import Path
 from loguru import logger
 
 import pytorch_lightning as pl
-
+from pytorch_lightning.strategies import DDPStrategy
 # Set PyTorch multiprocessing sharing strategy to file_system to avoid "Too many open files" error
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -35,6 +35,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         cfg.TRAIN.NUM_EPOCHS = 5
         cfg.DATASET.BATCH_SIZE = 2
         cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
+        cfg.DATASET.NUM_WORKERS = 4
         exp_dir = "exp/exp_test"
         num_sanity_val_steps = 0
     else:
@@ -67,7 +68,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         "every_n_epochs": 5,  # Save checkpoint every 5 epochs
         "save_last": True,
         "verbose": True,
-        "monitor": "loss_shape_params",
+        "monitor": "val_total_loss",
         "mode": "min",
     }
     checkpoint_callbacks = [ModelCheckpoint(**checkpoint_kwargs)]
@@ -117,7 +118,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     trainer = pl.Trainer(
         max_epochs=cfg.TRAIN.NUM_EPOCHS,
         devices="auto",
-        strategy="auto",
+        strategy=DDPStrategy(find_unused_parameters=True),
         callbacks=checkpoint_callbacks,
         logger=tensorboard_logger,
         num_sanity_val_steps=num_sanity_val_steps,

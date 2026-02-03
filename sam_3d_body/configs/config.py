@@ -1,6 +1,6 @@
 from yacs.config import CfgNode 
 
-INDICES_PATH = "/scratch/cq244/sam-3d-body/tinker/mhr_kp_sample_128.npy"
+INDICES_PATH = "/scratches/juban/cq244/sam-3d-body/tinker/mhr_kp_sample_128.npy"
 
 _C = CfgNode()
 
@@ -8,28 +8,28 @@ _C.TRAIN = CfgNode()
 _C.TRAIN.MODEL_TYPE = "full"  # Options: "full" (SAM3DBody) or "toy" (ToyModel)
 _C.TRAIN.USE_FP16 = True
 _C.TRAIN.FP16_TYPE = "high"
-_C.TRAIN.LR = 1e-4
+_C.TRAIN.LR = 5e-5
 _C.TRAIN.NUM_EPOCHS = 50
 _C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
-_C.TRAIN.FREEZE_BACKBONE = True 
+_C.TRAIN.FREEZE_BACKBONE = False
 
 
 _C.LOSS = CfgNode()
 _C.LOSS.SHAPE_PARAM_WEIGHT = 1.0
-_C.LOSS.SCALE_PARAM_WEIGHT = 10.0
-_C.LOSS.POSE_PARAM_WEIGHT = 0.0
+_C.LOSS.SCALE_PARAM_WEIGHT = 1.0
+_C.LOSS.POSE_PARAM_WEIGHT = 1.0
 _C.LOSS.KP2D_WEIGHT = 100.0
 _C.LOSS.KP3D_WEIGHT = 100.0
 
 
 # Dataset hparams
 _C.DATASET = CfgNode()
+_C.DATASET.BATCH_SIZE = 4
+_C.DATASET.NUM_WORKERS = 16
 _C.DATASET.NOISE_FACTOR = 0.4
 _C.DATASET.SCALE_FACTOR = 0.0
 _C.DATASET.CROP_PROB = 0.0
 _C.DATASET.CROP_FACTOR = 0.0
-_C.DATASET.BATCH_SIZE = 64
-_C.DATASET.NUM_WORKERS = 32
 _C.DATASET.PIN_MEMORY = True
 _C.DATASET.SHUFFLE_TRAIN = True
 _C.DATASET.TRAIN_DS = 'all'
@@ -56,7 +56,7 @@ _C.MODEL.ENABLE_HAND = True
 _C.MODEL.DENSE_KEYPOINTS = True
 _C.MODEL.SAMPLE_SHAPE = True
 _C.MODEL.SAMPLE_SCALE = True
-_C.MODEL.SAMPLE_POSE = False
+_C.MODEL.SAMPLE_POSE = True
 
 
 
@@ -133,7 +133,7 @@ def get_config_defaults():
 
 
 import os 
-PATH = "/scratch/cq244/BEDLAM/"
+PATH = "/scratches/juban/cq244/BEDLAM/"
 
 
 SMPL_MODEL_DIR = os.path.join(PATH, 'data/body_models/SMPL_python_v.1.1.0/smpl/models')

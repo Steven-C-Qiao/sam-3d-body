@@ -2,13 +2,11 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import roma
-from pytorch3d.transforms import matrix_to_axis_angle
-from sam_3d_body.models.modules import rot6d_to_rotmat
-from sam_3d_body.models.modules.mhr_utils import (
-    NUM_BODY_3DOF_JOINTS,
-    BODY_1DOF_ROT_IDXS,
-    NUM_BODY_1DOF_ANGLES,
-)
+from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
+from sam_3d_body.models.modules.mhr_utils import mhr_param_hand_mask
+import matplotlib.pyplot as plt
+import numpy as np
+import os
 
 
 class Loss(pl.LightningModule):
@@ -34,6 +32,9 @@ class Loss(pl.LightningModule):
         # dynamically from tensors during training so we don't assume a fixed
         # dense keypoint length.
         self.hand_weight = hand_weight
+        
+        # Debug visualization directory
+        self.debug_vis_dir = None
 
     def forward(self, predictions, batch):
         loss_dict = {}
@@ -112,155 +113,105 @@ class Loss(pl.LightningModule):
         # - Global rotation (3D axis-angle)
         # - 3-DoF body joints (3*NUM_BODY_3DOF_JOINTS axis-angle)
         # - 1-DoF body joint angles (NUM_BODY_1DOF_ANGLES scalars)
-        if getattr(self.cfg.LOSS, "POSE_PARAM_WEIGHT", 0.0) > 0:
-            gt_model_params = batch["model_params"]
-            pred_body_pose = pred_mhr["body_pose"]  # [B*N, 133]
-            pred_pose_uncertainty = pred_mhr[
-                "pose_uncertainty"
-            ]  # [B*N, pose_uncertainty_dim]
+        if self.cfg.LOSS.POSE_PARAM_WEIGHT > 0:
+            # fmt: off
+            all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
+            all_param_1dof_rot_idxs = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 74, 75, 77, 78, 80, 81, 83, 84, 89, 90, 94, 95, 101, 102, 104, 105, 107, 108, 110, 111, 116, 117, 118, 119, 120, 121, 122, 123])
+            # fmt: on
 
-            # Flatten batch/person dims if needed to match prediction layout.
-            if gt_model_params.dim() == 3:  # [B, N, D]
-                B, N = gt_model_params.shape[:2]
-                gt_model_params = gt_model_params.view(B * N, -1)
-            else:
-                gt_model_params = gt_model_params.view(-1, gt_model_params.shape[-1])
+            gt_pose = batch["model_params"][:, 6 : 6 + 133]
+            gt_pose[..., mhr_param_hand_mask] = 0
+            gt_pose[..., -3:] = 0
 
-            pred_body_pose = pred_body_pose.view(-1, pred_body_pose.shape[-1])
-            pred_pose_uncertainty = pred_pose_uncertainty.view(
-                -1, pred_pose_uncertainty.shape[-1]
-            )
+            gt_3dof_euler = gt_pose[:, all_param_3dof_rot_idxs.flatten()].unflatten(
+                -1, (-1, 3)
+            )  # B 23 3
 
-            # Body pose parameters occupy 133 dims starting after 3 trans + 3 global rot.
-            gt_body_pose = gt_model_params[:, 6 : 6 + pred_body_pose.shape[-1]]
-            gt_global_rot_euler = gt_model_params[
-                :, 3:6
-            ]  # Global rotation in Euler (ZYX)
+            gt_3dof_rotmat = roma.euler_to_rotmat("XYZ", gt_3dof_euler)  # B 23 3 3
 
-            # Convert global rotation from Euler to axis-angle
-            # roma expects signature: euler_to_rotmat(convention, angles)
-            gt_global_rot_mat = roma.euler_to_rotmat("ZYX", gt_global_rot_euler)
-            gt_global_rot_axis_angle = matrix_to_axis_angle(
-                gt_global_rot_mat
-            )  # [B*N, 3]
+            gt_3dof_aa = matrix_to_axis_angle(gt_3dof_rotmat)  # B 23 3
 
-            # Get predicted global rotation from pred_pose_raw (6D) and convert to axis-angle
-            pred_pose_raw = pred_mhr["pred_pose_raw"]  # [B*N, 6 + body_cont_dim]
-            pred_global_rot_6d = pred_pose_raw[:, :6]
-            # Convert 6D to rotation matrix, then to axis-angle
-            pred_global_rot_mat = rot6d_to_rotmat(pred_global_rot_6d)
-            pred_global_rot_axis_angle = matrix_to_axis_angle(
-                pred_global_rot_mat
-            )  # [B*N, 3]
+            gt_1dof_angles = gt_pose[..., all_param_1dof_rot_idxs]  # B 58
 
-            # Extract 3-DoF body joint rotations and convert to axis-angle
-            # all_param_3dof_rot_idxs defines which indices in body_pose correspond to 3-DoF joints
-            all_param_3dof_rot_idxs = torch.LongTensor(
-                [
-                    (0, 2, 4),
-                    (6, 8, 10),
-                    (12, 13, 14),
-                    (15, 16, 17),
-                    (18, 19, 20),
-                    (21, 22, 23),
-                    (24, 25, 26),
-                    (27, 28, 29),
-                    (34, 35, 36),
-                    (37, 38, 39),
-                    (44, 45, 46),
-                    (53, 54, 55),
-                    (64, 65, 66),
-                    (85, 69, 73),
-                    (86, 70, 79),
-                    (87, 71, 82),
-                    (88, 72, 76),
-                    (91, 92, 93),
-                    (112, 96, 100),
-                    (113, 97, 106),
-                    (114, 98, 109),
-                    (115, 99, 103),
-                    (130, 131, 132),
-                ]
-            ).to(gt_body_pose.device)
-
-            # Extract 3-DoF Euler angles from body pose
-            gt_body_3dof_euler = gt_body_pose[
+            pred_pose_euler = pred_mhr["body_pose"]
+            pred_3dof_euler = pred_pose_euler[
                 :, all_param_3dof_rot_idxs.flatten()
-            ]  # [B*N, 69]
-            pred_body_3dof_euler = pred_body_pose[
-                :, all_param_3dof_rot_idxs.flatten()
-            ]  # [B*N, 69]
+            ].unflatten(
+                -1, (-1, 3)
+            )  # B 23 3
+            pred_3dof_rotmat = roma.euler_to_rotmat("XYZ", pred_3dof_euler)  # B 23 3 3
 
-            # Reshape to [B*N, NUM_BODY_3DOF_JOINTS, 3] and convert to axis-angle
-            gt_body_3dof_euler_reshaped = gt_body_3dof_euler.view(
-                -1, NUM_BODY_3DOF_JOINTS, 3
+            pred_3dof_aa = matrix_to_axis_angle(pred_3dof_rotmat)  # B 23 3
+
+
+
+            pred_1dof_angles = pred_pose_euler[..., all_param_1dof_rot_idxs]  # B 58
+
+            pred_var = pred_mhr["pose_uncertainty"]
+            pred_3dof_var = pred_var[:, : (3 * len(all_param_3dof_rot_idxs))].unflatten(
+                -1, (-1, 3)
             )
-            pred_body_3dof_euler_reshaped = pred_body_3dof_euler.view(
-                -1, NUM_BODY_3DOF_JOINTS, 3
+            pred_1dof_var = pred_var[:, (3 * len(all_param_3dof_rot_idxs)) :]
+
+            loss_3dof = self.gaussian_nll_loss(pred_3dof_aa, gt_3dof_aa, pred_3dof_var)
+            loss_1dof = self.gaussian_nll_loss(
+                pred_1dof_angles, gt_1dof_angles, pred_1dof_var
             )
+            loss_pose_params = loss_3dof + loss_1dof
 
-            # Convert each 3-DoF joint from Euler to axis-angle
-            gt_body_3dof_rot_mat = roma.euler_to_rotmat(
-                "ZYX", gt_body_3dof_euler_reshaped.view(-1, 3)
-            ).view(-1, NUM_BODY_3DOF_JOINTS, 3, 3)
-            pred_body_3dof_rot_mat = roma.euler_to_rotmat(
-                "ZYX", pred_body_3dof_euler_reshaped.view(-1, 3)
-            ).view(-1, NUM_BODY_3DOF_JOINTS, 3, 3)
+            # # Debug visualization: compare GT and predicted axis-angle rotations
+            # if self.training and hasattr(self, 'global_step') and self.global_step % 100 == 0:
+            #     self._visualize_axis_angle_comparison(
+            #         gt_3dof_aa[0].detach().cpu(),  
+            #         pred_3dof_aa[0].detach().cpu(),
+            #         step=self.global_step if hasattr(self, 'global_step') else 0
+            #     )
 
-            gt_body_3dof_axis_angle = matrix_to_axis_angle(
-                gt_body_3dof_rot_mat.view(-1, 3, 3)
-            ).view(
-                -1, NUM_BODY_3DOF_JOINTS, 3
-            )  # [B*N, NUM_BODY_3DOF_JOINTS, 3]
-            pred_body_3dof_axis_angle = matrix_to_axis_angle(
-                pred_body_3dof_rot_mat.view(-1, 3, 3)
-            ).view(
-                -1, NUM_BODY_3DOF_JOINTS, 3
-            )  # [B*N, NUM_BODY_3DOF_JOINTS, 3]
 
-            # Flatten 3-DoF axis-angle to [B*N, 3*NUM_BODY_3DOF_JOINTS]
-            gt_body_3dof_axis_angle_flat = gt_body_3dof_axis_angle.view(
-                -1, 3 * NUM_BODY_3DOF_JOINTS
+            # import matplotlib.pyplot as plt
+
+            # fig, axs = plt.subplots(3, 1, figsize=(12, 15))
+
+            # # Subplot 1: Plot the commented block (raw params in Euler)
+            # gt_euler_to_plot = batch['model_params'].cpu().detach().numpy()[0, 6: 6+133]
+            # pred_euler_to_plot = pred_pose_euler.cpu().detach().numpy()[0]
+            # axs[0].scatter(np.arange(len(gt_euler_to_plot)), gt_euler_to_plot, label='GT Euler', s=2)
+            # axs[0].scatter(np.arange(len(pred_euler_to_plot)), pred_euler_to_plot, label='Pred Euler', s=2)
+            # for i in range(len(gt_euler_to_plot)):
+            #     axs[0].plot([i, i], [gt_euler_to_plot[i], pred_euler_to_plot[i]], color='gray', alpha=0.4, linewidth=1)
+            # axs[0].set_title('Raw body_pose (Euler params)')
+            # axs[0].legend()
+
+            # # Subplot 2: Axis-angle comparison
+            # gt_aa_to_plot = gt_3dof_aa[0].flatten().cpu().detach().numpy()
+            # pred_aa_to_plot = pred_3dof_aa[0].flatten().cpu().detach().numpy()
+            # axs[1].scatter(np.arange(len(gt_aa_to_plot)), gt_aa_to_plot, label='GT Axis-Angle', s=2)
+            # axs[1].scatter(np.arange(len(pred_aa_to_plot)), pred_aa_to_plot, label='Pred Axis-Angle', s=2)
+            # for i in range(len(gt_aa_to_plot)):
+            #     axs[1].plot([i, i], [gt_aa_to_plot[i], pred_aa_to_plot[i]], color='gray', alpha=0.4, linewidth=1)
+            # axs[1].set_title('Body pose: Axis-angle (from rotmat)')
+            # axs[1].legend()
+
+            # # Subplot 3: 1DoF joint angles comparison
+            # gt_1dof_to_plot = gt_1dof_angles[0].cpu().detach().numpy()
+            # pred_1dof_to_plot = pred_1dof_angles[0].cpu().detach().numpy()
+            # axs[2].scatter(np.arange(len(gt_1dof_to_plot)), gt_1dof_to_plot, label='GT 1DoF Angles', s=2)
+            # axs[2].scatter(np.arange(len(pred_1dof_to_plot)), pred_1dof_to_plot, label='Pred 1DoF Angles', s=2)
+            # for i in range(len(gt_1dof_to_plot)):
+            #     axs[2].plot([i, i], [gt_1dof_to_plot[i], pred_1dof_to_plot[i]], color='gray', alpha=0.4, linewidth=1)
+            # axs[2].set_title('1DoF Body Joint Angles')
+            # axs[2].legend()
+
+            # fig.tight_layout()
+            # plt.savefig('axis_angle_comparison.png')
+            # plt.close(fig)
+            # import ipdb; ipdb.set_trace()
+
+            loss_dict["loss_pose_3dof"] = (
+                self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_3dof
             )
-            pred_body_3dof_axis_angle_flat = pred_body_3dof_axis_angle.view(
-                -1, 3 * NUM_BODY_3DOF_JOINTS
-            )
-
-            # Extract 1-DoF angles (already in angle space, no conversion needed)
-            BODY_1DOF_ROT_IDXS_device = BODY_1DOF_ROT_IDXS.to(gt_body_pose.device)
-            gt_body_1dof_angles = gt_body_pose[
-                :, BODY_1DOF_ROT_IDXS_device
-            ]  # [B*N, NUM_BODY_1DOF_ANGLES]
-            pred_body_1dof_angles = pred_body_pose[
-                :, BODY_1DOF_ROT_IDXS_device
-            ]  # [B*N, NUM_BODY_1DOF_ANGLES]
-
-            # Concatenate: [global (3), body_3dof (3*23), body_1dof (NUM_BODY_1DOF_ANGLES)]
-            gt_pose_axis_angle = torch.cat(
-                [
-                    gt_global_rot_axis_angle,
-                    gt_body_3dof_axis_angle_flat,
-                    gt_body_1dof_angles,
-                ],
-                dim=-1,
-            )  # [B*N, 3 + 3*NUM_BODY_3DOF_JOINTS + NUM_BODY_1DOF_ANGLES]
-
-            pred_pose_axis_angle = torch.cat(
-                [
-                    pred_global_rot_axis_angle,
-                    pred_body_3dof_axis_angle_flat,
-                    pred_body_1dof_angles,
-                ],
-                dim=-1,
-            )  # [B*N, 3 + 3*NUM_BODY_3DOF_JOINTS + NUM_BODY_1DOF_ANGLES]
-
-            # Use Gaussian NLL loss: assumes target ~ N(pred, uncertainty)
-            # uncertainty is already positive exp(...) and represents variance
-            loss_pose_params = self.gaussian_nll_loss(
-                pred_pose_axis_angle, gt_pose_axis_angle, pred_pose_uncertainty
-            )
-            loss_dict["loss_pose_params"] = (
-                self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_pose_params
+            loss_dict["loss_pose_1dof"] = (
+                self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_1dof
             )
 
         assert "total_loss" not in loss_dict
@@ -269,7 +220,111 @@ class Loss(pl.LightningModule):
         )
 
         # for k, v in loss_dict.items():
-        #     print(f'{k}: {v.item():.3f}', end=' ')
+        #     print(f"{k}: {v.item():.3f}", end=" ")
         # import ipdb; ipdb.set_trace()
 
         return loss_dict
+    
+    def _visualize_axis_angle_comparison(self, gt_aa, pred_aa, step=0):
+        """
+        Visualize comparison between GT and predicted axis-angle rotations.
+        Shows all angles, pairing GT and Pred at the same center for each joint.
+        
+        Args:
+            gt_aa: [N, 3] tensor of GT axis-angle rotations
+            pred_aa: [N, 3] tensor of predicted axis-angle rotations
+            step: current training step
+        """
+        # Set up debug visualization directory
+        if self.debug_vis_dir is None:
+            if hasattr(self, 'logger') and self.logger is not None:
+                if hasattr(self.logger, 'log_dir') and self.logger.log_dir:
+                    self.debug_vis_dir = os.path.join(self.logger.log_dir, 'debug_rotations')
+                else:
+                    self.debug_vis_dir = './debug_rotations'
+            else:
+                self.debug_vis_dir = './debug_rotations'
+            os.makedirs(self.debug_vis_dir, exist_ok=True)
+        
+        # Convert to numpy
+        gt_aa_np = gt_aa.numpy() if isinstance(gt_aa, torch.Tensor) else gt_aa
+        pred_aa_np = pred_aa.numpy() if isinstance(pred_aa, torch.Tensor) else pred_aa
+        
+        num_joints = gt_aa_np.shape[0]
+        
+        # Convert axis-angle to rotation matrices for visualization
+        gt_aa_t = torch.from_numpy(gt_aa_np).float()
+        pred_aa_t = torch.from_numpy(pred_aa_np).float()
+        
+        gt_rotmats = axis_angle_to_matrix(gt_aa_t)  # [N, 3, 3]
+        pred_rotmats = axis_angle_to_matrix(pred_aa_t)  # [N, 3, 3]
+        
+        # Compute rotation axes (normalized axis-angle vectors) and angles (magnitudes)
+        gt_axes = gt_aa_np.copy()
+        pred_axes = pred_aa_np.copy()
+        gt_angles = np.linalg.norm(gt_aa_np, axis=1, keepdims=True)
+        pred_angles = np.linalg.norm(pred_aa_np, axis=1, keepdims=True)
+        
+        # Normalize to get unit rotation axes (handle zero rotations)
+        gt_axes_norm = np.where(gt_angles > 1e-6, gt_axes / gt_angles, gt_axes)
+        pred_axes_norm = np.where(pred_angles > 1e-6, pred_axes / pred_angles, pred_axes)
+        
+        # Scale by rotation angle for visualization (so longer arrows = larger rotations)
+        scale_factor = 0.5  # Scale factor for better visualization
+        gt_angles_1d = gt_angles.squeeze()  # (N,)
+        pred_angles_1d = pred_angles.squeeze()  # (N,)
+        gt_axes_scaled = gt_axes_norm * (gt_angles_1d[:, np.newaxis] * scale_factor + 0.1)
+        pred_axes_scaled = pred_axes_norm * (pred_angles_1d[:, np.newaxis] * scale_factor + 0.1)
+        
+        # Calculate grid dimensions for subplots
+        cols = min(5, num_joints)  # Max 5 columns
+        rows = (num_joints + cols - 1) // cols  # Ceiling division
+        
+        # Create figure with subplots - one 3D plot per joint
+        fig = plt.figure(figsize=(4 * cols, 4 * rows))
+        
+        colors = plt.cm.tab10(np.linspace(0, 1, num_joints))
+        
+        # Find max range for consistent scaling
+        max_range = max(np.abs(gt_axes_scaled).max(), np.abs(pred_axes_scaled).max()) * 1.2
+        
+        for i in range(num_joints):
+            ax = fig.add_subplot(rows, cols, i + 1, projection='3d')
+            
+            # GT rotation axis (solid) - same center as pred
+            gt_label = f'GT: {gt_angles[i, 0]:.3f} rad'
+            ax.quiver(0, 0, 0, gt_axes_scaled[i, 0], gt_axes_scaled[i, 1], gt_axes_scaled[i, 2],
+                     color=colors[i], arrow_length_ratio=0.2, linewidth=3, alpha=0.8, label=gt_label)
+            
+            # Pred rotation axis (dashed) - same center as GT
+            pred_label = f'Pred: {pred_angles[i, 0]:.3f} rad'
+            ax.quiver(0, 0, 0, pred_axes_scaled[i, 0], pred_axes_scaled[i, 1], pred_axes_scaled[i, 2],
+                     color=colors[i], arrow_length_ratio=0.2, linewidth=3, linestyle='--', alpha=0.8, label=pred_label)
+            
+            # Set equal aspect ratio and limits
+            ax.set_xlim([-max_range, max_range])
+            ax.set_ylim([-max_range, max_range])
+            ax.set_zlim([-max_range, max_range])
+            ax.set_xlabel('X', fontsize=8)
+            ax.set_ylabel('Y', fontsize=8)
+            ax.set_zlabel('Z', fontsize=8)
+            ax.set_title(f'Joint {i}', fontsize=10)
+            ax.legend(fontsize=8, loc='upper right')
+        
+        plt.suptitle(f'Axis-Angle Rotation Comparison (Step {step})\nArrow length ∝ rotation angle', fontsize=14)
+        plt.tight_layout()
+        
+        # Save figure
+        save_path = os.path.join(self.debug_vis_dir, f'rotation_comparison_step_{step:06d}.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Also print numerical comparison
+        gt_mags = np.linalg.norm(gt_aa_np, axis=1)
+        pred_mags = np.linalg.norm(pred_aa_np, axis=1)
+        print(f"\n[Debug] Rotation comparison at step {step}:")
+        print(f"GT axis-angle magnitudes: {gt_mags}")
+        print(f"Pred axis-angle magnitudes: {pred_mags}")
+        print(f"Magnitude differences: {np.abs(gt_mags - pred_mags)}")
+        print(f"Mean magnitude error: {np.mean(np.abs(gt_mags - pred_mags)):.4f}")
+        print(f"Saved visualization to: {save_path}")

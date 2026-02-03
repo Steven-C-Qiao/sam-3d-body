@@ -73,27 +73,7 @@ class Visualiser(pl.LightningModule):
         epoch=None,
         global_step=None,
     ):
-        """
-        Args:
-            K = N, pm_k^n is the k-th pose plotted on the n-th shape/silhouette
-            normal_maps: (B, N, H, W, 3)
 
-            vc: (B, N, H, W, 3)
-            vc_init_pred: (B, N, H, W, 3): w/o pose blendshapes
-            vc_pred: (B, K, N, H, W, 3)
-
-            vp: (B, N, 6890, 3)
-            vp_init_pred: (B, K, N, H, W, 3): w/o pose blendshapes
-            vp_pred: (B, K, N, H, W, 3)
-
-            dvc: (B, K, N, H, W, 3)
-            dvc_pred: (B, K, N, H, W, 3)
-
-            conf: (B, N, H, W)
-            mask: (B, N, H, W)
-            color: (B, N, H, W)
-            vertex_visibility: (B, N, 6890)
-        """
         if self.rank != 0:
             return None
 
@@ -771,11 +751,11 @@ class Visualiser(pl.LightningModule):
         plt.scatter(
             gt_kp2d_full[:, 0],
             gt_kp2d_full[:, 1],
-            color="blue",
-            s=20,
+            color="lime",
+            s=10,
             marker="x",
             label="GT",
-            linewidths=2,
+            linewidths=1,
         )
 
         # Plot predicted mean keypoints
@@ -783,13 +763,13 @@ class Visualiser(pl.LightningModule):
             pred_kp2d_full[:, 0],
             pred_kp2d_full[:, 1],
             color="red",
-            s=20,
-            marker="o",
+            s=10,
+            marker="x",
             label="Pred Mean",
-            linewidths=2,
-            edgecolors="darkred",
+            linewidths=1,
         )
 
+        # Plot sample keypoints - use different blues
         # Plot sample keypoints
         colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
         for i in range(num_samples):
@@ -947,11 +927,11 @@ class Visualiser(pl.LightningModule):
         plt.scatter(
             gt_kp2d[:, 0],
             gt_kp2d[:, 1],
-            color="blue",
-            s=15,
+            color="lime",
+            s=10,
             marker="x",
             label="GT",
-            linewidths=2,
+            linewidths=1,
         )
 
         # Plot predicted mean keypoints
@@ -959,11 +939,10 @@ class Visualiser(pl.LightningModule):
             pred_kp2d_cropped_coords[:, 0],
             pred_kp2d_cropped_coords[:, 1],
             color="red",
-            s=15,
-            marker="o",
+            s=10,
+            marker="x",
             label="Pred Mean",
-            linewidths=2,
-            edgecolors="darkred",
+            linewidths=1,
         )
 
         # Plot sample keypoints if available

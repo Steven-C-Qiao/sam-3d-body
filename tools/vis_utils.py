@@ -155,7 +155,7 @@ def visualize_sample_together(img_cv2, outputs, faces):
 import cv2 
 import torch
 import matplotlib.cm as cm
-def my_visualize(img_cv2, outputs, faces):
+def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
     # Render everything together
     img_keypoints = img_cv2.copy()
     img_mesh = img_cv2.copy()
@@ -249,14 +249,17 @@ def my_visualize(img_cv2, outputs, faces):
     )
 
     # cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_mesh_side], axis=1)
-    cur_img = np.concatenate([img_cv2, img_mesh, img_mesh_side], axis=1)
+    if stack_vertically:
+        cur_img = np.concatenate([img_cv2, img_mesh, img_mesh_side], axis=0)
+    else:
+        cur_img = np.concatenate([img_cv2, img_mesh, img_mesh_side], axis=1)
 
     return cur_img
 
 
 
 
-def my_visualize_samples(img_cv2, outputs, faces):
+def my_visualize_samples(img_cv2, outputs, faces, stack_vertically=True):
 
     img_mesh = img_cv2.copy()
 
@@ -295,9 +298,12 @@ def my_visualize_samples(img_cv2, outputs, faces):
         )
         img_mesh_list.append(img_mesh)
 
-    img_mesh_list = np.concatenate(img_mesh_list, axis=1)
-
-    cur_img = np.concatenate([img_cv2, img_mesh_list], axis=1)
+    if stack_vertically:
+        img_mesh_list = np.concatenate(img_mesh_list, axis=0)
+        cur_img = np.concatenate([img_cv2, img_mesh_list], axis=0)
+    else:
+        img_mesh_list = np.concatenate(img_mesh_list, axis=1)
+        cur_img = np.concatenate([img_cv2, img_mesh_list], axis=1)
 
     return cur_img
 

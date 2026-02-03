@@ -38,11 +38,14 @@ class Trainer(BaseLightningModule):
     Inherits all model functionality from SAM3DBody.
     """
 
-    def __init__(self, cfg: CfgNode, vis_save_dir: str = None):
+    def __init__(
+        self, cfg: CfgNode, vis_save_dir: str = None, stack_vertically: bool = True
+    ):
         super().__init__()
 
         self.cfg = cfg
         self.vis_save_dir = vis_save_dir
+        self.stack_vertically = stack_vertically
 
         # Select model based on config
         self.model_type = cfg.TRAIN.get("MODEL_TYPE", "full")
@@ -118,35 +121,43 @@ class Trainer(BaseLightningModule):
 
         metrics = self.metrics(outputs, batch)
 
-        self.log_metrics(loss_dict, metrics, batch, outputs)
+        self.log_and_visualise(loss_dict, metrics, batch, outputs, prefix="train_")
+
+        # for k, v in loss_dict.items():
+        #     print(f'{k}: {v.item():.3f}', end=' ')
+        # print('')
+        # import ipdb; ipdb.set_trace()
 
         return loss_dict["total_loss"]
 
-    def log_metrics(self, loss_dict: Dict, metrics: Dict, batch: Dict, outputs: Dict):
-        prog_bar_keys = ["pampjpe", "pampjpe_samples", "pve", "pve_samples"]
-        prog_bar_metrics = {
-            key: metrics.pop(key) for key in prog_bar_keys if key in metrics
-        }
+    def log_and_visualise(
+        self,
+        loss_dict: Dict,
+        metrics: Dict,
+        batch: Dict,
+        outputs: Dict,
+        prefix: str = "",
+    ):
 
-        if prog_bar_metrics:
-            self.log_dict(
-                prog_bar_metrics,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=True,
-                rank_zero_only=True,
-                sync_dist=True,
-            )
+        metrics = {f"{prefix}{k}": v for k, v in metrics.items()}
+        loss_dict = {f"{prefix}{k}": v for k, v in loss_dict.items()}
 
-        if metrics:
-            self.log_dict(
-                metrics,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=False,
-                rank_zero_only=True,
-                sync_dist=True,
-            )
+        self.log(
+            "pampjpe",
+            metrics[f"{prefix}pampjpe"],
+            prog_bar=(prefix == "train_"),
+            logger=False,
+        )
+        self.log(
+            "pampjpe_samples",
+            metrics[f"{prefix}pampjpe_samples"],
+            prog_bar=(prefix == "train_"),
+            logger=False,
+        )
+
+        self.log(f"{prefix}loss", loss_dict[f"{prefix}total_loss"], prog_bar=True)
+        self.log_dict(metrics, sync_dist=True)
+        self.log_dict(loss_dict, sync_dist=True)
 
         should_visualize = self.global_step in [0, 1000, 2000, 3000, 4000] or (
             self.global_step > 4000 and self.global_step % 5000 == 0
@@ -158,8 +169,12 @@ class Trainer(BaseLightningModule):
             image = image.cpu().detach().numpy()  # [3, H, W]
 
             # Generate visualizations
-            rend_img = my_visualize(image, outputs, self.faces)
-            rend_img_samples = my_visualize_samples(image, outputs, self.faces)
+            rend_img = my_visualize(
+                image, outputs, self.faces, stack_vertically=self.stack_vertically
+            )
+            rend_img_samples = my_visualize_samples(
+                image, outputs, self.faces, stack_vertically=self.stack_vertically
+            )
 
             rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
             rend_img_samples_bgr = cv2.cvtColor(rend_img_samples, cv2.COLOR_RGB2BGR)
@@ -175,14 +190,7 @@ class Trainer(BaseLightningModule):
             self.visualiser.visualise(
                 outputs, batch, batch_idx=None, global_step=self.global_step
             )
-
-        self.log("train_loss", loss_dict["total_loss"], prog_bar=True)
-        # self.model._log_metric('train_loss', loss_dict['total_loss'], step=batch_idx)
-        self.log_dict(loss_dict)
-
-        # import ipdb; ipdb.set_trace()
-
-        return loss_dict["total_loss"]
+        return None
 
     def forward(self, batch: Dict, num_samples: int = 0) -> Dict:
         return self.model(batch, num_samples)
@@ -193,37 +201,12 @@ class Trainer(BaseLightningModule):
         outputs = self(batch, num_samples=5)
 
         loss_dict = self.criterion(outputs, batch)
-        loss = loss_dict["total_loss"]
-
-        self.model._log_metric("val_loss", loss, step=batch_idx)
 
         metrics = self.metrics(outputs, batch)
 
-        prog_bar_keys = ["pampjpe", "pampjpe_samples", "pve", "pve_samples"]
-        prog_bar_metrics = {
-            key: metrics.pop(key) for key in prog_bar_keys if key in metrics
-        }
+        self.log_and_visualise(loss_dict, metrics, batch, outputs, prefix="val_")
 
-        if prog_bar_metrics:
-            self.log_dict(
-                prog_bar_metrics,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                rank_zero_only=True,
-                sync_dist=True,
-            )
-        if metrics:
-            self.log_dict(
-                metrics,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                rank_zero_only=True,
-                sync_dist=True,
-            )
-
-        return loss
+        return loss_dict["total_loss"]
 
     def test_step(self, batch: Dict, batch_idx: int):
         """
@@ -235,26 +218,12 @@ class Trainer(BaseLightningModule):
         outputs = self(batch, num_samples=5)
 
         loss_dict = self.criterion(outputs, batch)
-        loss = loss_dict["total_loss"]
 
         metrics = self.metrics(outputs, batch)
 
-        # Log all metrics for aggregation at epoch end
-        # Store metrics with test_ prefix for easy identification
-        test_metrics = {f"test_{k}": v for k, v in metrics.items()}
-        test_metrics["test_loss"] = loss
+        self.log_and_visualise(loss_dict, metrics, batch, outputs, prefix="test_")
 
-        # Log metrics for aggregation (PyTorch Lightning will aggregate these automatically)
-        self.log_dict(
-            test_metrics,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            rank_zero_only=True,
-            sync_dist=True,
-        )
-
-        return test_metrics
+        return loss_dict["total_loss"]
 
     def preprocess(self, batch: Dict):
         mhr_model = self.model.head_pose

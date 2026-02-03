@@ -811,29 +811,20 @@ class SAM3DBody(BaseModel):
             outputs["mhr_samples"] = verts.view(B, num_samples, -1, 3)
             outputs["mhr_samples_keypoints_3d"] = j3d.view(B, num_samples, -1, 3)
 
-            j3d_flat = j3d.view(B * num_samples, -1, 3)  #
+            j3d_flat = j3d.view(B * num_samples, -1, 3)
 
-            pred_cam = output_mhr["pred_cam"]  # [B, 3]
-            pred_cam_flat = pred_cam.repeat_interleave(num_samples, dim=0)
-
-            bbox_center_flat = self._flatten_person(batch["bbox_center"])[
-                self.body_batch_idx
-            ]
-            bbox_center_expanded = bbox_center_flat.repeat_interleave(
+            pred_cam_expanded = output_mhr["pred_cam"].repeat_interleave(
                 num_samples, dim=0
             )
-
-            bbox_scale_flat = self._flatten_person(batch["bbox_scale"])[
+            bbox_center_expanded = self._flatten_person(batch["bbox_center"])[
+                self.body_batch_idx
+            ].repeat_interleave(num_samples, dim=0)
+            bbox_scale_expanded = self._flatten_person(batch["bbox_scale"])[
                 self.body_batch_idx, 0
-            ]
-            bbox_scale_expanded = bbox_scale_flat.repeat_interleave(num_samples, dim=0)
-
-            ori_img_size_flat = self._flatten_person(batch["ori_img_size"])[
+            ].repeat_interleave(num_samples, dim=0)
+            ori_img_size_expanded = self._flatten_person(batch["ori_img_size"])[
                 self.body_batch_idx
-            ]
-            ori_img_size_expanded = ori_img_size_flat.repeat_interleave(
-                num_samples, dim=0
-            )
+            ].repeat_interleave(num_samples, dim=0)
 
             cam_int_flat = self._flatten_person(
                 batch["cam_int"]
@@ -846,7 +837,7 @@ class SAM3DBody(BaseModel):
             # Project to 2D (full image coordinates)
             cam_out_samples = self.head_camera.perspective_projection(
                 j3d_flat,
-                pred_cam_flat,
+                pred_cam_expanded,
                 bbox_center_expanded,
                 bbox_scale_expanded,
                 ori_img_size_expanded,
