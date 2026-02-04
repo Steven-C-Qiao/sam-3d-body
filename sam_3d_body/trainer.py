@@ -4,9 +4,10 @@ import numpy as np
 import torch
 from typing import Dict, Optional
 import roma
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 from yacs.config import CfgNode
-import pytorch_lightning as pl
 from loguru import logger
 from torch.utils.data import ConcatDataset, DataLoader
 
@@ -162,7 +163,8 @@ class Trainer(BaseLightningModule):
         should_visualize = self.global_step in [0, 1000, 2000, 3000, 4000] or (
             self.global_step > 4000 and self.global_step % 5000 == 0
         )
-        if should_visualize:
+        global_rank = getattr(self, "global_rank", 0)
+        if should_visualize and global_rank == 0:
             # if True:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
@@ -248,6 +250,8 @@ class Trainer(BaseLightningModule):
             .permute(1, 0, 2)
         )
 
+        batch["gt_verts_w_transl"] = gt_verts
+
         cam_int = batch["cam_int"]
         cam_ext = batch["cam_ext"]
         trans_cam = cam_ext[:, :3, 3]
@@ -263,6 +267,20 @@ class Trainer(BaseLightningModule):
         keypoints_2d_by_projection = project(
             gt_keypoints_3d, trans_cam.unsqueeze(1), cam_int
         )[:, :70, :2]
+
+        # verts_2d = project(
+        #     gt_verts, trans_cam.unsqueeze(1), cam_int
+        # )[:, :, :2]
+
+        # # import matplotlib.pyplot as plt
+        # # plt.imshow(batch["img_ori"][0].data.cpu().numpy())
+        # # plt.scatter(verts_2d[0,:, 0].cpu().numpy(), verts_2d[0,:, 1].cpu().numpy(), s=0.1, c='red')
+        # # plt.title("2D projected mesh vertices")
+        # # plt.axis("off")
+        # # plt.savefig("temp_vis.png")
+        # # plt.close()
+
+        # # import ipdb; ipdb.set_trace()
 
         # Ground-truth 2D keypoints: 70 canonical + optional dense vertices projected
         if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
@@ -447,7 +465,7 @@ class Trainer(BaseLightningModule):
             batch_size=self.cfg.DATASET.BATCH_SIZE,
             num_workers=self.cfg.DATASET.NUM_WORKERS,
             pin_memory=self.cfg.DATASET.PIN_MEMORY,
-            shuffle=self.cfg.DATASET.SHUFFLE_TRAIN,
+            shuffle=False,  # self.cfg.DATASET.SHUFFLE_TRAIN,
             drop_last=True,
         )
 
@@ -479,48 +497,48 @@ class Trainer(BaseLightningModule):
             )
         return dataloaders
 
-    def test_dataset(self):
-        """
-        Create test dataset. Uses TEST_DS from config if available, otherwise falls back to VAL_DS.
-        """
-        # Check if TEST_DS is configured, otherwise use VAL_DS
-        if hasattr(self.cfg.DATASET, "TEST_DS") and self.cfg.DATASET.TEST_DS:
-            datasets = self.cfg.DATASET.TEST_DS.split("_")
-            logger.info(f"Test datasets are: {datasets}")
-        else:
-            datasets = self.cfg.DATASET.VAL_DS.split("_")
-            logger.info(f"Test datasets (using VAL_DS): {datasets}")
+    # def test_dataset(self):
+    #     """
+    #     Create test dataset. Uses TEST_DS from config if available, otherwise falls back to VAL_DS.
+    #     """
+    #     # Check if TEST_DS is configured, otherwise use VAL_DS
+    #     if hasattr(self.cfg.DATASET, "TEST_DS") and self.cfg.DATASET.TEST_DS:
+    #         datasets = self.cfg.DATASET.TEST_DS.split("_")
+    #         logger.info(f"Test datasets are: {datasets}")
+    #     else:
+    #         datasets = self.cfg.DATASET.VAL_DS.split("_")
+    #         logger.info(f"Test datasets (using VAL_DS): {datasets}")
 
-        test_datasets = []
-        for dataset_name in datasets:
-            test_datasets.append(
-                BEDLAMDataset(
-                    options=self.cfg.DATASET,
-                    dataset=dataset_name,
-                    is_train=False,
-                )
-            )
-        return test_datasets
+    #     test_datasets = []
+    #     for dataset_name in datasets:
+    #         test_datasets.append(
+    #             BEDLAMDataset(
+    #                 options=self.cfg.DATASET,
+    #                 dataset=dataset_name,
+    #                 is_train=False,
+    #             )
+    #         )
+    #     return test_datasets
 
-    def test_dataloader(self):
-        """
-        Create test dataloader. Returns a list of dataloaders, one for each test dataset.
-        """
-        if not hasattr(self, "test_ds"):
-            self.test_ds = self.test_dataset()
+    # def test_dataloader(self):
+    #     """
+    #     Create test dataloader. Returns a list of dataloaders, one for each test dataset.
+    #     """
+    #     if not hasattr(self, "test_ds"):
+    #         self.test_ds = self.test_dataset()
 
-        dataloaders = []
-        for test_ds in self.test_ds:
-            dataloaders.append(
-                DataLoader(
-                    dataset=test_ds,
-                    batch_size=self.cfg.DATASET.BATCH_SIZE,
-                    shuffle=False,
-                    num_workers=self.cfg.DATASET.NUM_WORKERS,
-                    drop_last=False,  # Don't drop last batch in test to evaluate all samples
-                )
-            )
-        return dataloaders
+    #     dataloaders = []
+    #     for test_ds in self.test_ds:
+    #         dataloaders.append(
+    #             DataLoader(
+    #                 dataset=test_ds,
+    #                 batch_size=self.cfg.DATASET.BATCH_SIZE,
+    #                 shuffle=False,
+    #                 num_workers=self.cfg.DATASET.NUM_WORKERS,
+    #                 drop_last=False,  # Don't drop last batch in test to evaluate all samples
+    #             )
+    #         )
+    #     return dataloaders
 
     def multiview_eval_dataset(self, num_view: int = 4):
         """
@@ -566,474 +584,6 @@ class Trainer(BaseLightningModule):
         )
         return loader
 
-    def _compute_average_metrics(self, all_metrics: list) -> Dict:
-        """
-        Compute average metrics across all batches.
-
-        Args:
-            all_metrics: List of metric dictionaries, one per batch
-
-        Returns:
-            Dictionary of averaged metrics
-        """
-        if len(all_metrics) == 0:
-            return {}
-
-        # Initialize accumulators
-        avg_metrics = {}
-
-        # Collect all per-view metrics
-        mpjpe_per_view_all = []
-        mpjpe_merged_per_view_all = []
-        pampjpe_per_view_all = []
-        pampjpe_merged_per_view_all = []
-        pve_per_view_all = []
-        pve_merged_per_view_all = []
-        pvetsc_per_view_all = []
-        pvetsc_merged_per_view_all = []
-
-        # Collect merged metrics
-        mpjpe_merged_all = []
-        pampjpe_merged_all = []
-        pve_merged_all = []
-        pvetsc_merged_all = []
-
-        for batch_metrics in all_metrics:
-            if "per_view" in batch_metrics:
-                per_view = batch_metrics["per_view"]
-
-                # Collect per-view metrics (these are lists of values per view)
-                if "mpjpe_per_view" in per_view:
-                    mpjpe_per_view_all.extend(per_view["mpjpe_per_view"])
-                if "mpjpe_merged_per_view" in per_view:
-                    mpjpe_merged_per_view_all.extend(per_view["mpjpe_merged_per_view"])
-                if "pampjpe_per_view" in per_view:
-                    pampjpe_per_view_all.extend(per_view["pampjpe_per_view"])
-                if "pampjpe_merged_per_view" in per_view:
-                    pampjpe_merged_per_view_all.extend(
-                        per_view["pampjpe_merged_per_view"]
-                    )
-                if "pve_per_view" in per_view:
-                    pve_per_view_all.extend(per_view["pve_per_view"])
-                if "pve_merged_per_view" in per_view:
-                    pve_merged_per_view_all.extend(per_view["pve_merged_per_view"])
-                if "pvetsc_per_view" in per_view:
-                    pvetsc_per_view_all.extend(per_view["pvetsc_per_view"])
-                if "pvetsc_merged_per_view" in per_view:
-                    pvetsc_merged_per_view_all.extend(
-                        per_view["pvetsc_merged_per_view"]
-                    )
-
-            if "merged" in batch_metrics:
-                merged = batch_metrics["merged"]
-                if "mpjpe" in merged and merged["mpjpe"] is not None:
-                    mpjpe_merged_all.append(merged["mpjpe"])
-                if "pampjpe" in merged and merged["pampjpe"] is not None:
-                    pampjpe_merged_all.append(merged["pampjpe"])
-                if "pve" in merged and merged["pve"] is not None:
-                    pve_merged_all.append(merged["pve"])
-                if "pvetsc" in merged and merged["pvetsc"] is not None:
-                    pvetsc_merged_all.append(merged["pvetsc"])
-
-        # Compute averages
-        avg_metrics["per_view"] = {}
-        if len(mpjpe_per_view_all) > 0:
-            avg_metrics["per_view"]["mpjpe_mean"] = np.mean(mpjpe_per_view_all)
-            avg_metrics["per_view"]["mpjpe_std"] = np.std(mpjpe_per_view_all)
-        if len(mpjpe_merged_per_view_all) > 0:
-            avg_metrics["per_view"]["mpjpe_merged_mean"] = np.mean(
-                mpjpe_merged_per_view_all
-            )
-            avg_metrics["per_view"]["mpjpe_merged_std"] = np.std(
-                mpjpe_merged_per_view_all
-            )
-        if len(pampjpe_per_view_all) > 0:
-            avg_metrics["per_view"]["pampjpe_mean"] = np.mean(pampjpe_per_view_all)
-            avg_metrics["per_view"]["pampjpe_std"] = np.std(pampjpe_per_view_all)
-        if len(pampjpe_merged_per_view_all) > 0:
-            avg_metrics["per_view"]["pampjpe_merged_mean"] = np.mean(
-                pampjpe_merged_per_view_all
-            )
-            avg_metrics["per_view"]["pampjpe_merged_std"] = np.std(
-                pampjpe_merged_per_view_all
-            )
-        if len(pve_per_view_all) > 0:
-            avg_metrics["per_view"]["pve_mean"] = np.mean(pve_per_view_all)
-            avg_metrics["per_view"]["pve_std"] = np.std(pve_per_view_all)
-        if len(pve_merged_per_view_all) > 0:
-            avg_metrics["per_view"]["pve_merged_mean"] = np.mean(
-                pve_merged_per_view_all
-            )
-            avg_metrics["per_view"]["pve_merged_std"] = np.std(pve_merged_per_view_all)
-        if len(pvetsc_per_view_all) > 0:
-            avg_metrics["per_view"]["pvetsc_mean"] = np.mean(pvetsc_per_view_all)
-            avg_metrics["per_view"]["pvetsc_std"] = np.std(pvetsc_per_view_all)
-        if len(pvetsc_merged_per_view_all) > 0:
-            avg_metrics["per_view"]["pvetsc_merged_mean"] = np.mean(
-                pvetsc_merged_per_view_all
-            )
-            avg_metrics["per_view"]["pvetsc_merged_std"] = np.std(
-                pvetsc_merged_per_view_all
-            )
-
-        # Merged metrics (averaged across batches)
-        avg_metrics["merged"] = {}
-        if len(mpjpe_merged_all) > 0:
-            avg_metrics["merged"]["mpjpe"] = np.mean(mpjpe_merged_all)
-            avg_metrics["merged"]["mpjpe_std"] = np.std(mpjpe_merged_all)
-        if len(pampjpe_merged_all) > 0:
-            avg_metrics["merged"]["pampjpe"] = np.mean(pampjpe_merged_all)
-            avg_metrics["merged"]["pampjpe_std"] = np.std(pampjpe_merged_all)
-        if len(pve_merged_all) > 0:
-            avg_metrics["merged"]["pve"] = np.mean(pve_merged_all)
-            avg_metrics["merged"]["pve_std"] = np.std(pve_merged_all)
-        if len(pvetsc_merged_all) > 0:
-            avg_metrics["merged"]["pvetsc"] = np.mean(pvetsc_merged_all)
-            avg_metrics["merged"]["pvetsc_std"] = np.std(pvetsc_merged_all)
-
-        return avg_metrics
-
-    def _print_metrics(self, metrics: Dict, indent: str = ""):
-        """
-        Print metrics in a formatted way.
-
-        Args:
-            metrics: Dictionary of metrics
-            indent: Indentation string for nested printing
-        """
-        for metric_name, metric_value in metrics.items():
-            if isinstance(metric_value, dict):
-                logger.info(f"{indent}{metric_name}:")
-                self._print_metrics(metric_value, indent=indent + "  ")
-            elif isinstance(metric_value, (int, float)):
-                logger.info(f"{indent}{metric_name}: {metric_value:.4f}")
-            elif metric_value is None:
-                logger.info(f"{indent}{metric_name}: N/A")
-            else:
-                logger.info(f"{indent}{metric_name}: {metric_value}")
-
-    def _compute_multiview_metrics(
-        self,
-        result: Dict,
-        gt_keypoints_3d_per_view: list,
-        pred_joints_stacked: torch.Tensor,
-        merged_joints_stacked: torch.Tensor,
-        gt_vertices_stacked: torch.Tensor,
-        pred_vertices_stacked: torch.Tensor,
-        merged_vertices_stacked: torch.Tensor,
-        gt_vertices_neutral_stacked: torch.Tensor = None,
-        pred_vertices_neutral_stacked: torch.Tensor = None,
-        merged_vertices_neutral_stacked: torch.Tensor = None,
-    ) -> Dict:
-        """
-        Compute metrics for each view, samples (if available), and merged predictions.
-
-        Args:
-            result: Result dictionary containing predictions
-            gt_keypoints_3d_per_view: List of GT keypoints per view [N_views] of [N_kp, 3]
-            pred_joints_stacked: Predicted joints per view [N_views, N_joints, 3]
-            merged_joints_stacked: Merged joints per view [N_views, N_joints, 3]
-            gt_vertices_stacked: GT vertices per view [N_views, N_verts, 3]
-            pred_vertices_stacked: Predicted vertices per view [N_views, N_verts, 3]
-            merged_vertices_stacked: Merged vertices per view [N_views, N_verts, 3]
-
-        Returns:
-            Dictionary of metrics
-        """
-        metrics = {}
-        device = next(self.model.parameters()).device
-
-        # Convert to tensors and move to device if needed
-        if isinstance(pred_joints_stacked, torch.Tensor):
-            pred_joints_stacked = pred_joints_stacked.to(device)
-        else:
-            pred_joints_stacked = torch.tensor(pred_joints_stacked, device=device)
-
-        if isinstance(merged_joints_stacked, torch.Tensor):
-            merged_joints_stacked = merged_joints_stacked.to(device)
-        else:
-            merged_joints_stacked = torch.tensor(merged_joints_stacked, device=device)
-
-        if isinstance(gt_vertices_stacked, torch.Tensor):
-            gt_vertices_stacked = gt_vertices_stacked.to(device)
-        else:
-            gt_vertices_stacked = torch.tensor(gt_vertices_stacked, device=device)
-
-        if isinstance(pred_vertices_stacked, torch.Tensor):
-            pred_vertices_stacked = pred_vertices_stacked.to(device)
-        else:
-            pred_vertices_stacked = torch.tensor(pred_vertices_stacked, device=device)
-
-        if isinstance(merged_vertices_stacked, torch.Tensor):
-            merged_vertices_stacked = merged_vertices_stacked.to(device)
-        else:
-            merged_vertices_stacked = torch.tensor(
-                merged_vertices_stacked, device=device
-            )
-
-        num_views = pred_joints_stacked.shape[0]
-
-        # Stack GT keypoints
-        gt_kp3d_list = []
-        for gt_kp in gt_keypoints_3d_per_view:
-            if gt_kp is not None:
-                if isinstance(gt_kp, torch.Tensor):
-                    gt_kp = gt_kp.to(device)
-                else:
-                    gt_kp = torch.tensor(gt_kp, device=device)
-                # Apply camera coordinate system transformation to match predictions
-                gt_kp = gt_kp.clone()
-                gt_kp[..., [1, 2]] *= -1
-                gt_kp3d_list.append(gt_kp)
-
-        if len(gt_kp3d_list) > 0:
-            # Only use views that have GT keypoints
-            if len(gt_kp3d_list) == num_views:
-                gt_keypoints_stacked = torch.stack(
-                    gt_kp3d_list, dim=0
-                )  # [N_views, N_kp, 3]
-            else:
-                logger.warning(
-                    f"Number of GT keypoint views ({len(gt_kp3d_list)}) doesn't match number of prediction views ({num_views}). Skipping keypoint metrics."
-                )
-                gt_keypoints_stacked = None
-        else:
-            gt_keypoints_stacked = None
-
-        # Compute metrics per view
-        view_metrics = {}
-        if (
-            gt_keypoints_stacked is not None
-            and gt_keypoints_stacked.shape[0] == num_views
-        ):
-            # MPJPE per view (using first 70 keypoints)
-            pred_joints_70 = pred_joints_stacked[:, :70]  # [N_views, 70, 3]
-            merged_joints_70 = merged_joints_stacked[:, :70]  # [N_views, 70, 3]
-            gt_joints_70 = gt_keypoints_stacked[:, :70]  # [N_views, 70, 3]
-
-            # MPJPE for predicted per view
-            mpjpe_per_view = []
-            for v in range(num_views):
-                mpjpe = self.metrics.mpjpe(
-                    pred_joints_70[v : v + 1].unsqueeze(1),  # [1, 1, 70, 3]
-                    gt_joints_70[v : v + 1].unsqueeze(1),  # [1, 1, 70, 3]
-                )
-                mpjpe_per_view.append(mpjpe.item())
-            view_metrics["mpjpe_per_view"] = mpjpe_per_view
-            view_metrics["mpjpe_mean"] = np.mean(mpjpe_per_view)
-
-            # MPJPE for merged per view
-            mpjpe_merged_per_view = []
-            for v in range(num_views):
-                mpjpe = self.metrics.mpjpe(
-                    merged_joints_70[v : v + 1].unsqueeze(1),  # [1, 1, 70, 3]
-                    gt_joints_70[v : v + 1].unsqueeze(1),  # [1, 1, 70, 3]
-                )
-                mpjpe_merged_per_view.append(mpjpe.item())
-            view_metrics["mpjpe_merged_per_view"] = mpjpe_merged_per_view
-            view_metrics["mpjpe_merged_mean"] = np.mean(mpjpe_merged_per_view)
-
-            # PAMPJPE for predicted per view
-            pampjpe_per_view = []
-            for v in range(num_views):
-                pampjpe = self.metrics.pampjpe(
-                    pred_joints_70[v].cpu().detach().numpy().reshape(1, 70, 3),
-                    gt_joints_70[v].cpu().detach().numpy().reshape(1, 70, 3),
-                )
-                pampjpe_per_view.append(pampjpe)
-            view_metrics["pampjpe_per_view"] = pampjpe_per_view
-            view_metrics["pampjpe_mean"] = np.mean(pampjpe_per_view)
-
-            # PAMPJPE for merged per view
-            pampjpe_merged_per_view = []
-            for v in range(num_views):
-                pampjpe = self.metrics.pampjpe(
-                    merged_joints_70[v].cpu().detach().numpy().reshape(1, 70, 3),
-                    gt_joints_70[v].cpu().detach().numpy().reshape(1, 70, 3),
-                )
-                pampjpe_merged_per_view.append(pampjpe)
-            view_metrics["pampjpe_merged_per_view"] = pampjpe_merged_per_view
-            view_metrics["pampjpe_merged_mean"] = np.mean(pampjpe_merged_per_view)
-
-        # PVE per view (using dense keypoints if available, otherwise use vertices)
-        if gt_keypoints_stacked is not None and gt_keypoints_stacked.shape[1] > 70:
-            # Check if predicted and merged joints have dense keypoints
-            pred_has_dense = pred_joints_stacked.shape[1] > 70
-            merged_has_dense = merged_joints_stacked.shape[1] > 70
-
-            if pred_has_dense and merged_has_dense:
-                # Use dense keypoints (indices 70:)
-                pred_dense = pred_joints_stacked[:, 70:]  # [N_views, N_dense, 3]
-                merged_dense = merged_joints_stacked[:, 70:]  # [N_views, N_dense, 3]
-                gt_dense = gt_keypoints_stacked[:, 70:]  # [N_views, N_dense, 3]
-
-                # Ensure shapes match (handle case where dense keypoint counts differ)
-                min_dense = min(
-                    pred_dense.shape[1], merged_dense.shape[1], gt_dense.shape[1]
-                )
-                pred_dense = pred_dense[:, :min_dense]
-                merged_dense = merged_dense[:, :min_dense]
-                gt_dense = gt_dense[:, :min_dense]
-
-                # PVE for predicted per view
-                pve_per_view = []
-                for v in range(num_views):
-                    pve = self.metrics.pve(
-                        pred_dense[v : v + 1],  # [1, N_dense, 3]
-                        gt_dense[v : v + 1],  # [1, N_dense, 3]
-                    )
-                    pve_per_view.append(pve.item())
-                view_metrics["pve_per_view"] = pve_per_view
-                view_metrics["pve_mean"] = np.mean(pve_per_view)
-
-                # PVE for merged per view
-                pve_merged_per_view = []
-                for v in range(num_views):
-                    pve = self.metrics.pve(
-                        merged_dense[v : v + 1],  # [1, N_dense, 3]
-                        gt_dense[v : v + 1],  # [1, N_dense, 3]
-                    )
-                    pve_merged_per_view.append(pve.item())
-                view_metrics["pve_merged_per_view"] = pve_merged_per_view
-                view_metrics["pve_merged_mean"] = np.mean(pve_merged_per_view)
-            else:
-                # Fall back to vertices if dense keypoints not available in predictions
-                pve_per_view = []
-                for v in range(num_views):
-                    pve = self.metrics.pve(
-                        pred_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                        gt_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                    )
-                    pve_per_view.append(pve.item())
-                view_metrics["pve_per_view"] = pve_per_view
-                view_metrics["pve_mean"] = np.mean(pve_per_view)
-
-                # PVE for merged per view
-                pve_merged_per_view = []
-                for v in range(num_views):
-                    pve = self.metrics.pve(
-                        merged_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                        gt_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                    )
-                    pve_merged_per_view.append(pve.item())
-                view_metrics["pve_merged_per_view"] = pve_merged_per_view
-                view_metrics["pve_merged_mean"] = np.mean(pve_merged_per_view)
-        else:
-            # Use vertices for PVE if dense keypoints not available
-            pve_per_view = []
-            for v in range(num_views):
-                pve = self.metrics.pve(
-                    pred_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                    gt_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                )
-                pve_per_view.append(pve.item())
-            view_metrics["pve_per_view"] = pve_per_view
-            view_metrics["pve_mean"] = np.mean(pve_per_view)
-
-            # PVE for merged per view
-            pve_merged_per_view = []
-            for v in range(num_views):
-                pve = self.metrics.pve(
-                    merged_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                    gt_vertices_stacked[v : v + 1],  # [1, N_verts, 3]
-                )
-                pve_merged_per_view.append(pve.item())
-                view_metrics["pve_merged_per_view"] = pve_merged_per_view
-                view_metrics["pve_merged_mean"] = np.mean(pve_merged_per_view)
-
-        # PVETSC per view (Per Vertex Error with Scale and Translation Correction)
-        # Use neutral pose vertices for PVETSC
-        if (
-            gt_vertices_neutral_stacked is not None
-            and pred_vertices_neutral_stacked is not None
-            and merged_vertices_neutral_stacked is not None
-        ):
-            # Convert to numpy if needed
-            if isinstance(gt_vertices_neutral_stacked, torch.Tensor):
-                gt_vertices_neutral_stacked = (
-                    gt_vertices_neutral_stacked.cpu().detach().numpy()
-                )
-            if isinstance(pred_vertices_neutral_stacked, torch.Tensor):
-                pred_vertices_neutral_stacked = (
-                    pred_vertices_neutral_stacked.cpu().detach().numpy()
-                )
-            if isinstance(merged_vertices_neutral_stacked, torch.Tensor):
-                merged_vertices_neutral_stacked = (
-                    merged_vertices_neutral_stacked.cpu().detach().numpy()
-                )
-
-            pvetsc_per_view = []
-            for v in range(num_views):
-                pvetsc = self.metrics.pvetsc(
-                    pred_vertices_neutral_stacked[v : v + 1],  # [1, N_verts, 3]
-                    gt_vertices_neutral_stacked[v : v + 1],  # [1, N_verts, 3]
-                )
-                pvetsc_per_view.append(float(pvetsc))
-            view_metrics["pvetsc_per_view"] = pvetsc_per_view
-            view_metrics["pvetsc_mean"] = np.mean(pvetsc_per_view)
-
-            # PVETSC for merged per view
-            pvetsc_merged_per_view = []
-            for v in range(num_views):
-                pvetsc = self.metrics.pvetsc(
-                    merged_vertices_neutral_stacked[v : v + 1],  # [1, N_verts, 3]
-                    gt_vertices_neutral_stacked[v : v + 1],  # [1, N_verts, 3]
-                )
-                pvetsc_merged_per_view.append(float(pvetsc))
-            view_metrics["pvetsc_merged_per_view"] = pvetsc_merged_per_view
-            view_metrics["pvetsc_merged_mean"] = np.mean(pvetsc_merged_per_view)
-        else:
-            # Fallback to regular vertices if neutral pose not available
-            pvetsc_per_view = []
-            for v in range(num_views):
-                pvetsc = self.metrics.pvetsc(
-                    pred_vertices_stacked[v : v + 1]
-                    .cpu()
-                    .detach()
-                    .numpy(),  # [1, N_verts, 3]
-                    gt_vertices_stacked[v : v + 1]
-                    .cpu()
-                    .detach()
-                    .numpy(),  # [1, N_verts, 3]
-                )
-                pvetsc_per_view.append(float(pvetsc))
-            view_metrics["pvetsc_per_view"] = pvetsc_per_view
-            view_metrics["pvetsc_mean"] = np.mean(pvetsc_per_view)
-
-            # PVETSC for merged per view
-            pvetsc_merged_per_view = []
-            for v in range(num_views):
-                pvetsc = self.metrics.pvetsc(
-                    merged_vertices_stacked[v : v + 1]
-                    .cpu()
-                    .detach()
-                    .numpy(),  # [1, N_verts, 3]
-                    gt_vertices_stacked[v : v + 1]
-                    .cpu()
-                    .detach()
-                    .numpy(),  # [1, N_verts, 3]
-                )
-                pvetsc_merged_per_view.append(float(pvetsc))
-            view_metrics["pvetsc_merged_per_view"] = pvetsc_merged_per_view
-            view_metrics["pvetsc_merged_mean"] = np.mean(pvetsc_merged_per_view)
-
-        metrics["per_view"] = view_metrics
-
-        # Compute metrics for samples (if available)
-        # Note: samples are not currently generated (num_samples=0), but we can add support later
-        metrics["samples"] = {"note": "Samples not generated (num_samples=0)"}
-
-        # Overall merged metrics (averaged across views)
-        merged_metrics = {}
-        if gt_keypoints_stacked is not None:
-            merged_metrics["mpjpe"] = view_metrics.get("mpjpe_merged_mean", None)
-            merged_metrics["pampjpe"] = view_metrics.get("pampjpe_merged_mean", None)
-        merged_metrics["pve"] = view_metrics.get("pve_merged_mean", None)
-        merged_metrics["pvetsc"] = view_metrics.get("pvetsc_merged_mean", None)
-        metrics["merged"] = merged_metrics
-
-        return metrics
-
     def run_multiview_prediction(
         self,
         num_view: int = 4,
@@ -1055,13 +605,9 @@ class Trainer(BaseLightningModule):
                 }
         """
         # Get device from model parameters (works even when called outside Lightning training loop)
-        device = next(self.model.parameters()).device
-        print(f"Device: {device}")
+        device = self.device
 
-        dataloader = self.multiview_eval_dataloader(num_view=num_view, batch_size=1)
-
-        all_results = []
-        all_metrics = []  # Collect metrics from all batches
+        dataloader = self.multiview_eval_dataloader(num_view=num_view, batch_size=2)
 
         for batch_idx, batch in enumerate(dataloader):
             if max_batches is not None and batch_idx >= max_batches:
@@ -1074,754 +620,401 @@ class Trainer(BaseLightningModule):
 
             # Batch size is 1 by construction
             # Shapes: [1, V, ...] -> we work over the view dimension
-            num_views = int(
-                batch["num_views"][0].item()
-                if isinstance(batch["num_views"], torch.Tensor)
-                else batch["num_views"][0]
+            num_views = batch["num_views"][0].item()
+            serno = batch["selected_serno"][0].item()
+            indices = batch["selected_indices"][0].tolist()
+
+            # if the value is a tensor and its first two dims are [batch, num_views], flatten
+            bs, num_views = batch["img"].shape[:2]
+            for k, v in list(batch.items()):
+                if isinstance(v, torch.Tensor):
+                    if v.dim() >= 2 and v.shape[0] == bs and v.shape[1] == num_views:
+                        batch[k] = v.flatten(0, 1)
+
+            batch = self.preprocess(batch)
+
+            with torch.no_grad():
+                outputs = self.model(batch, num_samples=0)
+
+            pred_shape = outputs["mhr"]["shape"]
+            pred_scale = outputs["mhr"]["scale"]
+            shape_var = outputs["mhr"]["shape_uncertainty"]
+            scale_var = outputs["mhr"]["scale_uncertainty"]
+
+            # shape_var: [batch, D], want [batch, D, D] with diag elements
+            shape_var_diag = torch.diag_embed(shape_var)
+            scale_var_diag = torch.diag_embed(scale_var)
+
+            pred_shape = pred_shape.unflatten(0, (bs, num_views))
+            pred_scale = pred_scale.unflatten(0, (bs, num_views))
+            shape_var_diag = shape_var_diag.unflatten(0, (bs, num_views))
+            scale_var_diag = scale_var_diag.unflatten(0, (bs, num_views))
+
+            shape_mu_star, shape_sigma_star = self.merge_predictions_batch(
+                pred_shape, shape_var_diag
             )
 
-            # Some fields may be simple Python lists (e.g. serno, selected_indices)
-            serno = batch.get("selected_serno", [None])[0]
-            indices = batch.get("selected_indices", [None])[0]
+            # Variance for per-view and merged shape parameters
+            shape_var_unflattened = shape_var.unflatten(0, (bs, num_views))
+            merged_shape_var = torch.diagonal(shape_sigma_star, dim1=-2, dim2=-1)
 
-            # Track shape and scale parameters (mu) and their uncertainties (sigma) for each view
-            shape_params_per_view = []
-            scale_params_per_view = []
-            shape_uncertainties_per_view = []
-            scale_uncertainties_per_view = []
-
-            # Also track per-view predictions for reference
-            pred_vertices_per_view = []
-            pred_joints_per_view = []
-            # Track ground truth vertices per view
-            gt_vertices_per_view = []
-            # Track GT keypoints per view for metrics
-            gt_keypoints_3d_per_view = []
-            # Track GT shape and scale parameters per view (for neutral pose generation)
-            gt_shape_per_view = []
-            gt_scale_per_view = []
-            # Track per-view pose parameters for later use with merged shape/scale
-            global_rot_per_view = []
-            body_pose_per_view = []
-            hand_pose_per_view = []
-            face_expr_per_view = []
-            # Track per-view images and camera parameters for visualization
-            img_ori_per_view = []
-            pred_cam_t_per_view = []
-            focal_length_per_view = []
-            # Track samples per view (if generated)
-            samples_vertices_per_view = []
-            samples_joints_per_view = []
-
-            for view_idx in range(num_views):
-                # Create a single-view batch for this view
-                # The model expects [B, N, ...] where N is number of persons (not views)
-                view_batch = {}
-                for key, value in batch.items():
-                    if isinstance(value, torch.Tensor):
-                        # Extract this view's data and eliminate view dimension
-                        if value.dim() > 1 and value.shape[1] == num_views:
-                            # [B, V, ...] -> [B, ...] by selecting view_idx
-                            view_batch[key] = value[:, view_idx]
-                        else:
-                            view_batch[key] = value
-                    elif isinstance(value, list):
-                        # For list fields, just take this view's item
-                        view_batch[key] = (
-                            [value[view_idx]] if view_idx < len(value) else value
-                        )
-                    else:
-                        view_batch[key] = value
-
-                # Preprocess view_batch to get GT vertices (similar to training/validation step)
-                view_batch = self.preprocess(view_batch)
-
-                # Run full model forward pass to get predictions and uncertainties
-                with torch.no_grad():
-                    outputs = self.model(view_batch, num_samples=0)
-
-                # Extract predicted shape and scale parameters (mu)
-                pred_shape = outputs["mhr"]["shape"][0]  # [num_shape_comps]
-                pred_scale = outputs["mhr"]["scale"][0]  # [num_scale_comps]
-
-                # Extract uncertainties (these are variances, shape: [1, D])
-                shape_uncertainty = outputs["mhr"]["shape_uncertainty"][
-                    0
-                ]  # [num_shape_comps]
-                scale_uncertainty = outputs["mhr"]["scale_uncertainty"][
-                    0
-                ]  # [num_scale_comps]
-
-                # Also extract vertices/joints for reference
-                pred_verts = outputs["mhr"]["pred_vertices"][0]  # [N_verts, 3]
-                pred_joints = outputs["mhr"]["pred_keypoints_3d"][0]  # [N_joints, 3]
-
-                # Extract ground truth vertices for this view
-                # The batch should have vertices after preprocessing
-                gt_verts = view_batch["vertices"]
-                if isinstance(gt_verts, torch.Tensor):
-                    if gt_verts.dim() > 1:
-                        gt_verts = gt_verts[0]  # Take first person if [B, N, 3]
-                    gt_vertices_per_view.append(gt_verts.detach().cpu())
-                else:
-                    gt_vertices_per_view.append(gt_verts)
-
-                # Extract GT keypoints for metrics
-                gt_kp3d = view_batch.get("keypoints_3d", None)
-                if gt_kp3d is not None:
-                    if isinstance(gt_kp3d, torch.Tensor):
-                        if gt_kp3d.dim() > 1:
-                            gt_kp3d = gt_kp3d[0]  # Take first person if [B, N, 3]
-                        gt_keypoints_3d_per_view.append(gt_kp3d.detach().cpu())
-                    else:
-                        gt_keypoints_3d_per_view.append(gt_kp3d)
-                else:
-                    gt_keypoints_3d_per_view.append(None)
-
-                # Extract GT shape and scale parameters for neutral pose generation
-                # GT shape is directly available
-                gt_shape = view_batch["shape_params"]
-                if isinstance(gt_shape, torch.Tensor):
-                    if gt_shape.dim() > 1:
-                        gt_shape = gt_shape[0]  # Take first person if [B, N, ...]
-                    gt_shape_per_view.append(gt_shape.detach().cpu())
-                else:
-                    gt_shape_per_view.append(gt_shape)
-
-                # GT scale: extract actual scales (68 dims) directly, avoid unstable projection to lower dimensions
-                device = next(self.model.parameters()).device
-                gt_model_params = view_batch["model_params"]
-                if isinstance(gt_model_params, torch.Tensor):
-                    if gt_model_params.dim() > 1:
-                        gt_model_params = gt_model_params[
-                            0
-                        ]  # Take first person if [B, N, ...]
-                    # Extract actual scales (last 68 elements)
-                    gt_actual_scales = gt_model_params[-68:].to(device)  # [68]
-                    gt_scale_per_view.append(gt_actual_scales.detach().cpu())
-                else:
-                    # If not tensor, try to convert
-                    gt_actual_scales = torch.tensor(
-                        gt_model_params[-68:], device=device
-                    )
-                    gt_scale_per_view.append(gt_actual_scales.detach().cpu())
-
-                # Extract pose parameters for this view (to use with merged shape/scale later)
-                global_rot = outputs["mhr"]["global_rot"][0]  # [3]
-                body_pose = outputs["mhr"]["body_pose"][0]  # [body_pose_dim]
-                hand_pose = outputs["mhr"]["hand"][0]  # [hand_pose_dim]
-                face_expr = outputs["mhr"]["face"][0]  # [face_expr_dim]
-
-                # Extract original image and camera parameters for visualization
-                # img_ori might be in the original batch (before preprocessing) or in view_batch
-                img_ori = None
-                if "img_ori" in view_batch:
-                    img_ori = view_batch["img_ori"]
-                    # Handle NoCollate wrapper or direct numpy array
-                    if isinstance(img_ori, list) and len(img_ori) > 0:
-                        img_ori = img_ori[0]
-                        if hasattr(img_ori, "data"):
-                            img_ori = img_ori.data
-                    if isinstance(img_ori, torch.Tensor):
-                        img_ori = img_ori.cpu().detach().numpy()
-                    # Remove any batch dimensions
-                    while img_ori is not None and len(img_ori.shape) > 3:
-                        img_ori = img_ori.squeeze(0)
-                    # Ensure it's HWC format
-                    if img_ori is not None and len(img_ori.shape) == 3:
-                        if img_ori.shape[0] == 3:  # CHW format
-                            img_ori = img_ori.transpose(1, 2, 0)
-                elif "img_ori" in batch:
-                    # Try to get from original batch (multiview format)
-                    batch_img_ori = batch["img_ori"]
-                    if isinstance(batch_img_ori, list):
-                        if view_idx < len(batch_img_ori):
-                            img_ori = batch_img_ori[view_idx]
-                            if hasattr(img_ori, "data"):
-                                img_ori = img_ori.data
-                            if isinstance(img_ori, torch.Tensor):
-                                img_ori = img_ori.cpu().detach().numpy()
-                            # Remove any batch dimensions
-                            while img_ori is not None and len(img_ori.shape) > 3:
-                                img_ori = img_ori.squeeze(0)
-                            if img_ori is not None and len(img_ori.shape) == 3:
-                                if img_ori.shape[0] == 3:  # CHW format
-                                    img_ori = img_ori.transpose(1, 2, 0)
-
-                if img_ori is None:
-                    # Fallback: use processed image if img_ori not available
-                    img_processed = view_batch.get("img", None)
-                    if img_processed is not None:
-                        if isinstance(img_processed, torch.Tensor):
-                            img_processed = (
-                                img_processed[0, 0].cpu().detach().numpy()
-                            )  # [C, H, W]
-                            img_processed = img_processed.transpose(
-                                1, 2, 0
-                            )  # [H, W, C]
-                            # Denormalize if needed (assuming ImageNet normalization)
-                            img_processed = (
-                                img_processed * np.array([0.229, 0.224, 0.225])
-                                + np.array([0.485, 0.456, 0.406])
-                            ) * 255.0
-                            img_processed = np.clip(img_processed, 0, 255).astype(
-                                np.uint8
-                            )
-                        img_ori = img_processed
-
-                img_ori_per_view.append(img_ori)
-
-                # Extract camera translation and focal length
-                pred_cam_t = outputs["mhr"]["pred_cam_t"][0]  # [3]
-                if isinstance(pred_cam_t, torch.Tensor):
-                    pred_cam_t = pred_cam_t.cpu().detach().numpy()
-                pred_cam_t_per_view.append(pred_cam_t)
-
-                focal_length = outputs["mhr"]["focal_length"][0]
-                if isinstance(focal_length, torch.Tensor):
-                    focal_length = focal_length.cpu().detach().numpy()
-                # Extract scalar if it's an array
-                if isinstance(focal_length, np.ndarray):
-                    focal_length = float(
-                        focal_length.item()
-                        if focal_length.size == 1
-                        else focal_length[0]
-                    )
-                focal_length_per_view.append(focal_length)
-
-                shape_params_per_view.append(pred_shape)
-                scale_params_per_view.append(pred_scale)
-                shape_uncertainties_per_view.append(shape_uncertainty)
-                scale_uncertainties_per_view.append(scale_uncertainty)
-                pred_vertices_per_view.append(pred_verts)
-                pred_joints_per_view.append(pred_joints)
-                global_rot_per_view.append(global_rot)
-                body_pose_per_view.append(body_pose)
-                hand_pose_per_view.append(hand_pose)
-                face_expr_per_view.append(face_expr)
-
-            # Stack shape and scale parameters (mu) and uncertainties (sigma)
-            # mu_shape: [N_views, D_shape], mu_scale: [N_views, D_scale]
-            mu_shape = torch.stack(shape_params_per_view, dim=0)  # [N_views, D_shape]
-            mu_scale = torch.stack(scale_params_per_view, dim=0)  # [N_views, D_scale]
-
-            # Stack uncertainties: [N_views, D_shape] and [N_views, num_selected_scales]
-            # Note: scale_uncertainty is only predicted for selected indices
-            shape_uncertainties = torch.stack(
-                shape_uncertainties_per_view, dim=0
-            )  # [N_views, D_shape]
-            scale_uncertainties = torch.stack(
-                scale_uncertainties_per_view, dim=0
-            )  # [N_views, num_selected_scales]
-
-            # Selected scale component indices (same as in forward pass)
-            selected_scale_comps_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
-            num_selected_scales = len(selected_scale_comps_indices)
-
-            # Construct diagonal covariance matrices from uncertainties
-            # sigma_shape: [N_views, D_shape, D_shape]
-            N_views = mu_shape.shape[0]
-            D_shape = mu_shape.shape[1]
-            D_scale = mu_scale.shape[1]
-
-            sigma_shape_list = []
-            sigma_scale_selected_list = []
-
-            for view_idx in range(N_views):
-                # Create diagonal covariance matrices from uncertainties (variances)
-                sigma_shape = torch.diag(
-                    shape_uncertainties[view_idx]
-                )  # [D_shape, D_shape]
-                # scale_uncertainty is only for selected indices
-                sigma_scale_selected = torch.diag(
-                    scale_uncertainties[view_idx]
-                )  # [num_selected_scales, num_selected_scales]
-
-                sigma_shape_list.append(sigma_shape)
-                sigma_scale_selected_list.append(sigma_scale_selected)
-
-            sigma_shape = torch.stack(
-                sigma_shape_list, dim=0
-            )  # [N_views, D_shape, D_shape]
-            sigma_scale_selected = torch.stack(
-                sigma_scale_selected_list, dim=0
-            )  # [N_views, num_selected_scales, num_selected_scales]
-
-            # Merge shape parameters (full)
-            mu_star_shape, sigma_star_shape = self.merge_predictions(
-                mu_shape, sigma_shape
+            indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
+            scale_mu_star, scale_sigma_star = self.merge_predictions_batch(
+                pred_scale[..., indices], scale_var_diag
             )
+            scale_mu_star_full = pred_scale.mean(dim=1)
+            scale_mu_star_full[..., indices] = scale_mu_star
 
-            # Merge scale parameters (only selected indices)
-            # Extract selected scale components from mu_scale
-            mu_scale_selected = mu_scale[
-                :, selected_scale_comps_indices
-            ]  # [N_views, num_selected_scales]
-            mu_star_scale_selected, sigma_star_scale_selected = self.merge_predictions(
-                mu_scale_selected, sigma_scale_selected
+            merged_mhr_output = self.model.head_pose.mhr_forward(
+                shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
+                scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
+                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                global_rot=outputs["mhr"]["global_rot"],
+                body_pose_params=outputs["mhr"]["body_pose"],
+                hand_pose_params=outputs["mhr"]["hand"],
+                expr_params=outputs["mhr"]["face"],
+                return_keypoints=True,
+                return_joint_coords=True,
+                return_model_params=True,
+                return_joint_rotations=True,
+                do_pcblend=True,
             )
-
-            # Reconstruct full scale parameters: merged values for selected indices, average for others
-            mu_star_scale = mu_scale.mean(
-                dim=0
-            )  # [D_scale] - average of all views for non-selected
-            mu_star_scale[selected_scale_comps_indices] = (
-                mu_star_scale_selected  # Replace with merged values
+            verts_star, j3d_star, jcoords_star, mhr_model_params, joint_global_rots = (
+                merged_mhr_output
             )
-
-            # For sigma_star_scale, create a full covariance matrix
-            # Since sigma_star_scale_selected is diagonal (from merging diagonal matrices),
-            # we only need to fill in the diagonal elements
-            default_uncertainty = scale_uncertainties.mean().item()
-            sigma_star_scale = (
-                torch.eye(
-                    D_scale, device=mu_star_scale.device, dtype=mu_star_scale.dtype
-                )
-                * default_uncertainty
-            )
-            # Fill in merged diagonal covariance for selected indices
-            for i, idx in enumerate(selected_scale_comps_indices):
-                sigma_star_scale[idx, idx] = sigma_star_scale_selected[i, i]
-
-            # Create full sigma_scale for storing per-view uncertainties (for reference)
-            # For selected indices, use actual uncertainties; for others, use default
-            sigma_scale_list_full = []
-            for view_idx in range(N_views):
-                sigma_scale_full = (
-                    torch.eye(D_scale, device=mu_scale.device, dtype=mu_scale.dtype)
-                    * default_uncertainty
-                )
-                # Fill in selected indices with actual uncertainties
-                for i, idx in enumerate(selected_scale_comps_indices):
-                    sigma_scale_full[idx, idx] = scale_uncertainties[view_idx, i]
-                sigma_scale_list_full.append(sigma_scale_full)
-            sigma_scale = torch.stack(
-                sigma_scale_list_full, dim=0
-            )  # [N_views, D_scale, D_scale]
-
-            # Run MHR forward with merged shape and scale parameters for EACH view
-            # Use view-specific pose parameters but merged shape/scale
-            device = next(self.model.parameters()).device
-            mu_star_vertices_per_view = []
-            mu_star_joints_per_view = []
-
-            for view_idx in range(N_views):
-                # Get view-specific pose parameters
-                global_rot = global_rot_per_view[view_idx]  # [3]
-                body_pose = body_pose_per_view[view_idx]  # [body_pose_dim]
-                hand_pose = hand_pose_per_view[view_idx]  # [hand_pose_dim]
-                face_expr = face_expr_per_view[view_idx]  # [face_expr_dim]
-
-                # Run MHR with merged shape/scale but view-specific pose
-                mhr_output = self.model.head_pose.mhr_forward(
-                    global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
-                    global_rot=global_rot.unsqueeze(0),
-                    body_pose_params=body_pose.unsqueeze(0),
-                    hand_pose_params=hand_pose.unsqueeze(0),
-                    scale_params=mu_star_scale.unsqueeze(0),
-                    shape_params=mu_star_shape.unsqueeze(0),
-                    expr_params=face_expr.unsqueeze(0),
-                    return_keypoints=True,
-                    return_joint_coords=True,
-                    do_pcblend=True,
-                )
-
-                # mhr_forward returns (verts, j3d, jcoords, ...) when return_keypoints=True and return_joint_coords=True
-                verts_star = mhr_output[0]  # [1, N_verts, 3]
-                j3d_star = mhr_output[1]  # [1, N_joints, 3]
-                jcoords_star = mhr_output[2]  # [1, N_joints, 3]
-
-                # Apply camera system difference (same as in forward pass)
-                verts_star[..., [1, 2]] *= -1
-                j3d_star[..., [1, 2]] *= -1
-
-                mu_star_vertices_per_view.append(
-                    verts_star[0].detach().cpu()
-                )  # [N_verts, 3]
-                j3d_star_70 = (
-                    j3d_star[0, :70].detach().cpu()
-                )  # [70, 3] - first 70 keypoints
-                # Extract dense keypoints from merged vertices if enabled
-                if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
-                    verts_star_cpu = verts_star[0].detach().cpu()  # [N_verts, 3]
-                    dense_kp3d_star = verts_star_cpu[
-                        self.mhr_dense_kp_indices
-                    ]  # [N_dense, 3]
-                    j3d_star_full = torch.cat(
-                        [j3d_star_70, dense_kp3d_star], dim=0
-                    )  # [70+N_dense, 3]
-                    mu_star_joints_per_view.append(j3d_star_full)
-                else:
-                    mu_star_joints_per_view.append(j3d_star_70)  # [70, 3]
+            verts_star[..., [1, 2]] *= -1
+            j3d_star[..., [1, 2]] *= -1
 
             # Visualize predicted mean bodies and merged bodies on each view's image
             from sam_3d_body.visualization.renderer import Renderer
             import os
 
-            for view_idx in range(N_views):
-                if img_ori_per_view[view_idx] is None:
-                    continue
+            # Initialize gallery: list of lists to store rendered images [bs][num_views]
+            gallery = [[None for _ in range(num_views)] for _ in range(bs)]
 
-                img_ori = img_ori_per_view[view_idx].copy()
-                pred_cam_t = pred_cam_t_per_view[view_idx]
-                focal_length = focal_length_per_view[view_idx]
+            renderer = Renderer(
+                focal_length=outputs["mhr"]["focal_length"][0], faces=self.faces
+            )
+            for i in range(1):
+                for view in range(num_views):
+                    img_for_render = batch["img_ori"][view][i].cpu().detach().numpy()
 
-                # Convert vertices to numpy if needed
-                pred_verts_np = pred_vertices_per_view[view_idx]
-                if isinstance(pred_verts_np, torch.Tensor):
-                    pred_verts_np = pred_verts_np.cpu().detach().numpy()
+                    flat_idx = i * num_views + view
 
-                merged_verts_np = mu_star_vertices_per_view[view_idx]
-                if isinstance(merged_verts_np, torch.Tensor):
-                    merged_verts_np = merged_verts_np.cpu().detach().numpy()
-
-                # Ensure image is in correct format (H, W, 3) with values in [0, 255]
-                # Remove any extra batch dimensions
-                while len(img_ori.shape) > 3:
-                    img_ori = img_ori.squeeze(0)
-
-                # Handle CHW format if needed
-                if len(img_ori.shape) == 3 and img_ori.shape[0] == 3:
-                    img_ori = img_ori.transpose(1, 2, 0)
-
-                if img_ori.dtype != np.uint8:
-                    if img_ori.max() <= 1.0:
-                        img_ori = (img_ori * 255).astype(np.uint8)
-                    else:
-                        img_ori = img_ori.astype(np.uint8)
-
-                # Ensure final shape is (H, W, 3)
-                if len(img_ori.shape) != 3 or img_ori.shape[2] != 3:
-                    raise ValueError(
-                        f"Expected image shape (H, W, 3), got {img_ori.shape}"
+                    verts = (
+                        outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
+                    )
+                    cam_t = (
+                        outputs["mhr"]["pred_cam_t"][flat_idx].cpu().detach().numpy()
                     )
 
-                # img_ori is already in RGB format (from read_img which converts BGR to RGB)
-                # Ensure image is in [0, 255] range and correct format
-                img_for_render = img_ori.copy()
-                if img_for_render.dtype != np.uint8:
-                    if img_for_render.max() <= 1.0:
-                        img_for_render = (img_for_render * 255).astype(np.uint8)
-                    else:
-                        img_for_render = img_for_render.astype(np.uint8)
-
-                # Render predicted mean body on original image
-                # Use the same approach as my_visualize: compute fake translation to center mesh
-                renderer = Renderer(focal_length=focal_length, faces=self.faces)
-                pred_vertices_world = pred_verts_np + pred_cam_t
-                # Compute fake translation to center the mesh (using all vertices)
-                # Use the same approach as my_visualize: use last vertices for stability if available
-                num_verts = pred_vertices_world.shape[0]
-                if num_verts >= 2 * 18439:
-                    # Use last vertices for stability (same as my_visualize)
-                    fake_pred_cam_t = (
-                        np.max(pred_vertices_world[-2 * 18439 :], axis=0)
-                        + np.min(pred_vertices_world[-2 * 18439 :], axis=0)
-                    ) / 2
-                else:
-                    # Fallback: use all vertices
-                    fake_pred_cam_t = (
-                        np.max(pred_vertices_world, axis=0)
-                        + np.min(pred_vertices_world, axis=0)
-                    ) / 2
-                pred_vertices_centered = pred_vertices_world - fake_pred_cam_t
-
-                img_pred = (
-                    renderer(
-                        pred_vertices_centered,
-                        fake_pred_cam_t,
-                        img_for_render.copy(),  # Renderer expects [0, 255] range (it divides by 255 internally)
-                        mesh_base_color=LIGHT_BLUE,
-                        scene_bg_color=(1, 1, 1),
+                    gt_verts = (
+                        batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
                     )
-                    * 255
-                ).astype(np.uint8)
+                    gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
 
-                # Render merged body on original image
-                merged_vertices_world = merged_verts_np + pred_cam_t
-                # Compute fake translation for merged mesh
-                if num_verts >= 2 * 18439:
-                    fake_merged_cam_t = (
-                        np.max(merged_vertices_world[-2 * 18439 :], axis=0)
-                        + np.min(merged_vertices_world[-2 * 18439 :], axis=0)
-                    ) / 2
-                else:
-                    fake_merged_cam_t = (
-                        np.max(merged_vertices_world, axis=0)
-                        + np.min(merged_vertices_world, axis=0)
-                    ) / 2
-                merged_vertices_centered = merged_vertices_world - fake_merged_cam_t
+                    merged_verts = verts_star[flat_idx].cpu().detach().numpy()
 
-                img_merged = (
-                    renderer(
-                        merged_vertices_centered,
-                        fake_merged_cam_t,
-                        img_for_render.copy(),  # Renderer expects [0, 255] range (it divides by 255 internally)
-                        mesh_base_color=(
-                            0.9,
-                            0.3,
-                            0.3,
-                        ),  # Different color for merged (reddish)
-                        scene_bg_color=(1, 1, 1),
+                    gt_rendered_img = (
+                        renderer(
+                            gt_verts,
+                            gt_cam_t,
+                            img_for_render.copy(),
+                            mesh_base_color=LIGHT_BLUE,
+                            scene_bg_color=(1, 1, 1),
+                        )
+                        * 255
+                    ).astype(np.uint8)
+
+                    rendered_img = (
+                        renderer(
+                            verts,
+                            cam_t,
+                            img_for_render.copy(),
+                            mesh_base_color=(1.0, 0.8, 0.5),  # light orange
+                            scene_bg_color=(1, 1, 1),
+                        )
+                        * 255
+                    ).astype(np.uint8)
+
+                    rendered_merged_img = (
+                        renderer(
+                            merged_verts,
+                            cam_t,
+                            img_for_render.copy(),
+                            mesh_base_color=(0.5, 1.0, 0.5),  # light green
+                            scene_bg_color=(1, 1, 1),
+                        )
+                        * 255
+                    ).astype(np.uint8)
+
+                    # Add text labels to images
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 1.0
+                    font_scale_small = 0.6
+                    thickness = 2
+                    color = (255, 255, 255)  # White text
+                    bg_color = (0, 0, 0)  # Black background for text
+
+                    # Label GT image
+                    gt_label = f"GT view {view}"
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        gt_label, font, font_scale, thickness
                     )
-                    * 255
-                ).astype(np.uint8)
-
-                # Concatenate images: original, predicted, merged (all in RGB)
-                vis_img = np.concatenate([img_ori, img_pred, img_merged], axis=1)
-
-                # Convert to BGR for saving (cv2.imwrite expects BGR)
-                vis_img_bgr = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
-
-                # Save visualization
-                save_dir = self.vis_save_dir if self.vis_save_dir else "."
-                os.makedirs(save_dir, exist_ok=True)
-                save_path = os.path.join(
-                    save_dir,
-                    f"multiview_batch{batch_idx:03d}_view{view_idx:02d}_pred_and_merged.png",
-                )
-                cv2.imwrite(save_path, vis_img_bgr)
-                logger.info(f"Saved multiview visualization: {save_path}")
-
-            # Stack lists into tensors
-            pred_vertices_stacked = torch.stack(
-                pred_vertices_per_view, dim=0
-            )  # [N_views, N_verts, 3]
-            pred_joints_stacked = torch.stack(
-                pred_joints_per_view, dim=0
-            )  # [N_views, N_joints, 3] (may include dense kp)
-            mu_star_vertices_stacked = torch.stack(
-                mu_star_vertices_per_view, dim=0
-            )  # [N_views, N_verts, 3]
-            mu_star_joints_stacked = torch.stack(
-                mu_star_joints_per_view, dim=0
-            )  # [N_views, N_joints, 3] (may include dense kp)
-
-            # Stack GT vertices
-            gt_vertices_stacked = torch.stack(
-                gt_vertices_per_view, dim=0
-            )  # [N_views, N_verts, 3]
-
-            # Generate neutral pose bodies (zero pose, keep shape/scale)
-            # For GT: use GT shape/scale per view
-            # For predicted: use predicted shape/scale per view
-            # For merged: use merged shape/scale (same for all views)
-            device = next(self.model.parameters()).device
-            gt_vertices_neutral_per_view = []
-            pred_vertices_neutral_per_view = []
-            merged_vertices_neutral_per_view = []
-
-            # Zero pose parameters for neutral pose
-            zero_global_trans = torch.zeros(3, device=device)
-            zero_global_rot = torch.zeros(3, device=device)
-            zero_body_pose = torch.zeros(130, device=device)  # body_pose_dim = 130
-            zero_hand_pose = torch.zeros(108, device=device)  # hand_pose_dim = 54 * 2
-            zero_face_expr = torch.zeros(72, device=device)  # face_expr_dim = 72
-
-            for view_idx in range(N_views):
-                # GT neutral pose
-                # Use actual scales directly via scale_offsets to avoid unstable projection
-                gt_shape_view = gt_shape_per_view[view_idx].to(device)
-                gt_actual_scales_view = gt_scale_per_view[view_idx].to(
-                    device
-                )  # [68] actual scales
-                # Use scale_offsets to provide actual scales directly: scales = scale_mean + 0*scale_comps + (actual_scales - scale_mean)
-                gt_scale_offsets = gt_actual_scales_view - self.scale_mean.to(
-                    device
-                )  # [68]
-                zero_scale_params = torch.zeros(
-                    28, device=device
-                )  # [28] zero scale params
-                gt_neutral_output = self.model.head_pose.mhr_forward(
-                    global_trans=zero_global_trans.unsqueeze(0),
-                    global_rot=zero_global_rot.unsqueeze(0),
-                    body_pose_params=zero_body_pose.unsqueeze(0),
-                    hand_pose_params=zero_hand_pose.unsqueeze(0),
-                    scale_params=zero_scale_params.unsqueeze(0),
-                    shape_params=gt_shape_view.unsqueeze(0),
-                    expr_params=zero_face_expr.unsqueeze(0),
-                    scale_offsets=gt_scale_offsets.unsqueeze(0),
-                    return_keypoints=True,
-                    return_joint_coords=True,
-                    do_pcblend=True,
-                )
-                gt_neutral_verts = gt_neutral_output[0][0]  # [N_verts, 3]
-                gt_neutral_verts[..., [1, 2]] *= -1  # Camera system difference
-                gt_vertices_neutral_per_view.append(gt_neutral_verts.detach().cpu())
-
-                # Predicted neutral pose (using predicted shape/scale for this view)
-                pred_shape_view = shape_params_per_view[view_idx].to(device)
-                pred_scale_view = scale_params_per_view[view_idx].to(device)
-                pred_neutral_output = self.model.head_pose.mhr_forward(
-                    global_trans=zero_global_trans.unsqueeze(0),
-                    global_rot=zero_global_rot.unsqueeze(0),
-                    body_pose_params=zero_body_pose.unsqueeze(0),
-                    hand_pose_params=zero_hand_pose.unsqueeze(0),
-                    scale_params=pred_scale_view.unsqueeze(0),
-                    shape_params=pred_shape_view.unsqueeze(0),
-                    expr_params=zero_face_expr.unsqueeze(0),
-                    return_keypoints=True,
-                    return_joint_coords=True,
-                    do_pcblend=True,
-                )
-                pred_neutral_verts = pred_neutral_output[0][0]  # [N_verts, 3]
-                pred_neutral_verts[..., [1, 2]] *= -1  # Camera system difference
-                pred_vertices_neutral_per_view.append(pred_neutral_verts.detach().cpu())
-
-                # Merged neutral pose (using merged shape/scale, same for all views)
-                merged_neutral_output = self.model.head_pose.mhr_forward(
-                    global_trans=zero_global_trans.unsqueeze(0),
-                    global_rot=zero_global_rot.unsqueeze(0),
-                    body_pose_params=zero_body_pose.unsqueeze(0),
-                    hand_pose_params=zero_hand_pose.unsqueeze(0),
-                    scale_params=mu_star_scale.unsqueeze(0).to(device),
-                    shape_params=mu_star_shape.unsqueeze(0).to(device),
-                    expr_params=zero_face_expr.unsqueeze(0),
-                    return_keypoints=True,
-                    return_joint_coords=True,
-                    do_pcblend=True,
-                )
-                merged_neutral_verts = merged_neutral_output[0][0]  # [N_verts, 3]
-                merged_neutral_verts[..., [1, 2]] *= -1  # Camera system difference
-                merged_vertices_neutral_per_view.append(
-                    merged_neutral_verts.detach().cpu()
-                )
-
-            # Stack neutral pose vertices
-            gt_vertices_neutral_stacked = torch.stack(
-                gt_vertices_neutral_per_view, dim=0
-            )  # [N_views, N_verts, 3]
-            pred_vertices_neutral_stacked = torch.stack(
-                pred_vertices_neutral_per_view, dim=0
-            )  # [N_views, N_verts, 3]
-            merged_vertices_neutral_stacked = torch.stack(
-                merged_vertices_neutral_per_view, dim=0
-            )  # [N_views, N_verts, 3]
-
-            result = {
-                "serno": serno,
-                "indices": indices,
-                # Ground truth vertices per view
-                "gt_vertices": gt_vertices_stacked,  # [N_views, N_verts, 3] or None - GT vertices per view
-                # Per-view predictions (for reference)
-                "pred_vertices": pred_vertices_stacked,  # [N_views, N_verts, 3] - predicted vertices per view
-                "pred_joints": pred_joints_stacked,  # [N_views, N_joints, 3] - predicted joints per view
-                # Shape parameters: mu and sigma
-                "mu_shape": mu_shape,  # [N_views, D_shape] - predicted shape params per view
-                "sigma_shape": sigma_shape,  # [N_views, D_shape, D_shape] - shape uncertainties (covariances)
-                "mu_star_shape": mu_star_shape,  # [D_shape] - merged shape params
-                "sigma_star_shape": sigma_star_shape,  # [D_shape, D_shape] - merged shape uncertainty
-                # Scale parameters: mu and sigma
-                "mu_scale": mu_scale,  # [N_views, D_scale] - predicted scale params per view
-                "sigma_scale": sigma_scale,  # [N_views, D_scale, D_scale] - scale uncertainties (covariances)
-                "mu_star_scale": mu_star_scale,  # [D_scale] - merged scale params
-                "sigma_star_scale": sigma_star_scale,  # [D_scale, D_scale] - merged scale uncertainty
-                # Final merged predictions (vertices and joints from merged parameters, per view)
-                "mu_star_vertices": mu_star_vertices_stacked,  # [N_views, N_verts, 3] - merged vertices per view
-                "mu_star_joints": mu_star_joints_stacked,  # [N_views, 70, 3] - merged joints per view
-                # Neutral pose vertices (zero pose, keep shape/scale)
-                "gt_vertices_neutral": gt_vertices_neutral_stacked,  # [N_views, N_verts, 3] - GT neutral pose per view
-                "pred_vertices_neutral": pred_vertices_neutral_stacked,  # [N_views, N_verts, 3] - predicted neutral pose per view
-                "merged_vertices_neutral": merged_vertices_neutral_stacked,  # [N_views, N_verts, 3] - merged neutral pose per view
-            }
-            all_results.append(result)
-
-            # Compute metrics for each view, samples, and merged
-            metrics_dict = self._compute_multiview_metrics(
-                result,
-                gt_keypoints_3d_per_view,
-                pred_joints_stacked,
-                mu_star_joints_stacked,
-                gt_vertices_stacked,
-                pred_vertices_stacked,
-                mu_star_vertices_stacked,
-                gt_vertices_neutral_stacked,
-                pred_vertices_neutral_stacked,
-                merged_vertices_neutral_stacked,
-            )
-            result["metrics"] = metrics_dict
-            all_metrics.append(metrics_dict)  # Collect for averaging
-
-            # Log metrics
-            logger.info(f"Batch {batch_idx} Metrics:")
-            for metric_name, metric_value in metrics_dict.items():
-                if isinstance(metric_value, dict):
-                    logger.info(f"  {metric_name}:")
-                    for sub_name, sub_value in metric_value.items():
-                        if isinstance(sub_value, (int, float)):
-                            logger.info(f"    {sub_name}: {sub_value:.4f}")
-                        else:
-                            logger.info(f"    {sub_name}: {sub_value}")
-                elif isinstance(metric_value, (int, float)):
-                    logger.info(f"  {metric_name}: {metric_value:.4f}")
-                else:
-                    logger.info(f"  {metric_name}: {metric_value}")
-
-            # Visualize posed bodies - save one file per batch
-            save_path_posed = os.path.join(
-                self.visualiser.save_dir,
-                f"merging_visualization_batch{batch_idx:03d}.png",
-            )
-            self.visualiser.visualise_merging(
-                result, batch, save_path=save_path_posed, suffix=None, normalise=False
-            )
-
-            # Visualize neutral pose bodies (with height normalization by default) - save one file per batch
-            neutral_result = {
-                "gt_vertices": result["gt_vertices_neutral"],
-                "pred_vertices": result["pred_vertices_neutral"],
-                "mu_star_vertices": result["merged_vertices_neutral"],
-            }
-            save_path_neutral = os.path.join(
-                self.visualiser.save_dir,
-                f"merging_visualization_batch{batch_idx:03d}_neutral.png",
-            )
-            self.visualiser.visualise_merging(
-                neutral_result,
-                batch,
-                save_path=save_path_neutral,
-                suffix="neutral",
-                normalise=True,
-            )
-
-        # Compute and print final average metrics across all batches
-        if len(all_metrics) > 0:
-            final_avg_metrics = self._compute_average_metrics(all_metrics)
-            logger.info("=" * 80)
-            logger.info("FINAL AVERAGE METRICS (across all batches):")
-            logger.info("=" * 80)
-            self._print_metrics(final_avg_metrics, indent="")
-            logger.info("=" * 80)
-
-        # Stack all results to restore batch dimension
-        if len(all_results) == 0:
-            return {}
-
-        # Collect all values for each key
-        stacked_results = {}
-        for key in all_results[0].keys():
-            values = [result[key] for result in all_results]
-
-            # Handle tensor fields - stack them
-            if isinstance(values[0], torch.Tensor):
-                stacked_results[key] = torch.stack(values, dim=0)  # [B, ...]
-            # Handle list fields - keep as list or convert to tensor if all are tensors
-            elif isinstance(values[0], list):
-                # Check if list contains tensors that can be stacked
-                if len(values[0]) > 0 and isinstance(values[0][0], torch.Tensor):
-                    # Stack each list element, then stack across batch
-                    # This creates [B, N_views, ...] for per-view data
-                    stacked_results[key] = torch.stack(
-                        [torch.stack(v, dim=0) for v in values], dim=0
+                    cv2.rectangle(
+                        gt_rendered_img,
+                        (10, 10),
+                        (10 + text_width + 4, 10 + text_height + baseline + 4),
+                        bg_color,
+                        -1,
                     )
-                else:
-                    # Keep as list of lists
-                    stacked_results[key] = values
-            else:
-                # For non-tensor fields (e.g., serno, indices), keep as list
-                stacked_results[key] = values
+                    cv2.putText(
+                        gt_rendered_img,
+                        gt_label,
+                        (12, 10 + text_height),
+                        font,
+                        font_scale,
+                        color,
+                        thickness,
+                    )
 
-        return stacked_results
+                    # Label predicted image
+                    pred_label = f"Pred view {view}"
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        pred_label, font, font_scale, thickness
+                    )
+                    cv2.rectangle(
+                        rendered_img,
+                        (10, 10),
+                        (10 + text_width + 4, 10 + text_height + baseline + 4),
+                        bg_color,
+                        -1,
+                    )
+                    cv2.putText(
+                        rendered_img,
+                        pred_label,
+                        (12, 10 + text_height),
+                        font,
+                        font_scale,
+                        color,
+                        thickness,
+                    )
+
+                    # Add per-view predicted shape parameters (first 5) and uncertainties
+                    pred_mu = pred_shape[i, view].cpu().detach().numpy()
+                    pred_var = shape_var_unflattened[i, view].cpu().detach().numpy()
+                    mu_str = "pred shape mean: " + " ".join(
+                        f"{v:.2f}" for v in pred_mu[:5]
+                    )
+                    sigma_str = "pred shape var: " + " ".join(
+                        f"{v:.2f}" for v in pred_var[:5]
+                    )
+
+                    pred_text_lines = [mu_str, sigma_str]
+                    y_start = 10 + text_height + baseline + 10
+                    y_offset = y_start
+                    for line in pred_text_lines:
+                        (tw, th), bl = cv2.getTextSize(
+                            line, font, font_scale_small, thickness
+                        )
+                        cv2.rectangle(
+                            rendered_img,
+                            (10, y_offset),
+                            (10 + tw + 4, y_offset + th + bl + 4),
+                            bg_color,
+                            -1,
+                        )
+                        cv2.putText(
+                            rendered_img,
+                            line,
+                            (12, y_offset + th),
+                            font,
+                            font_scale_small,
+                            color,
+                            thickness,
+                        )
+                        y_offset += th + bl + 6
+
+                    # Label merged image
+                    merged_label = f"Merged view {view}"
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        merged_label, font, font_scale, thickness
+                    )
+                    cv2.rectangle(
+                        rendered_merged_img,
+                        (10, 10),
+                        (10 + text_width + 4, 10 + text_height + baseline + 4),
+                        bg_color,
+                        -1,
+                    )
+                    cv2.putText(
+                        rendered_merged_img,
+                        merged_label,
+                        (12, 10 + text_height),
+                        font,
+                        font_scale,
+                        color,
+                        thickness,
+                    )
+
+                    # Add merged shape parameters (first 5) and uncertainties
+                    merged_mu = shape_mu_star[i].cpu().detach().numpy()
+                    merged_var = merged_shape_var[i].cpu().detach().numpy()
+                    m_mu_str = "merged shape mean: " + " ".join(
+                        f"{v:.2f}" for v in merged_mu[:5]
+                    )
+                    m_sigma_str = "merged shape var: " + " ".join(
+                        f"{v:.2f}" for v in merged_var[:5]
+                    )
+
+                    merged_text_lines = [m_mu_str, m_sigma_str]
+                    y_start_m = 10 + text_height + baseline + 10
+                    y_offset_m = y_start_m
+                    for line in merged_text_lines:
+                        (tw, th), bl = cv2.getTextSize(
+                            line, font, font_scale_small, thickness
+                        )
+                        cv2.rectangle(
+                            rendered_merged_img,
+                            (10, y_offset_m),
+                            (10 + tw + 4, y_offset_m + th + bl + 4),
+                            bg_color,
+                            -1,
+                        )
+                        cv2.putText(
+                            rendered_merged_img,
+                            line,
+                            (12, y_offset_m + th),
+                            font,
+                            font_scale_small,
+                            color,
+                            thickness,
+                        )
+                        y_offset_m += th + bl + 6
+
+                    gallery[i][view] = np.concatenate(
+                        [gt_rendered_img, rendered_img, rendered_merged_img], axis=1
+                    )
+
+            gallery_rows = []
+            for i in range(1):
+                row = np.concatenate(
+                    [gallery[i][view] for view in range(num_views)], axis=0
+                )
+                gallery_rows.append(row)
+
+            # gallery_img = np.concatenate(gallery_rows, axis=0)
+            gallery_img = gallery_rows[0]
+            gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
+
+            save_dir = self.vis_save_dir if self.vis_save_dir else "."
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(
+                save_dir,
+                f"multiview_batch{batch_idx:03d}_bs{bs}_views{num_views}.png",
+            )
+            cv2.imwrite(save_path, gallery_img_bgr)
+            logger.info(
+                f"Saved multiview gallery: {save_path} (shape: {gallery_img.shape})"
+            )
+
+            # get neutral gt params
+            gt_shape = batch["shape_params"]
+            gt_model_params = batch["model_params"]
+            gt_face_params = batch["face_expr_coeffs"]
+            gt_model_params[:, :-68] = torch.zeros_like(gt_model_params[:, :-68])
+            gt_face_params = torch.zeros_like(gt_face_params)
+            gt_neutral_mhr_output = self.model.head_pose.mhr(
+                gt_shape, gt_model_params, gt_face_params
+            )
+            gt_verts, gt_skeleton_state = gt_neutral_mhr_output
+            gt_joint_coords, gt_joint_quats, _ = torch.split(
+                gt_skeleton_state, [3, 4, 1], dim=2
+            )
+            gt_verts = gt_verts / 100
+            gt_joint_coords = gt_joint_coords / 100
+
+            # get neutral pred
+            per_view_neutral_mhr_output = self.model.head_pose.mhr_forward(
+                shape_params=pred_shape.flatten(0, 1),
+                scale_params=pred_scale.flatten(0, 1),
+                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                global_rot=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                body_pose_params=torch.zeros_like(outputs["mhr"]["body_pose"]),
+                hand_pose_params=torch.zeros_like(outputs["mhr"]["hand"]),
+                expr_params=torch.zeros_like(outputs["mhr"]["face"]),
+                return_joint_coords=True,
+            )
+            per_view_neutral_verts, per_view_neutral_joint_coords = (
+                per_view_neutral_mhr_output
+            )
+
+            # get merged neutral pred
+            merged_neutral_mhr_output = self.model.head_pose.mhr_forward(
+                shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
+                scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
+                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                global_rot=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                body_pose_params=torch.zeros_like(outputs["mhr"]["body_pose"]),
+                hand_pose_params=torch.zeros_like(outputs["mhr"]["hand"]),
+                expr_params=torch.zeros_like(outputs["mhr"]["face"]),
+                return_joint_coords=True,
+            )
+            merged_neutral_verts, merged_neutral_joint_coords = (
+                merged_neutral_mhr_output
+            )
+
+            # ----- mpjpe -----
+            # per-view
+            per_view_mpjpe = torch.sqrt(
+                ((per_view_neutral_joint_coords - gt_joint_coords) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+            # merged
+            merged_mpjpe = torch.sqrt(
+                ((merged_neutral_joint_coords - gt_joint_coords) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+
+            # ----- pve -----
+            # per-view
+            per_view_pve = torch.sqrt(
+                ((per_view_neutral_verts - gt_verts) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+            # merged
+            merged_pve = torch.sqrt(
+                ((merged_neutral_verts - gt_verts) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+
+            # ----- pampjpe -----
+            from sam_3d_body.metrics.metrics_tracker import reconstruction_error
+
+            # per-view
+            per_view_pampjpe, _ = reconstruction_error(
+                per_view_neutral_joint_coords.cpu().detach().numpy(),
+                gt_joint_coords.cpu().detach().numpy(),
+            )
+            # merged
+            merged_pampjpe, _ = reconstruction_error(
+                merged_neutral_joint_coords.cpu().detach().numpy(),
+                gt_joint_coords.cpu().detach().numpy(),
+            )
+
+            print(
+                f"per-view mpjpe: {per_view_mpjpe.mean():.4f}, merged mpjpe: {merged_mpjpe.mean():.4f}"
+            )
+            print(
+                f"per-view pve: {per_view_pve.mean():.4f}, merged pve: {merged_pve.mean():.4f}"
+            )
+            print(
+                f"per-view pampjpe: {per_view_pampjpe.mean():.4f}, merged pampjpe: {merged_pampjpe.mean():.4f}"
+            )
+
+            neutral_renderer = Renderer(
+                focal_length=outputs["mhr"]["focal_length"][0], faces=self.faces
+            )
+
+            # import ipdb; ipdb.set_trace()
+
+        return None
 
     def merge_predictions(self, mu, sigma):
         """
@@ -1840,6 +1033,30 @@ class Trainer(BaseLightningModule):
         sigma_star = torch.linalg.inv(precision_mat)
 
         mu_star = sigma_star @ torch.einsum("nij,nj->ni", inv_sigma, mu).sum(dim=0)
+
+        return mu_star, sigma_star
+
+    def merge_predictions_batch(self, mu, sigma):
+        """
+        Batch version: Merge predictions from N images for B batches
+        Args:
+            mu: (B, N, D)
+            sigma: (B, N, D, D)
+        Returns:
+            mu_star: (B, D)
+            sigma_star: (B, D, D)
+        """
+        inv_sigma = torch.linalg.inv(sigma)  # (B, N, D, D)
+
+        precision_mat = torch.sum(inv_sigma, dim=1)  # (B, D, D)
+
+        sigma_star = torch.linalg.inv(precision_mat)  # (B, D, D)
+
+        # einsum: bnij,bnj->bni, then sum over N to get (B, D)
+        weighted_mu = torch.einsum("bnij,bnj->bni", inv_sigma, mu).sum(dim=1)  # (B, D)
+
+        # Batch matrix multiplication: (B, D, D) @ (B, D) -> (B, D)
+        mu_star = torch.bmm(sigma_star, weighted_mu.unsqueeze(-1)).squeeze(-1)  # (B, D)
 
         return mu_star, sigma_star
 

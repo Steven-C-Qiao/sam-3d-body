@@ -376,6 +376,7 @@ class DatasetHMR(Dataset):
             item['cam_ext'] = self.cam_ext[index]
             item['translation'] = self.cam_ext[index][:, 3]
             if 'trans_cam' in self.data.files:
+                # NOTE: This also modifies 'trans_cam', which results in the correct cam_t
                 item['translation'][:3] += self.trans_cam[index]
 
         item['trans_cam'] = torch.from_numpy(self.trans_cam[index]).float()
@@ -522,6 +523,74 @@ class MultiViewEvaluationDataset(Dataset):
                 self.serno_to_indices[serno] = []
             self.serno_to_indices[serno].append(idx)
     
+    def _select_diverse_viewpoints(self, indices, num_view):
+        """
+        Select num_view indices with somewhat diverse viewpoints.
+        Uses a randomized greedy approach to ensure diversity while allowing variation.
+        
+        Args:
+            indices: List of indices for a given serno
+            num_view: Number of views to select
+            
+        Returns:
+            Selected indices with diverse viewpoints
+        """
+        if len(indices) <= num_view:
+            return np.array(indices)
+        
+        # Extract rotation angles (viewpoints) for all indices
+        # lbs_model_params[:, 3:6] contains global rotation (Euler angles)
+        viewpoints = self.model_params[indices, 3:6]  # [N, 3] Euler angles
+        
+        # Compute pairwise angular distances between rotations
+        n = len(indices)
+        distances = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                # Compute angular distance between two Euler angle rotations
+                diff = viewpoints[i] - viewpoints[j]
+                # Handle angle wrapping (Euler angles are periodic)
+                diff = np.abs(diff)
+                diff = np.minimum(diff, 2 * np.pi - diff)
+                dist = np.linalg.norm(diff)
+                distances[i, j] = dist
+                distances[j, i] = dist
+        
+        # Randomized greedy algorithm: select views with diversity but allow variation
+        selected = []
+        remaining = set(range(n))
+        
+        # Start with a random view (adds variation)
+        first_idx = np.random.choice(list(remaining))
+        selected.append(first_idx)
+        remaining.remove(first_idx)
+        
+        # Greedily add views that are diverse from already selected views
+        # But allow some randomness by considering top-k candidates
+        while len(selected) < num_view and remaining:
+            candidates_with_distances = []
+            for candidate in remaining:
+                # Minimum distance from candidate to any selected view
+                min_dist_to_selected = min(distances[candidate, sel] for sel in selected)
+                candidates_with_distances.append((candidate, min_dist_to_selected))
+            
+            # Sort by distance (descending) and consider top candidates
+            candidates_with_distances.sort(key=lambda x: x[1], reverse=True)
+            
+            # Select from top 3 candidates (or all if fewer than 3) to add randomness
+            top_k = min(3, len(candidates_with_distances))
+            if top_k > 0:
+                top_candidates = [c[0] for c in candidates_with_distances[:top_k]]
+                chosen_idx = np.random.choice(top_candidates)
+                selected.append(chosen_idx)
+                remaining.remove(chosen_idx)
+            else:
+                break
+        
+        # Convert back to original indices
+        selected_indices = np.array([indices[i] for i in selected])
+        return selected_indices
+    
     def _load_single_view(self, index):
         """Load a single view (similar to DatasetHMR.__getitem__ but returns dict)."""
         item = {}
@@ -600,6 +669,14 @@ class MultiViewEvaluationDataset(Dataset):
         item['pose'] = torch.from_numpy(pose).float()
         item['betas'] = torch.from_numpy(self.betas[index]).float()
         item['imgname'] = imgname
+        if 'cam_int' in self.data.files:
+            item['focal_length'] = torch.tensor([self.cam_int[index][0, 0], self.cam_int[index][1, 1]])
+        item['cam_ext'] = self.cam_ext[index]
+        item['translation'] = self.cam_ext[index][:, 3]
+        if 'trans_cam' in self.data.files:
+            # NOTE: This also modifies 'trans_cam', which results in the correct cam_t
+            item['translation'][:3] += self.trans_cam[index]
+
         item['trans_cam'] = torch.from_numpy(self.trans_cam[index]).float()
         item['cam_ext'] = torch.from_numpy(self.cam_ext[index]).float()
         item['keypoints_orig'] = torch.from_numpy(mhr_keypoints_2d_orig).float()
@@ -628,16 +705,18 @@ class MultiViewEvaluationDataset(Dataset):
         selected_serno = self.valid_sernos[serno_idx]
         indices = self.serno_to_indices[selected_serno]
         
-        # Randomly sample num_view indices from this serno
+        # Select diverse viewpoints instead of random sampling
         if len(indices) > self.num_view:
-            selected_indices = np.random.choice(indices, size=self.num_view, replace=False)
+            selected_indices = self._select_diverse_viewpoints(indices, self.num_view)
         else:
             # If we have fewer than num_view, use all available and pad if needed
-            selected_indices = indices.copy()
+            selected_indices = np.array(indices.copy())
             if len(selected_indices) < self.num_view:
                 # Pad by repeating the last index
-                selected_indices = list(selected_indices) + [selected_indices[-1]] * (self.num_view - len(selected_indices))
-            selected_indices = np.array(selected_indices)
+                selected_indices = np.concatenate([
+                    selected_indices,
+                    np.repeat(selected_indices[-1:], self.num_view - len(selected_indices), axis=0)
+                ])
         
         # Load all views
         views = []

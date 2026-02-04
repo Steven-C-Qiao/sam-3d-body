@@ -104,8 +104,10 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
             )
             logger.info(f"Loaded {len(model_state_dict)} parameters from checkpoint")
             if missing_keys:
+                print(missing_keys)
                 logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys")
             if unexpected_keys:
+                print(unexpected_keys)
                 logger.warning(
                     f"Unexpected keys (ignored): {len(unexpected_keys)} keys"
                 )
@@ -113,11 +115,6 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
             logger.warning("No model parameters found in checkpoint state_dict!")
 
     results = trainer.run_multiview_prediction(num_view=4, max_batches=10)
-
-    import ipdb
-
-    ipdb.set_trace()
-    print("")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ class Loss(pl.LightningModule):
         # dynamically from tensors during training so we don't assume a fixed
         # dense keypoint length.
         self.hand_weight = hand_weight
-        
+
         # Debug visualization directory
         self.debug_vis_dir = None
 
@@ -143,8 +143,6 @@ class Loss(pl.LightningModule):
 
             pred_3dof_aa = matrix_to_axis_angle(pred_3dof_rotmat)  # B 23 3
 
-
-
             pred_1dof_angles = pred_pose_euler[..., all_param_1dof_rot_idxs]  # B 58
 
             pred_var = pred_mhr["pose_uncertainty"]
@@ -162,11 +160,10 @@ class Loss(pl.LightningModule):
             # # Debug visualization: compare GT and predicted axis-angle rotations
             # if self.training and hasattr(self, 'global_step') and self.global_step % 100 == 0:
             #     self._visualize_axis_angle_comparison(
-            #         gt_3dof_aa[0].detach().cpu(),  
+            #         gt_3dof_aa[0].detach().cpu(),
             #         pred_3dof_aa[0].detach().cpu(),
             #         step=self.global_step if hasattr(self, 'global_step') else 0
             #     )
-
 
             # import matplotlib.pyplot as plt
 
@@ -207,12 +204,8 @@ class Loss(pl.LightningModule):
             # plt.close(fig)
             # import ipdb; ipdb.set_trace()
 
-            loss_dict["loss_pose_3dof"] = (
-                self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_3dof
-            )
-            loss_dict["loss_pose_1dof"] = (
-                self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_1dof
-            )
+            loss_dict["loss_pose_3dof"] = self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_3dof
+            loss_dict["loss_pose_1dof"] = self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_1dof
 
         assert "total_loss" not in loss_dict
         loss_dict["total_loss"] = sum(
@@ -224,12 +217,12 @@ class Loss(pl.LightningModule):
         # import ipdb; ipdb.set_trace()
 
         return loss_dict
-    
+
     def _visualize_axis_angle_comparison(self, gt_aa, pred_aa, step=0):
         """
         Visualize comparison between GT and predicted axis-angle rotations.
         Shows all angles, pairing GT and Pred at the same center for each joint.
-        
+
         Args:
             gt_aa: [N, 3] tensor of GT axis-angle rotations
             pred_aa: [N, 3] tensor of predicted axis-angle rotations
@@ -237,88 +230,126 @@ class Loss(pl.LightningModule):
         """
         # Set up debug visualization directory
         if self.debug_vis_dir is None:
-            if hasattr(self, 'logger') and self.logger is not None:
-                if hasattr(self.logger, 'log_dir') and self.logger.log_dir:
-                    self.debug_vis_dir = os.path.join(self.logger.log_dir, 'debug_rotations')
+            if hasattr(self, "logger") and self.logger is not None:
+                if hasattr(self.logger, "log_dir") and self.logger.log_dir:
+                    self.debug_vis_dir = os.path.join(
+                        self.logger.log_dir, "debug_rotations"
+                    )
                 else:
-                    self.debug_vis_dir = './debug_rotations'
+                    self.debug_vis_dir = "./debug_rotations"
             else:
-                self.debug_vis_dir = './debug_rotations'
+                self.debug_vis_dir = "./debug_rotations"
             os.makedirs(self.debug_vis_dir, exist_ok=True)
-        
+
         # Convert to numpy
         gt_aa_np = gt_aa.numpy() if isinstance(gt_aa, torch.Tensor) else gt_aa
         pred_aa_np = pred_aa.numpy() if isinstance(pred_aa, torch.Tensor) else pred_aa
-        
+
         num_joints = gt_aa_np.shape[0]
-        
+
         # Convert axis-angle to rotation matrices for visualization
         gt_aa_t = torch.from_numpy(gt_aa_np).float()
         pred_aa_t = torch.from_numpy(pred_aa_np).float()
-        
+
         gt_rotmats = axis_angle_to_matrix(gt_aa_t)  # [N, 3, 3]
         pred_rotmats = axis_angle_to_matrix(pred_aa_t)  # [N, 3, 3]
-        
+
         # Compute rotation axes (normalized axis-angle vectors) and angles (magnitudes)
         gt_axes = gt_aa_np.copy()
         pred_axes = pred_aa_np.copy()
         gt_angles = np.linalg.norm(gt_aa_np, axis=1, keepdims=True)
         pred_angles = np.linalg.norm(pred_aa_np, axis=1, keepdims=True)
-        
+
         # Normalize to get unit rotation axes (handle zero rotations)
         gt_axes_norm = np.where(gt_angles > 1e-6, gt_axes / gt_angles, gt_axes)
-        pred_axes_norm = np.where(pred_angles > 1e-6, pred_axes / pred_angles, pred_axes)
-        
+        pred_axes_norm = np.where(
+            pred_angles > 1e-6, pred_axes / pred_angles, pred_axes
+        )
+
         # Scale by rotation angle for visualization (so longer arrows = larger rotations)
         scale_factor = 0.5  # Scale factor for better visualization
         gt_angles_1d = gt_angles.squeeze()  # (N,)
         pred_angles_1d = pred_angles.squeeze()  # (N,)
-        gt_axes_scaled = gt_axes_norm * (gt_angles_1d[:, np.newaxis] * scale_factor + 0.1)
-        pred_axes_scaled = pred_axes_norm * (pred_angles_1d[:, np.newaxis] * scale_factor + 0.1)
-        
+        gt_axes_scaled = gt_axes_norm * (
+            gt_angles_1d[:, np.newaxis] * scale_factor + 0.1
+        )
+        pred_axes_scaled = pred_axes_norm * (
+            pred_angles_1d[:, np.newaxis] * scale_factor + 0.1
+        )
+
         # Calculate grid dimensions for subplots
         cols = min(5, num_joints)  # Max 5 columns
         rows = (num_joints + cols - 1) // cols  # Ceiling division
-        
+
         # Create figure with subplots - one 3D plot per joint
         fig = plt.figure(figsize=(4 * cols, 4 * rows))
-        
+
         colors = plt.cm.tab10(np.linspace(0, 1, num_joints))
-        
+
         # Find max range for consistent scaling
-        max_range = max(np.abs(gt_axes_scaled).max(), np.abs(pred_axes_scaled).max()) * 1.2
-        
+        max_range = (
+            max(np.abs(gt_axes_scaled).max(), np.abs(pred_axes_scaled).max()) * 1.2
+        )
+
         for i in range(num_joints):
-            ax = fig.add_subplot(rows, cols, i + 1, projection='3d')
-            
+            ax = fig.add_subplot(rows, cols, i + 1, projection="3d")
+
             # GT rotation axis (solid) - same center as pred
-            gt_label = f'GT: {gt_angles[i, 0]:.3f} rad'
-            ax.quiver(0, 0, 0, gt_axes_scaled[i, 0], gt_axes_scaled[i, 1], gt_axes_scaled[i, 2],
-                     color=colors[i], arrow_length_ratio=0.2, linewidth=3, alpha=0.8, label=gt_label)
-            
+            gt_label = f"GT: {gt_angles[i, 0]:.3f} rad"
+            ax.quiver(
+                0,
+                0,
+                0,
+                gt_axes_scaled[i, 0],
+                gt_axes_scaled[i, 1],
+                gt_axes_scaled[i, 2],
+                color=colors[i],
+                arrow_length_ratio=0.2,
+                linewidth=3,
+                alpha=0.8,
+                label=gt_label,
+            )
+
             # Pred rotation axis (dashed) - same center as GT
-            pred_label = f'Pred: {pred_angles[i, 0]:.3f} rad'
-            ax.quiver(0, 0, 0, pred_axes_scaled[i, 0], pred_axes_scaled[i, 1], pred_axes_scaled[i, 2],
-                     color=colors[i], arrow_length_ratio=0.2, linewidth=3, linestyle='--', alpha=0.8, label=pred_label)
-            
+            pred_label = f"Pred: {pred_angles[i, 0]:.3f} rad"
+            ax.quiver(
+                0,
+                0,
+                0,
+                pred_axes_scaled[i, 0],
+                pred_axes_scaled[i, 1],
+                pred_axes_scaled[i, 2],
+                color=colors[i],
+                arrow_length_ratio=0.2,
+                linewidth=3,
+                linestyle="--",
+                alpha=0.8,
+                label=pred_label,
+            )
+
             # Set equal aspect ratio and limits
             ax.set_xlim([-max_range, max_range])
             ax.set_ylim([-max_range, max_range])
             ax.set_zlim([-max_range, max_range])
-            ax.set_xlabel('X', fontsize=8)
-            ax.set_ylabel('Y', fontsize=8)
-            ax.set_zlabel('Z', fontsize=8)
-            ax.set_title(f'Joint {i}', fontsize=10)
-            ax.legend(fontsize=8, loc='upper right')
-        
-        plt.suptitle(f'Axis-Angle Rotation Comparison (Step {step})\nArrow length ∝ rotation angle', fontsize=14)
+            ax.set_xlabel("X", fontsize=8)
+            ax.set_ylabel("Y", fontsize=8)
+            ax.set_zlabel("Z", fontsize=8)
+            ax.set_title(f"Joint {i}", fontsize=10)
+            ax.legend(fontsize=8, loc="upper right")
+
+        plt.suptitle(
+            f"Axis-Angle Rotation Comparison (Step {step})\nArrow length ∝ rotation angle",
+            fontsize=14,
+        )
         plt.tight_layout()
-        
+
         # Save figure
-        save_path = os.path.join(self.debug_vis_dir, f'rotation_comparison_step_{step:06d}.png')
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        save_path = os.path.join(
+            self.debug_vis_dir, f"rotation_comparison_step_{step:06d}.png"
+        )
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
-        
+
         # Also print numerical comparison
         gt_mags = np.linalg.norm(gt_aa_np, axis=1)
         pred_mags = np.linalg.norm(pred_aa_np, axis=1)

@@ -188,13 +188,14 @@ class Renderer:
             metallicFactor=0.0,
             alphaMode="OPAQUE",
             baseColorFactor=(
-                mesh_base_color[2],
-                mesh_base_color[1],
                 mesh_base_color[0],
-                1.0,
-            ),  # Swap RGB to BGR for pyrender
+                mesh_base_color[1],
+                mesh_base_color[2],
+                0.9,
+            ),  # RGB format for pyrender (no swap needed)
         )
         if vertex_colors is not None:
+            assert False
             mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy(), vertex_colors=vertex_colors)
         else:
             mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy())

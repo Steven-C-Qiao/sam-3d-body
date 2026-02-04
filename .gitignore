@@ -1,5 +1,7 @@
 exp/
 checkpoints/
+*.png
+tinker/data
 
 # Python bytecode
 __pycache__/

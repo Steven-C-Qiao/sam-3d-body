@@ -150,7 +150,7 @@ def gen_samples(
 
     pose_mean = output["pred_pose_raw"][:, 6:]
     pose_var = output["pose_uncertainty"]
-    
+
     shape_samples = sample_shape(shape_mean, shape_var, num_samples)
     scale_samples = sample_scale(scale_mean, scale_var, num_samples)
     if pose_mean is not None and pose_var is not None and sample_pose:
