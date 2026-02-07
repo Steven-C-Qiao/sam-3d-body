@@ -195,7 +195,7 @@ class Renderer:
             ),  # RGB format for pyrender (no swap needed)
         )
         if vertex_colors is not None:
-            assert False
+            # assert False
             mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy(), vertex_colors=vertex_colors)
         else:
             mesh = trimesh.Trimesh(vertices.copy(), self.faces.copy())

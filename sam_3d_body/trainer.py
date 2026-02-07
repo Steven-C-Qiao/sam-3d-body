@@ -3,9 +3,11 @@ import cv2
 import numpy as np
 import torch
 from typing import Dict, Optional
+from collections import defaultdict
 import roma
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from sam_3d_body.visualization.renderer import Renderer
 
 from yacs.config import CfgNode
 from loguru import logger
@@ -253,8 +255,13 @@ class Trainer(BaseLightningModule):
         batch["gt_verts_w_transl"] = gt_verts
 
         cam_int = batch["cam_int"]
-        cam_ext = batch["cam_ext"]
-        trans_cam = cam_ext[:, :3, 3]
+        if 'cam_ext' not in batch:
+            # SSP-3D
+            assert batch['dataset_name'][0] == 'ssp3d'
+            trans_cam = batch["trans_cam"]
+        else:
+            cam_ext = batch["cam_ext"]
+            trans_cam = cam_ext[:, :3, 3]
 
         def project(points, cam_trans, cam_int):
             points = points + cam_trans
@@ -548,6 +555,13 @@ class Trainer(BaseLightningModule):
         `num_view` different camera views of the same subject.
         """
         options = self.cfg.DATASET
+        options.VAL_DS = "ssp3d"
+
+        if options.VAL_DS == "ssp3d":
+            from sam_3d_body.data.ssp3d_dataset import MultiSSP3DDataset
+            logger.info(f"SSP-3D dataset with num_view={num_view}")
+            return MultiSSP3DDataset("/scratches/kyuban/cq244/datasets/SSP-3D/ssp_3d", num_view=num_view)
+        
         # Use the same datasets as training by default (first dataset only)
         dataset_names = options.VAL_DS.split("_")
         dataset_name = dataset_names[0]
@@ -607,7 +621,9 @@ class Trainer(BaseLightningModule):
         # Get device from model parameters (works even when called outside Lightning training loop)
         device = self.device
 
-        dataloader = self.multiview_eval_dataloader(num_view=num_view, batch_size=2)
+        dataloader = self.multiview_eval_dataloader(num_view=num_view, batch_size=1)
+
+        metrics = defaultdict(list)
 
         for batch_idx, batch in enumerate(dataloader):
             if max_batches is not None and batch_idx >= max_batches:
@@ -665,6 +681,31 @@ class Trainer(BaseLightningModule):
             scale_mu_star_full = pred_scale.mean(dim=1)
             scale_mu_star_full[..., indices] = scale_mu_star
 
+            shape_mean = pred_shape.mean(dim=1).repeat_interleave(
+                num_views, dim=0
+            )  # naive average of parameters
+            scale_mean = pred_scale.mean(dim=1).repeat_interleave(num_views, dim=0)
+
+            mean_mhr_output = self.model.head_pose.mhr_forward(
+                shape_params=shape_mean,
+                scale_params=scale_mean,
+                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                global_rot=outputs["mhr"]["global_rot"],
+                body_pose_params=outputs["mhr"]["body_pose"],
+                hand_pose_params=outputs["mhr"]["hand"],
+                expr_params=outputs["mhr"]["face"],
+                return_keypoints=True,
+                return_joint_coords=True,
+                return_model_params=True,
+                return_joint_rotations=True,
+                do_pcblend=True,
+            )
+            verts_mean, j3d_mean, jcoords_mean, mhr_model_params, joint_global_rots = (
+                mean_mhr_output
+            )
+            verts_mean[..., [1, 2]] *= -1
+            j3d_mean[..., [1, 2]] *= -1
+
             merged_mhr_output = self.model.head_pose.mhr_forward(
                 shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
                 scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
@@ -685,9 +726,184 @@ class Trainer(BaseLightningModule):
             verts_star[..., [1, 2]] *= -1
             j3d_star[..., [1, 2]] *= -1
 
-            # Visualize predicted mean bodies and merged bodies on each view's image
-            from sam_3d_body.visualization.renderer import Renderer
-            import os
+            # get neutral gt params
+            gt_shape = batch["shape_params"]
+            gt_model_params = batch["model_params"]
+            gt_face_params = batch["face_expr_coeffs"]
+            gt_model_params[:, :-68] = torch.zeros_like(gt_model_params[:, :-68])
+            gt_face_params = torch.zeros_like(gt_face_params)
+            gt_neutral_mhr_output = self.model.head_pose.mhr(
+                gt_shape, gt_model_params, gt_face_params
+            )
+            gt_neutral_verts, gt_neutral_skeleton_state = gt_neutral_mhr_output
+            gt_neutral_joint_coords, _, _ = torch.split(
+                gt_neutral_skeleton_state, [3, 4, 1], dim=2
+            )
+            gt_neutral_verts = gt_neutral_verts / 100
+            gt_neutral_joint_coords = gt_neutral_joint_coords / 100
+
+            # get neutral pred
+            per_view_neutral_mhr_output = self.model.head_pose.mhr_forward(
+                shape_params=pred_shape.flatten(0, 1),
+                scale_params=pred_scale.flatten(0, 1),
+                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                global_rot=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                body_pose_params=torch.zeros_like(outputs["mhr"]["body_pose"]),
+                hand_pose_params=torch.zeros_like(outputs["mhr"]["hand"]),
+                expr_params=torch.zeros_like(outputs["mhr"]["face"]),
+                return_joint_coords=True,
+            )
+            per_view_neutral_verts, per_view_neutral_joint_coords = (
+                per_view_neutral_mhr_output
+            )
+
+            # get merged neutral pred
+            merged_neutral_mhr_output = self.model.head_pose.mhr_forward(
+                shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
+                scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
+                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                global_rot=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                body_pose_params=torch.zeros_like(outputs["mhr"]["body_pose"]),
+                hand_pose_params=torch.zeros_like(outputs["mhr"]["hand"]),
+                expr_params=torch.zeros_like(outputs["mhr"]["face"]),
+                return_joint_coords=True,
+            )
+            merged_neutral_verts, merged_neutral_joint_coords = (
+                merged_neutral_mhr_output
+            )
+
+            mean_neutral_mhr_output = self.model.head_pose.mhr_forward(
+                shape_params=shape_mean,
+                scale_params=scale_mean,
+                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                global_rot=torch.zeros_like(outputs["mhr"]["global_rot"]),
+                body_pose_params=torch.zeros_like(outputs["mhr"]["body_pose"]),
+                hand_pose_params=torch.zeros_like(outputs["mhr"]["hand"]),
+                expr_params=torch.zeros_like(outputs["mhr"]["face"]),
+                return_joint_coords=True,
+            )
+            mean_neutral_verts, mean_neutral_joint_coords = mean_neutral_mhr_output
+
+            # ----- mpjpe -----
+            # per-view
+            per_view_mpjpe = torch.sqrt(
+                ((per_view_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(
+                    dim=-1
+                )
+            ).mean(dim=1)
+            # merged
+            merged_mpjpe = torch.sqrt(
+                ((merged_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(
+                    dim=-1
+                )
+            ).mean(dim=1)
+            # mean
+            mean_mpjpe = torch.sqrt(
+                ((mean_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+
+            # ----- pve -----
+            # per-view
+            per_view_pve = torch.sqrt(
+                ((per_view_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+            # merged
+            merged_pve = torch.sqrt(
+                ((merged_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+            # mean
+            mean_pve = torch.sqrt(
+                ((mean_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
+            ).mean(dim=1)
+
+            # ----- pampjpe -----
+            from sam_3d_body.metrics.metrics_tracker import reconstruction_error
+            from sam_3d_body.metrics.metrics_tracker import (
+                scale_and_translation_transform_batch,
+            )
+
+            # per-view
+            per_view_pampjpe, _ = reconstruction_error(
+                per_view_neutral_joint_coords.cpu().detach().numpy(),
+                gt_neutral_joint_coords.cpu().detach().numpy(),
+                reduction="none",
+            )
+            per_view_pampjpe = per_view_pampjpe.mean(axis=-1)
+            # merged
+            merged_pampjpe, _ = reconstruction_error(
+                merged_neutral_joint_coords.cpu().detach().numpy(),
+                gt_neutral_joint_coords.cpu().detach().numpy(),
+                reduction="none",
+            )
+            merged_pampjpe = merged_pampjpe.mean(axis=-1)
+            # mean
+            mean_pampjpe, _ = reconstruction_error(
+                mean_neutral_joint_coords.cpu().detach().numpy(),
+                gt_neutral_joint_coords.cpu().detach().numpy(),
+                reduction="none",
+            )
+            mean_pampjpe = mean_pampjpe.mean(axis=-1)
+
+            # ----- pvetsc -----
+            pred_sc = scale_and_translation_transform_batch(
+                per_view_neutral_verts.cpu().detach().numpy(),
+                gt_neutral_verts.cpu().detach().numpy(),
+            )
+            merged_sc = scale_and_translation_transform_batch(
+                merged_neutral_verts.cpu().detach().numpy(),
+                gt_neutral_verts.cpu().detach().numpy(),
+            )
+            mean_sc = scale_and_translation_transform_batch(
+                mean_neutral_verts.cpu().detach().numpy(),
+                gt_neutral_verts.cpu().detach().numpy(),
+            )
+            per_view_pvetsc = np.linalg.norm(
+                pred_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+            ).mean(axis=1)
+            merged_pvetsc = np.linalg.norm(
+                merged_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+            ).mean(axis=1)
+            mean_pvetsc = np.linalg.norm(
+                mean_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+            ).mean(axis=1)
+
+            # print(per_view_mpjpe.shape, mean_mpjpe.shape, merged_mpjpe.shape)
+            # print(per_view_pve.shape, mean_pve.shape, merged_pve.shape)
+            # print(per_view_pampjpe.shape, mean_pampjpe.shape, merged_pampjpe.shape)
+            # print(per_view_pvetsc.shape, mean_pvetsc.shape, merged_pvetsc.shape)
+
+            print(
+                f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {mean_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}"
+            )
+            print(
+                f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {mean_pve.mean():.4f}, merged: {merged_pve.mean():.4f}"
+            )
+            print(
+                f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {mean_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}"
+            )
+            print(
+                f"pvetsc: view avg: {per_view_pvetsc.mean():.4f}, view min: {per_view_pvetsc.min():.4f}, mean: {mean_pvetsc.mean():.4f}, merged: {merged_pvetsc.mean():.4f}"
+            )
+
+            metrics["per_view_mpjpe"].append(per_view_mpjpe.mean().item())
+            metrics["merged_mpjpe"].append(merged_mpjpe.mean().item())
+            metrics["best_per_view_mpjpe"].append(per_view_mpjpe.min().item())
+            metrics["mean_mpjpe"].append(mean_mpjpe.mean().item())
+
+            metrics["per_view_pve"].append(per_view_pve.mean().item())
+            metrics["merged_pve"].append(merged_pve.mean().item())
+            metrics["best_per_view_pve"].append(per_view_pve.min().item())
+            metrics["mean_pve"].append(mean_pve.mean().item())
+
+            metrics["per_view_pampjpe"].append(per_view_pampjpe.mean().item())
+            metrics["merged_pampjpe"].append(merged_pampjpe.mean().item())
+            metrics["best_per_view_pampjpe"].append(per_view_pampjpe.min().item())
+            metrics["mean_pampjpe"].append(mean_pampjpe.mean().item())
+
+            metrics["per_view_pvetsc"].append(per_view_pvetsc.mean().item())
+            metrics["merged_pvetsc"].append(merged_pvetsc.mean().item())
+            metrics["best_per_view_pvetsc"].append(per_view_pvetsc.min().item())
+            metrics["mean_pvetsc"].append(mean_pvetsc.mean().item())
 
             # Initialize gallery: list of lists to store rendered images [bs][num_views]
             gallery = [[None for _ in range(num_views)] for _ in range(bs)]
@@ -711,7 +927,12 @@ class Trainer(BaseLightningModule):
                     gt_verts = (
                         batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
                     )
-                    gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
+                    if 'cam_ext' not in batch:
+                        # SSP-3D
+                        assert batch['dataset_name'][0] == 'ssp3d'
+                        gt_cam_t = batch["trans_cam"][flat_idx].cpu().detach().numpy()
+                    else:
+                        gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
 
                     merged_verts = verts_star[flat_idx].cpu().detach().numpy()
 
@@ -756,8 +977,8 @@ class Trainer(BaseLightningModule):
                     color = (255, 255, 255)  # White text
                     bg_color = (0, 0, 0)  # Black background for text
 
-                    # Label GT image
-                    gt_label = f"GT view {view}"
+                    # Label gt image
+                    gt_label = f"GT {view}"
                     (text_width, text_height), baseline = cv2.getTextSize(
                         gt_label, font, font_scale, thickness
                     )
@@ -777,6 +998,39 @@ class Trainer(BaseLightningModule):
                         color,
                         thickness,
                     )
+
+                    # Label GT image
+                    gt_label = f"GT view {view}"
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        gt_label, font, font_scale, thickness
+                    )
+                    pampjpe_line = f"PA-MPJPE | View {view}: {per_view_pampjpe[view].item():.4f} | Merged: {merged_pampjpe.mean().item():.4f}"
+                    pvetsc_line = f"PVE-T-SC | View {view}: {per_view_pvetsc[view].item():.4f} | Merged: {merged_pvetsc.mean().item():.4f}"
+                    text_lines = [pampjpe_line, pvetsc_line]
+
+                    y_start = 10 + text_height + baseline + 10
+                    y_offset = y_start
+                    for line in text_lines:
+                        (tw, th), bl = cv2.getTextSize(
+                            line, font, font_scale_small, thickness
+                        )
+                        cv2.rectangle(
+                            gt_rendered_img,
+                            (10, y_offset),
+                            (10 + tw + 4, y_offset + th + bl + 4),
+                            bg_color,
+                            -1,
+                        )
+                        cv2.putText(
+                            gt_rendered_img,
+                            line,
+                            (12, y_offset + th),
+                            font,
+                            font_scale_small,
+                            color,
+                            thickness,
+                        )
+                        y_offset += th + bl + 6
 
                     # Label predicted image
                     pred_label = f"Pred view {view}"
@@ -918,101 +1172,110 @@ class Trainer(BaseLightningModule):
                 f"Saved multiview gallery: {save_path} (shape: {gallery_img.shape})"
             )
 
-            # get neutral gt params
-            gt_shape = batch["shape_params"]
-            gt_model_params = batch["model_params"]
-            gt_face_params = batch["face_expr_coeffs"]
-            gt_model_params[:, :-68] = torch.zeros_like(gt_model_params[:, :-68])
-            gt_face_params = torch.zeros_like(gt_face_params)
-            gt_neutral_mhr_output = self.model.head_pose.mhr(
-                gt_shape, gt_model_params, gt_face_params
-            )
-            gt_verts, gt_skeleton_state = gt_neutral_mhr_output
-            gt_joint_coords, gt_joint_quats, _ = torch.split(
-                gt_skeleton_state, [3, 4, 1], dim=2
-            )
-            gt_verts = gt_verts / 100
-            gt_joint_coords = gt_joint_coords / 100
+            neutral_renderer = Renderer(focal_length=512, faces=self.faces)
+            generic_cam_t = np.array([0.0, 0.75, 2.5])
 
-            # get neutral pred
-            per_view_neutral_mhr_output = self.model.head_pose.mhr_forward(
-                shape_params=pred_shape.flatten(0, 1),
-                scale_params=pred_scale.flatten(0, 1),
-                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
-                global_rot=torch.zeros_like(outputs["mhr"]["global_rot"]),
-                body_pose_params=torch.zeros_like(outputs["mhr"]["body_pose"]),
-                hand_pose_params=torch.zeros_like(outputs["mhr"]["hand"]),
-                expr_params=torch.zeros_like(outputs["mhr"]["face"]),
-                return_joint_coords=True,
-            )
-            per_view_neutral_verts, per_view_neutral_joint_coords = (
-                per_view_neutral_mhr_output
-            )
+            # Render GT neutral mesh
+            gt_neutral_verts = gt_neutral_verts.cpu().detach().numpy()
+            gt_neutral_verts[..., [1, 2]] *= -1
+            gt_neutral_rendered = (
+                neutral_renderer(
+                    gt_neutral_verts[view],
+                    generic_cam_t,
+                    np.ones((512, 512, 3)) * 255,
+                    mesh_base_color=LIGHT_BLUE,
+                    scene_bg_color=(1, 1, 1),
+                )
+                * 255
+            ).astype(np.uint8)
 
-            # get merged neutral pred
-            merged_neutral_mhr_output = self.model.head_pose.mhr_forward(
-                shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
-                scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
-                global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
-                global_rot=torch.zeros_like(outputs["mhr"]["global_rot"]),
-                body_pose_params=torch.zeros_like(outputs["mhr"]["body_pose"]),
-                hand_pose_params=torch.zeros_like(outputs["mhr"]["hand"]),
-                expr_params=torch.zeros_like(outputs["mhr"]["face"]),
-                return_joint_coords=True,
-            )
-            merged_neutral_verts, merged_neutral_joint_coords = (
-                merged_neutral_mhr_output
+            text_config = {
+                "org": (12, 10 + text_height),
+                "fontFace": cv2.FONT_HERSHEY_SIMPLEX,
+                "fontScale": 1.0,
+                "color": (0, 0, 0),
+                "thickness": 2,
+            }
+            cv2.putText(
+                gt_neutral_rendered,
+                "GT",
+                **text_config,
             )
 
-            # ----- mpjpe -----
-            # per-view
-            per_view_mpjpe = torch.sqrt(
-                ((per_view_neutral_joint_coords - gt_joint_coords) ** 2).sum(dim=-1)
-            ).mean(dim=1)
-            # merged
-            merged_mpjpe = torch.sqrt(
-                ((merged_neutral_joint_coords - gt_joint_coords) ** 2).sum(dim=-1)
-            ).mean(dim=1)
+            # Render per-view neutral meshes (4 views)
+            per_view_rendered = []
+            colors = [
+                (1.0, 0.8, 0.5),  # light orange
+                (0.8, 0.5, 1.0),  # light purple
+                (0.5, 0.8, 1.0),  # light blue
+                (1.0, 0.5, 0.5),  # light red
+            ]
+            per_view_verts = per_view_neutral_verts.cpu().detach().numpy()
+            per_view_verts[..., [1, 2]] *= -1
+            for view in range(num_views):
+                rendered = (
+                    neutral_renderer(
+                        per_view_verts[view],
+                        generic_cam_t,
+                        np.ones((512, 512, 3)) * 255,
+                        mesh_base_color=colors[view % len(colors)],
+                        scene_bg_color=(1, 1, 1),
+                    )
+                    * 255
+                ).astype(np.uint8)
+                per_view_rendered.append(rendered)
+                cv2.putText(
+                    rendered,
+                    f"View {view}",
+                    **text_config,
+                )
+            # Render merged neutral mesh
+            merged_verts = merged_neutral_verts[0].cpu().detach().numpy()
+            merged_verts[..., [1, 2]] *= -1
+            merged_neutral_rendered = (
+                neutral_renderer(
+                    merged_verts,
+                    generic_cam_t,
+                    np.ones((512, 512, 3)) * 255,
+                    mesh_base_color=(0.5, 1.0, 0.5),  # light green
+                    scene_bg_color=(1, 1, 1),
+                )
+                * 255
+            ).astype(np.uint8)
 
-            # ----- pve -----
-            # per-view
-            per_view_pve = torch.sqrt(
-                ((per_view_neutral_verts - gt_verts) ** 2).sum(dim=-1)
-            ).mean(dim=1)
-            # merged
-            merged_pve = torch.sqrt(
-                ((merged_neutral_verts - gt_verts) ** 2).sum(dim=-1)
-            ).mean(dim=1)
-
-            # ----- pampjpe -----
-            from sam_3d_body.metrics.metrics_tracker import reconstruction_error
-
-            # per-view
-            per_view_pampjpe, _ = reconstruction_error(
-                per_view_neutral_joint_coords.cpu().detach().numpy(),
-                gt_joint_coords.cpu().detach().numpy(),
-            )
-            # merged
-            merged_pampjpe, _ = reconstruction_error(
-                merged_neutral_joint_coords.cpu().detach().numpy(),
-                gt_joint_coords.cpu().detach().numpy(),
+            cv2.putText(
+                merged_neutral_rendered,
+                "Merged",
+                **text_config,
             )
 
-            print(
-                f"per-view mpjpe: {per_view_mpjpe.mean():.4f}, merged mpjpe: {merged_mpjpe.mean():.4f}"
-            )
-            print(
-                f"per-view pve: {per_view_pve.mean():.4f}, merged pve: {merged_pve.mean():.4f}"
-            )
-            print(
-                f"per-view pampjpe: {per_view_pampjpe.mean():.4f}, merged pampjpe: {merged_pampjpe.mean():.4f}"
+            gallery_images = (
+                [gt_neutral_rendered] + [merged_neutral_rendered] + per_view_rendered
             )
 
-            neutral_renderer = Renderer(
-                focal_length=outputs["mhr"]["focal_length"][0], faces=self.faces
+            # Concatenate horizontally
+            gallery_img = np.concatenate(gallery_images, axis=1)
+            gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
+
+            # Save
+            save_dir = self.vis_save_dir if self.vis_save_dir else "."
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(
+                save_dir,
+                f"neutral_meshes_batch{batch_idx:03d}.png",
             )
+            cv2.imwrite(save_path, gallery_img_bgr)
+            logger.info(f"Saved neutral meshes gallery: {save_path}")
 
             # import ipdb; ipdb.set_trace()
+
+        print("=" * 60)
+        print("Average Metrics:")
+        print("=" * 60)
+        for k, v in metrics.items():
+            print(f"{k}: {np.mean(v):.4f}")
+
+        print("=" * 60)
 
         return None
 

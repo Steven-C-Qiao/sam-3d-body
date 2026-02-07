@@ -47,6 +47,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     if dev:
         cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
 
+    
     cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH = (
         "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
     )
@@ -58,7 +59,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     if not os.path.exists(model_save_dir):
         os.makedirs(model_save_dir)
 
-    vis_save_dir = os.path.join(exp_dir, "vis")
+    vis_save_dir = os.path.join(exp_dir, "merge_vis")
     if not os.path.exists(vis_save_dir):
         os.makedirs(vis_save_dir)
 
@@ -104,17 +105,17 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
             )
             logger.info(f"Loaded {len(model_state_dict)} parameters from checkpoint")
             if missing_keys:
-                print(missing_keys)
+                # print(missing_keys)
                 logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys")
             if unexpected_keys:
-                print(unexpected_keys)
+                # print(unexpected_keys)
                 logger.warning(
                     f"Unexpected keys (ignored): {len(unexpected_keys)} keys"
                 )
         else:
             logger.warning("No model parameters found in checkpoint state_dict!")
 
-    results = trainer.run_multiview_prediction(num_view=4, max_batches=10)
+    results = trainer.run_multiview_prediction(num_view=4, max_batches=40)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ _C.TRAIN.FP16_TYPE = "high"
 _C.TRAIN.LR = 2e-5
 _C.TRAIN.NUM_EPOCHS = 50
 _C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
-_C.TRAIN.FREEZE_BACKBONE = False
+_C.TRAIN.FREEZE_BACKBONE = True
 
 
 _C.LOSS = CfgNode()
@@ -56,7 +56,7 @@ _C.MODEL.ENABLE_HAND = True
 _C.MODEL.DENSE_KEYPOINTS = True
 _C.MODEL.SAMPLE_SHAPE = True
 _C.MODEL.SAMPLE_SCALE = True
-_C.MODEL.SAMPLE_POSE = True
+_C.MODEL.SAMPLE_POSE = False
 
 
 
