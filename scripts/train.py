@@ -118,7 +118,8 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     trainer = pl.Trainer(
         max_epochs=cfg.TRAIN.NUM_EPOCHS,
         devices="auto",
-        strategy=DDPStrategy(find_unused_parameters=True),
+        # strategy=DDPStrategy(find_unused_parameters=True),
+        strategy="auto",
         callbacks=checkpoint_callbacks,
         logger=tensorboard_logger,
         num_sanity_val_steps=num_sanity_val_steps,

@@ -60,6 +60,7 @@ class DatasetHMR(Dataset):
         self.is_train = True
         self.options = options
         self.img_dir = DATASET_FOLDERS[dataset]
+        self.mask_dir = self.img_dir.replace('training_images', 'masks').replace('_6fps/', '/').replace('png', 'masks')
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
@@ -198,12 +199,12 @@ class DatasetHMR(Dataset):
         if self.is_train and self.options.ALB:
             aug_comp = [
                 A.Downscale((0.5, 0.9), p=0.1),
-                A.ImageCompression((20, 100), p=0.1),
+                # A.ImageCompression((20, 100), p=0.1),
                 A.RandomRain(blur_value=4, p=0.1),
                 A.MotionBlur(blur_limit=(3, 15), p=0.2),
-                A.Blur(blur_limit=(3, 10), p=0.1),
+                A.Blur(blur_limit=(3, 11), p=0.1),
                 A.RandomSnow(
-                    brightness_coeff=1.5, snow_point_lower=0.2, snow_point_upper=0.4
+                    brightness_coeff=1.5, snow_point_range=(0.2, 0.4)
                 ),
             ]
             aug_mod = [
@@ -217,7 +218,6 @@ class DatasetHMR(Dataset):
                     hue_shift_limit=20,
                     sat_shift_limit=30,
                     val_shift_limit=20,
-                    always_apply=False,
                     p=0.2,
                 ),
                 A.Posterize(p=0.1),
@@ -259,22 +259,26 @@ class DatasetHMR(Dataset):
         #                                     axis='y')
 
         imgname = os.path.join(self.img_dir, self.imgname[index])
-        try:
-            cv_img = read_img(imgname)
-        except Exception as E:
-            print(E)
-            logger.info(f"@{imgname}@ from {self.dataset}")
+        maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + '_env.png')
+        # try:
+        cv_img = read_img(imgname)
+        masks = cv2.imread(maskname, 0) # flip env to people 
+        # except Exception as E:
+        #     print(E)
+        #     logger.info(f"@{imgname}@ from {self.dataset}")
         item["img_ori"] = cv_img
+        item["mask_ori"] = masks
         if "closeup" in self.dataset:
             cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
+            masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
 
         orig_shape = np.array(cv_img.shape)[:2]
         pose = self.pose_cam[index].copy()
 
         # Apply albumentation augmentations
         # try:
-        # img = self.rgb_processing(cv_img)
-        img = cv_img
+        img = self.rgb_processing(cv_img)
+        # img = cv_img
         # except Exception as E:
         #     logger.info(f'@{imgname} from {self.dataset}')
         #     print(E)
@@ -298,6 +302,7 @@ class DatasetHMR(Dataset):
             scale=float(sc * scale),
             bbox_format="xyxy",
             keypoints_2d=mhr_keypoints_2d,
+            mask=masks
         )
         # if self.options.proj_verts:
         #     proj_verts_2d = proj_verts[:, :2].copy()
@@ -356,6 +361,9 @@ class DatasetHMR(Dataset):
         # Store all transform outputs
         for key in data:
             item[key] = data[key]
+
+        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0 # N, 1, H, W
+        item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
         item["cam_int"] = torch.from_numpy(self.cam_int[index]).float()
         item["shape_params"] = torch.from_numpy(self.shape_params[index]).float()
         item["model_params"] = torch.from_numpy(self.model_params[index]).float()

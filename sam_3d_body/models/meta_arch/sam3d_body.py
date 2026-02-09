@@ -718,6 +718,17 @@ class SAM3DBody(BaseModel):
             image_embeddings = image_embeddings[-1]
         image_embeddings = image_embeddings.type(x.dtype)
 
+
+        # Mask condition if available
+        if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_EMBED_TYPE", None) is not None:
+            # v1: non-iterative mask conditioning
+            if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_PROMPT", "v1") == "v1":
+                mask_embeddings = self._get_mask_prompt(batch, image_embeddings)
+                image_embeddings = image_embeddings + mask_embeddings
+            else:
+                raise NotImplementedError
+
+
         # Prepare input for promptable decoder
         condition_info = self._get_decoder_condition(batch)
 
