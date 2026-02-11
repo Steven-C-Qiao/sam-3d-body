@@ -284,6 +284,7 @@ class MHRHead(nn.Module):
         x: torch.Tensor,
         init_estimate: Optional[torch.Tensor] = None,
         do_pcblend=True,
+        full_cov: bool = True,  # kept for API compatibility with MHRUncertaintyHead
         slim_keypoints=False,
     ):
         """
@@ -425,7 +426,9 @@ class MHRUncertaintyHead(MHRHead):
         ### # - 3 for global rotation
         # - 3 per 3-DoF body joint (NUM_BODY_3DOF_JOINTS)
         # - 1 per 1-DoF body joint angle (NUM_BODY_1DOF_ANGLES) in angle space
-        self.aa_3dof_dim = 3 * self.num_body_3dof_joints
+        self.aa_3dof_dim = (
+            3 * self.num_body_3dof_joints * 2
+        )  # NOTE: Adding full cov sampling, thus * 2
         self.aa_1dof_dim = self.num_body_1dof_angles
 
         self.pose_3dof_uncertainty_proj = nn.Sequential(
@@ -510,7 +513,7 @@ class MHRUncertaintyHead(MHRHead):
         x: torch.Tensor,
         init_estimate: Optional[torch.Tensor] = None,
         do_pcblend=True,
-        slim_keypoints=False,
+        full_cov=True,
     ):
         """
         Args:
@@ -520,17 +523,20 @@ class MHRUncertaintyHead(MHRHead):
         batch_size = x.shape[0]
         pred = self.proj(x)
 
-        shape_uncertainty = self.shape_uncertainty_proj(x)
-        shape_uncertainty = torch.exp(shape_uncertainty)
+        shape_log_var = self.shape_uncertainty_proj(x)
+        shape_uncertainty = torch.exp(shape_log_var)
 
-        scale_uncertainty = self.scale_uncertainty_proj(x)
-        scale_uncertainty = torch.exp(scale_uncertainty)
+        scale_log_var = self.scale_uncertainty_proj(x)
+        scale_uncertainty = torch.exp(scale_log_var)
 
-        pose_3dof_uncertainty = self.pose_3dof_uncertainty_proj(x)
-        pose_3dof_uncertainty = 0.01 * torch.exp(pose_3dof_uncertainty)
+        pose_3dof_log_var = self.pose_3dof_uncertainty_proj(x)
+        if full_cov == True:
+            pose_3dof_uncertainty = pose_3dof_log_var
+        else:
+            pose_3dof_uncertainty = 0.01 * torch.exp(pose_3dof_log_var)
 
-        pose_1dof_uncertainty = self.pose_1dof_uncertainty_proj(x)
-        pose_1dof_uncertainty = 0.01 * torch.exp(pose_1dof_uncertainty)
+        pose_1dof_log_var = self.pose_1dof_uncertainty_proj(x)
+        pose_1dof_uncertainty = 0.01 * torch.exp(pose_1dof_log_var)
 
         pose_uncertainty = torch.cat(
             [pose_3dof_uncertainty, pose_1dof_uncertainty], dim=1

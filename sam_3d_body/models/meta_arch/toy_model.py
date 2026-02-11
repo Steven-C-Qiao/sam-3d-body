@@ -161,7 +161,10 @@ class ToyModel(BaseModel):
         if num_samples > 0:
             # Project features to decoder dimension for uncertainty head
             features_decoder_dim = self.feat_to_decoder_dim(features)
-            uncertainty_output = self.head_pose(features_decoder_dim)  # This gives us uncertainty predictions
+            uncertainty_output = self.head_pose(
+                features_decoder_dim,
+                full_cov=getattr(self.cfg.MODEL, "FULL_COV", True),
+            )  # This gives us uncertainty predictions
         else:
             # Create dummy uncertainty if not sampling
             uncertainty_output = {

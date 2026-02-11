@@ -69,6 +69,7 @@ class SAM3DBody(BaseModel):
         self.sample_shape = getattr(self.cfg.MODEL, "SAMPLE_SHAPE", True)
         self.sample_scale = getattr(self.cfg.MODEL, "SAMPLE_SCALE", True)
         self.sample_pose = getattr(self.cfg.MODEL, "SAMPLE_POSE", True)
+        self.full_cov = getattr(self.cfg.MODEL, "FULL_COV", True)
 
         # Create backbone feature extractor for human crops
         self.backbone = create_backbone(self.cfg.MODEL.BACKBONE.TYPE, self.cfg)
@@ -488,7 +489,11 @@ class SAM3DBody(BaseModel):
             prev_camera = init_camera.view(batch_size, -1)
 
             # Get pose outputs
-            pose_output = self.head_pose(pose_token, prev_pose)
+            pose_output = self.head_pose(
+                pose_token,
+                prev_pose,
+                full_cov=self.full_cov,
+            )
             # Get Camera Translation
             if hasattr(self, "head_camera"):
                 pred_cam = self.head_camera(pose_token, prev_camera)
@@ -785,7 +790,10 @@ class SAM3DBody(BaseModel):
             global_trans = torch.zeros_like(global_rot_euler_mean)
 
             shape_samples, scale_samples, pose_samples = gen_samples(
-                output_mhr, num_samples, sample_pose=self.sample_pose
+                output_mhr,
+                num_samples,
+                sample_pose=self.sample_pose,
+                full_cov=self.full_cov,
             )
             shape_samples = shape_samples.view(-1, shape_samples.shape[-1])
             scale_samples = scale_samples.view(-1, scale_samples.shape[-1])

@@ -62,10 +62,10 @@ class DatasetHMR(Dataset):
         self.img_dir = DATASET_FOLDERS[dataset]
         # Clean up directory paths of any sub-strings '_6fps' or '_30fps'
         self.mask_dir = (
-            self.img_dir.replace('training_images', 'masks')
-            .replace('_6fps/', '/')
-            .replace('_30fps/', '/')
-            .replace('png', 'masks')
+            self.img_dir.replace("training_images", "masks")
+            .replace("_6fps/", "/")
+            .replace("_30fps/", "/")
+            .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
         self.imgname = self.data["imgname"]
@@ -208,9 +208,7 @@ class DatasetHMR(Dataset):
                 A.RandomRain(blur_value=4, p=0.1),
                 A.MotionBlur(blur_limit=(3, 15), p=0.2),
                 A.Blur(blur_limit=(3, 11), p=0.1),
-                A.RandomSnow(
-                    brightness_coeff=1.5, snow_point_range=(0.2, 0.4)
-                ),
+                A.RandomSnow(brightness_coeff=1.5, snow_point_range=(0.2, 0.4)),
             ]
             aug_mod = [
                 A.CLAHE((1, 11), (10, 10), p=0.2),
@@ -309,7 +307,7 @@ class DatasetHMR(Dataset):
             scale=float(sc * scale),
             bbox_format="xyxy",
             keypoints_2d=mhr_keypoints_2d,
-            mask=masks
+            mask=masks,
         )
         # if self.options.proj_verts:
         #     proj_verts_2d = proj_verts[:, :2].copy()
@@ -369,7 +367,7 @@ class DatasetHMR(Dataset):
         for key in data:
             item[key] = data[key]
 
-        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0 # N, 1, H, W
+        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
         item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
         item["cam_int"] = torch.from_numpy(self.cam_int[index]).float()
         item["shape_params"] = torch.from_numpy(self.shape_params[index]).float()
@@ -487,7 +485,11 @@ class MultiViewEvaluationDataset(Dataset):
         self.options = options
         self.num_view = num_view
         self.img_dir = DATASET_FOLDERS[dataset]
-        self.mask_dir = self.img_dir.replace('training_images', 'masks').replace('_6fps/', '/').replace('png', 'masks')
+        self.mask_dir = (
+            self.img_dir.replace("training_images", "masks")
+            .replace("_6fps/", "/")
+            .replace("png", "masks")
+        )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
         self.imgname = self.data["imgname"]
         self.scale = self.data["scale"].astype(np.float32)
@@ -637,7 +639,7 @@ class MultiViewEvaluationDataset(Dataset):
         sc = 1.0  # No augmentation for evaluation
 
         imgname = os.path.join(self.img_dir, self.imgname[index])
-        maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + '_env.png')
+        maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + "_env.png")
         try:
             cv_img = read_img(imgname)
             masks = cv2.imread(maskname, 0)
@@ -704,7 +706,7 @@ class MultiViewEvaluationDataset(Dataset):
         for key in data:
             item[key] = data[key]
 
-        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0 # N, 1, H, W
+        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
         item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
         item["cam_int"] = torch.from_numpy(self.cam_int[index]).float()
         item["shape_params"] = torch.from_numpy(self.shape_params[index]).float()

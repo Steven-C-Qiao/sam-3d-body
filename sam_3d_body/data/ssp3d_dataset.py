@@ -207,10 +207,9 @@ class MultiSSP3DDataset(Dataset):
             center=bbox_center,
             scale=bbox_scale,
             bbox_format="xyxy",
+            mask=silhouette,
         )
-        data_list = [
-            self.dataset.transform(data_info)
-        ]
+        data_list = [self.dataset.transform(data_info)]
         data = default_collate(data_list)
 
         for key in data:
@@ -218,7 +217,6 @@ class MultiSSP3DDataset(Dataset):
 
         item["person_valid"] = torch.ones((1, 1))
         item["img_ori"] = image
-        item["mask"] = silhouette
         item["shape_params"] = mhr_shape
         item["model_params"] = mhr_pose
         item["face_expr_coeffs"] = mhr_expr
@@ -249,6 +247,8 @@ class MultiSSP3DDataset(Dataset):
 
                 item[field] = [v[field] for v in views]
 
+        item["mask"] = item["mask"].float().unsqueeze(-3)
+        item["mask_score"] = torch.ones((len(views), 1, 1, 1))
         item["num_views"] = len(views)
         item["selected_serno"] = selected_serno
         item["selected_indices"] = selected_indices.tolist()

@@ -1,7 +1,9 @@
+import os
 import torch
+import torch.nn.functional as F
 import numpy as np
 
-import os
+from einops import rearrange
 
 from sam_3d_body.models.modules.mhr_utils import (
     batch9Dfrom6D,
@@ -41,6 +43,38 @@ def _sample(x, var, num_samples=4):
     return x + noise
 
 
+def _build_tril(x):
+    assert x.shape[-1] == 6
+    B = x.shape[0]
+    L = torch.zeros(B, 3, 3, device=x.device, dtype=x.dtype)
+
+    eps = 1e-4
+    L[:, 0, 0] = F.softplus(x[:, 0]) + eps
+    L[:, 1, 0] = x[:, 1]
+    L[:, 1, 1] = F.softplus(x[:, 2]) + eps
+    L[:, 2, 0] = x[:, 3]
+    L[:, 2, 1] = x[:, 4]
+    L[:, 2, 2] = F.softplus(x[:, 5]) + eps
+
+    return L
+
+
+def _sample_full_covariance(x, cholesky_flat, num_samples=4):
+    assert x.shape[-1] == 3
+    assert cholesky_flat.shape[-1] == 6
+
+    B, D = x.shape
+    L = _build_tril(cholesky_flat)  # [B, 3, 3]
+
+    eps = torch.randn(
+        B, num_samples, D, device=x.device, dtype=x.dtype  # ~ N(0, I)
+    )  # [B, N, 3]
+
+    # z = μ + ε Lᵀ  => Cov[z] = L Lᵀ
+    z = x.unsqueeze(1) + torch.matmul(eps, L.transpose(-1, -2))  # [B, N, 3]
+    return z
+
+
 def sample_shape(shape_mean, shape_var, num_samples=4):
     return _sample(shape_mean, shape_var, num_samples)
 
@@ -65,7 +99,9 @@ def sample_scale(scale_mean, scale_var, num_samples=4):
     return scale_68D
 
 
-def gen_pose_samples(body_pose_cont, var, num_samples=4):
+def gen_pose_samples(
+    body_pose_cont, var, num_samples=4, sample_function=_sample_full_covariance
+):
     # fmt: off
     all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
     all_param_1dof_rot_idxs = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 74, 75, 77, 78, 80, 81, 83, 84, 89, 90, 94, 95, 101, 102, 104, 105, 107, 108, 110, 111, 116, 117, 118, 119, 120, 121, 122, 123])
@@ -90,9 +126,29 @@ def gen_pose_samples(body_pose_cont, var, num_samples=4):
 
     body_aa_3dofs = matrix_to_axis_angle(body_rotmat_3dofs).flatten(-2, -1)
 
-    body_aa_3dofs_sample = _sample(
-        body_aa_3dofs, var[:, :num_3dof_angles], num_samples
-    ).unflatten(-1, (-1, 3))
+    if sample_function == _sample_full_covariance:
+        assert var.shape[-1] == (
+            2 * num_3dof_angles + num_1dof_angles  # 6 for cholesky flat for 3dofs
+        )
+        var_3dofs = var[:, : 2 * num_3dof_angles]
+        var_1dofs = var[:, 2 * num_3dof_angles :]
+    else:
+        assert var.shape[-1] == (
+            num_3dof_angles + num_1dof_angles  # 6 for cholesky flat for 3dofs
+        )
+        var_3dofs = var[:, :num_3dof_angles]
+        var_1dofs = var[:, num_3dof_angles:]
+
+    # no compatibility with _sample for now
+    assert sample_function == _sample_full_covariance
+    body_aa_3dofs_sample = sample_function(
+        rearrange(body_aa_3dofs, " b (j c) -> (b j) c", c=3),
+        rearrange(var_3dofs, " b (j c) -> (b j) c", c=6),
+        num_samples,
+    )
+    body_aa_3dofs_sample = rearrange(
+        body_aa_3dofs_sample, "(b j) n c -> b n j c", b=body_aa_3dofs.shape[0]
+    )
 
     body_rotmat_3dofs_sample = axis_angle_to_matrix(body_aa_3dofs_sample)
     body_euler_3dofs_sample = matrix_to_euler_angles(body_rotmat_3dofs_sample, "XYZ")
@@ -102,9 +158,7 @@ def gen_pose_samples(body_pose_cont, var, num_samples=4):
     body_cont_1dofs = body_cont_1dofs.unflatten(-1, (-1, 2))  # (sincos)
     body_params_1dofs = torch.atan2(body_cont_1dofs[..., -2], body_cont_1dofs[..., -1])
 
-    body_params_1dofs_sample = _sample(
-        body_params_1dofs, var[:, num_3dof_angles:], num_samples
-    )
+    body_params_1dofs_sample = _sample(body_params_1dofs, var_1dofs, num_samples)
 
     # ------ trans ------
     body_trans_sample = body_cont_trans.unsqueeze(1).repeat(1, num_samples, 1)
@@ -130,6 +184,7 @@ def gen_samples(
     output,
     num_samples=5,
     sample_pose=True,
+    full_cov=True,
 ):
     """
     Args:
@@ -154,7 +209,13 @@ def gen_samples(
     shape_samples = sample_shape(shape_mean, shape_var, num_samples)
     scale_samples = sample_scale(scale_mean, scale_var, num_samples)
     if pose_mean is not None and pose_var is not None and sample_pose:
-        pose_samples = gen_pose_samples(pose_mean, pose_var, num_samples)
+        if full_cov:
+            sample_function = _sample_full_covariance
+        else:
+            sample_function = _sample
+        pose_samples = gen_pose_samples(
+            pose_mean, pose_var, num_samples, sample_function=sample_function
+        )
     elif pose_mean is not None:
         # Use mean pose repeated for each sample (no pose sampling)
         body_pose_mean_133 = compact_cont_to_model_params_body(pose_mean)
