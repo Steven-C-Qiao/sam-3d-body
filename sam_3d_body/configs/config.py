@@ -11,7 +11,7 @@ _C.TRAIN.FP16_TYPE = "high"
 _C.TRAIN.LR = 2e-5
 _C.TRAIN.NUM_EPOCHS = 50
 _C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
-_C.TRAIN.FREEZE_BACKBONE = False
+_C.TRAIN.FREEZE_BACKBONE = True 
 
 
 _C.LOSS = CfgNode()
@@ -25,7 +25,7 @@ _C.LOSS.KP3D_WEIGHT = 100.0
 # Dataset hparams
 _C.DATASET = CfgNode()
 _C.DATASET.BATCH_SIZE = 32
-_C.DATASET.NUM_WORKERS = 64
+_C.DATASET.NUM_WORKERS = 8
 _C.DATASET.NOISE_FACTOR = 0.4
 _C.DATASET.SCALE_FACTOR = 0.0
 _C.DATASET.CROP_PROB = 0.0
@@ -36,7 +36,7 @@ _C.DATASET.TRAIN_DS = 'all'
 _C.DATASET.VAL_DS = 'orbit-archviz-15'
 _C.DATASET.IMG_RES = 256
 _C.DATASET.MESH_COLOR = 'pinkish'
-_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_zoom-gym-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
+_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
 _C.DATASET.CROP_PERCENT = 0.8
 _C.DATASET.ALB = True
 _C.DATASET.ALB_PROB = 0.3
@@ -56,7 +56,7 @@ _C.MODEL.ENABLE_HAND = True
 _C.MODEL.DENSE_KEYPOINTS = True
 _C.MODEL.SAMPLE_SHAPE = True
 _C.MODEL.SAMPLE_SCALE = True
-_C.MODEL.SAMPLE_POSE = False
+_C.MODEL.SAMPLE_POSE = True 
 
 
 
@@ -184,7 +184,7 @@ DATASET_FOLDERS = {
     'static-stadium-bmi': os.path.join(PATH, 'data/training_images/20221019_3-8_250_highbmihand_static_stadium_6fps/png'),
     'orbit-stadium-bmi': os.path.join(PATH, 'data/training_images/20221019_3-8_250_highbmihand_orbit_stadium_6fps/png'),
     'static-suburbd-bmi': os.path.join(PATH, 'data/training_images/20221019_3-8_1000_highbmihand_static_suburb_d_6fps/png'),
-    'zoom-gym-bmi': os.path.join(PATH, 'data/training_images/20221020-3-8_250_highbmihand_zoom_highSchoolGym_a_6fps/png'),
+    # 'zoom-gym-bmi': os.path.join(PATH, 'data/training_images/20221020-3-8_250_highbmihand_zoom_highSchoolGym_a_6fps/png'),
     'static-office-hair': os.path.join(PATH, 'data/training_images/20221022_3_250_batch01handhair_static_bigOffice_30fps/png'),
     'zoom-suburbd-hair': os.path.join(PATH, 'data/training_images/20221024_10_100_batch01handhair_zoom_suburb_d_30fps/png'),
     'static-gym-hair': os.path.join(PATH, 'data/training_images/20221024_3-10_100_batch01handhair_static_highSchoolGym_30fps/png'),

@@ -64,8 +64,8 @@ class Trainer(BaseLightningModule):
 
         self.metrics = Metrics()
 
-        self.train_ds = self.train_dataset()
-        self.val_ds = self.val_dataset()
+        # self.val_ds = self.val_dataset()
+        # self.train_ds = self.train_dataset()
 
         # Optionally enable dense keypoints based on config; if disabled, the model
         # will only use the canonical 70 MHR keypoints.
@@ -231,6 +231,8 @@ class Trainer(BaseLightningModule):
 
     def preprocess(self, batch: Dict):
         mhr_model = self.model.head_pose
+
+            
         gt_mhr_output = mhr_model.mhr(
             identity_coeffs=batch["shape_params"],
             model_parameters=batch["model_params"],
@@ -251,6 +253,9 @@ class Trainer(BaseLightningModule):
             .reshape(-1, gt_vert_joints.shape[0], 3)
             .permute(1, 0, 2)
         )
+        if batch['dataset_name'][0] == '4d-dress':
+            R = batch['cam_ext'][:, :3, :3]
+            gt_verts = gt_verts @ R.transpose(-2, -1)
 
         batch["gt_verts_w_transl"] = gt_verts
 
@@ -491,6 +496,7 @@ class Trainer(BaseLightningModule):
         return val_datasets
 
     def val_dataloader(self):
+        self.val_ds = self.val_dataset()
         dataloaders = []
         for val_ds in self.val_ds:
             dataloaders.append(
@@ -547,7 +553,7 @@ class Trainer(BaseLightningModule):
     #         )
     #     return dataloaders
 
-    def multiview_eval_dataset(self, num_view: int = 4):
+    def multiview_eval_dataset(self, num_view: int = 4, dataset_name: str = "4d-dress"):
         """
         Build a BEDLAM multi-view evaluation dataset using MultiViewEvaluationDataset.
 
@@ -555,12 +561,23 @@ class Trainer(BaseLightningModule):
         `num_view` different camera views of the same subject.
         """
         options = self.cfg.DATASET
-        options.VAL_DS = "ssp3d"
-
+        if dataset_name is not None:
+            options.VAL_DS = dataset_name
+        
         if options.VAL_DS == "ssp3d":
             from sam_3d_body.data.ssp3d_dataset import MultiSSP3DDataset
             logger.info(f"SSP-3D dataset with num_view={num_view}")
             return MultiSSP3DDataset("/scratches/kyuban/cq244/datasets/SSP-3D/ssp_3d", num_view=num_view)
+        elif options.VAL_DS == "4d-dress":
+            from sam_3d_body.data.d4dress_dataset import MultiD4DressDataset
+            logger.info(f"4D-DRESS dataset with num_view={num_view}")
+            ids = [
+                '00122', '00123', '00127', '00129', '00134', '00135', '00136', '00137', 
+                '00140', '00147', '00148', '00149', '00151', '00152', '00154', '00156', 
+                '00160', '00163', '00167', '00168', '00169', '00170', '00174', '00175', 
+                '00176', '00179', '00180', '00185', '00187', '00190'
+            ]  
+            return MultiD4DressDataset(ids)
         
         # Use the same datasets as training by default (first dataset only)
         dataset_names = options.VAL_DS.split("_")
@@ -580,14 +597,14 @@ class Trainer(BaseLightningModule):
 
         return multiview_ds
 
-    def multiview_eval_dataloader(self, num_view: int = 4, batch_size: int = 1):
+    def multiview_eval_dataloader(self, num_view: int = 4, batch_size: int = 1, dataset_name: str = "4d-dress"):
         """
         DataLoader wrapping the multi-view evaluation dataset.
 
         Batch size defaults to 1 so that each batch corresponds to a single serno,
         with `num_view` views.
         """
-        multiview_ds = self.multiview_eval_dataset(num_view=num_view)
+        multiview_ds = self.multiview_eval_dataset(num_view=num_view, dataset_name=dataset_name)
         loader = DataLoader(
             dataset=multiview_ds,
             batch_size=batch_size,
@@ -602,6 +619,7 @@ class Trainer(BaseLightningModule):
         self,
         num_view: int = 4,
         max_batches: Optional[int] = None,
+        dataset_name: str = "4d-dress",
     ):
         """
         Run MHR predictions for each view loaded by MultiViewEvaluationDataset.
@@ -621,7 +639,7 @@ class Trainer(BaseLightningModule):
         # Get device from model parameters (works even when called outside Lightning training loop)
         device = self.device
 
-        dataloader = self.multiview_eval_dataloader(num_view=num_view, batch_size=1)
+        dataloader = self.multiview_eval_dataloader(num_view=num_view, batch_size=1, dataset_name=dataset_name)
 
         metrics = defaultdict(list)
 
@@ -637,8 +655,8 @@ class Trainer(BaseLightningModule):
             # Batch size is 1 by construction
             # Shapes: [1, V, ...] -> we work over the view dimension
             num_views = batch["num_views"][0].item()
-            serno = batch["selected_serno"][0].item()
-            indices = batch["selected_indices"][0].tolist()
+            # serno = batch["selected_serno"][0].item()
+            # indices = batch["selected_indices"][0].tolist()
 
             # if the value is a tensor and its first two dims are [batch, num_views], flatten
             bs, num_views = batch["img"].shape[:2]
@@ -927,12 +945,14 @@ class Trainer(BaseLightningModule):
                     gt_verts = (
                         batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
                     )
+                    # gt_verts[..., [1, 2]] *= -1
                     if 'cam_ext' not in batch:
                         # SSP-3D
                         assert batch['dataset_name'][0] == 'ssp3d'
                         gt_cam_t = batch["trans_cam"][flat_idx].cpu().detach().numpy()
                     else:
                         gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
+                        
 
                     merged_verts = verts_star[flat_idx].cpu().detach().numpy()
 
@@ -943,6 +963,7 @@ class Trainer(BaseLightningModule):
                             img_for_render.copy(),
                             mesh_base_color=LIGHT_BLUE,
                             scene_bg_color=(1, 1, 1),
+                            camera_center=(batch["cam_int"][flat_idx][0, 2], batch["cam_int"][flat_idx][1, 2]),
                         )
                         * 255
                     ).astype(np.uint8)
@@ -954,6 +975,7 @@ class Trainer(BaseLightningModule):
                             img_for_render.copy(),
                             mesh_base_color=(1.0, 0.8, 0.5),  # light orange
                             scene_bg_color=(1, 1, 1),
+                            camera_center=(batch["cam_int"][flat_idx][0, 2], batch["cam_int"][flat_idx][1, 2]),
                         )
                         * 255
                     ).astype(np.uint8)
@@ -965,6 +987,7 @@ class Trainer(BaseLightningModule):
                             img_for_render.copy(),
                             mesh_base_color=(0.5, 1.0, 0.5),  # light green
                             scene_bg_color=(1, 1, 1),
+                            camera_center=(batch["cam_int"][flat_idx][0, 2], batch["cam_int"][flat_idx][1, 2]),
                         )
                         * 255
                     ).astype(np.uint8)

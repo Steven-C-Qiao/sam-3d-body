@@ -30,7 +30,7 @@ CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 CONFIG_PATH = "checkpoints/sam-3d-body-dinov3/model_config.yaml"
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
@@ -59,7 +59,12 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     if not os.path.exists(model_save_dir):
         os.makedirs(model_save_dir)
 
-    vis_save_dir = os.path.join(exp_dir, "merge_vis")
+    if dataset_name is None:
+        suffix = '_bedlam'
+    else:
+        suffix = f'_{dataset_name}'
+
+    vis_save_dir = os.path.join(exp_dir, f"merge_vis{suffix}")
     if not os.path.exists(vis_save_dir):
         os.makedirs(vis_save_dir)
 
@@ -115,7 +120,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         else:
             logger.warning("No model parameters found in checkpoint state_dict!")
 
-    results = trainer.run_multiview_prediction(num_view=4, max_batches=40)
+    results = trainer.run_multiview_prediction(num_view=4, max_batches=10, dataset_name=dataset_name)
 
 
 if __name__ == "__main__":
@@ -146,6 +151,13 @@ if __name__ == "__main__":
         default=None,
         help="Comma-separated list of GPU indices to use. E.g., '0,1,2'",
     )
+    parser.add_argument(
+        "--dataset_name",
+        "-D",
+        type=str,
+        default=None,
+        help="Options: None, 4d-dress, ssp3d",
+    )
     parser.add_argument("--dev", action="store_true")
     parser.add_argument("--plot", action="store_true")
     args = parser.parse_args()
@@ -166,4 +178,5 @@ if __name__ == "__main__":
         resume_path=args.resume_training_states,
         load_path=args.load_from_ckpt,
         dev=args.dev,
+        dataset_name=args.dataset_name,
     )

@@ -60,7 +60,13 @@ class DatasetHMR(Dataset):
         self.is_train = True
         self.options = options
         self.img_dir = DATASET_FOLDERS[dataset]
-        self.mask_dir = self.img_dir.replace('training_images', 'masks').replace('_6fps/', '/').replace('png', 'masks')
+        # Clean up directory paths of any sub-strings '_6fps' or '_30fps'
+        self.mask_dir = (
+            self.img_dir.replace('training_images', 'masks')
+            .replace('_6fps/', '/')
+            .replace('_30fps/', '/')
+            .replace('png', 'masks')
+        )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
@@ -79,7 +85,6 @@ class DatasetHMR(Dataset):
                 VisionTransformWrapper(ToTensor()),
             ]
         )
-        # TODO: Handle this
         self.cam_int = self.data["cam_int"].astype(np.float32)
         self.shape_params = self.data["identity_coeffs"].astype(np.float32)
         self.model_params = self.data["lbs_model_params"].astype(np.float32)
@@ -259,13 +264,15 @@ class DatasetHMR(Dataset):
         #                                     axis='y')
 
         imgname = os.path.join(self.img_dir, self.imgname[index])
-        maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + '_env.png')
-        # try:
+        maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + "_env.png")
         cv_img = read_img(imgname)
-        masks = cv2.imread(maskname, 0) # flip env to people 
-        # except Exception as E:
-        #     print(E)
-        #     logger.info(f"@{imgname}@ from {self.dataset}")
+
+        # Robustly handle missing/invalid mask files: cv2.imread returns None on failure,
+        # but only emits a warning. Explicitly check for None instead of relying on assert.
+        masks = cv2.imread(maskname, 0)
+        if masks is None:
+            print(f"@{maskname}@ not found")
+            masks = np.ones_like(cv_img)
         item["img_ori"] = cv_img
         item["mask_ori"] = masks
         if "closeup" in self.dataset:
@@ -480,9 +487,8 @@ class MultiViewEvaluationDataset(Dataset):
         self.options = options
         self.num_view = num_view
         self.img_dir = DATASET_FOLDERS[dataset]
+        self.mask_dir = self.img_dir.replace('training_images', 'masks').replace('_6fps/', '/').replace('png', 'masks')
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
-
-        # Load all data fields similar to DatasetHMR
         self.imgname = self.data["imgname"]
         self.scale = self.data["scale"].astype(np.float32)
         self.center = self.data["center"].astype(np.float32)
@@ -631,8 +637,10 @@ class MultiViewEvaluationDataset(Dataset):
         sc = 1.0  # No augmentation for evaluation
 
         imgname = os.path.join(self.img_dir, self.imgname[index])
+        maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + '_env.png')
         try:
             cv_img = read_img(imgname)
+            masks = cv2.imread(maskname, 0)
         except Exception as E:
             print(E)
             logger.info(f"@{imgname}@ from {self.dataset}")
@@ -640,8 +648,10 @@ class MultiViewEvaluationDataset(Dataset):
             return None
 
         item["img_ori"] = cv_img
+        item["mask_ori"] = masks
         if "closeup" in self.dataset:
             cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
+            masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
 
         orig_shape = np.array(cv_img.shape)[:2]
         pose = self.pose_cam[index].copy()
@@ -654,6 +664,7 @@ class MultiViewEvaluationDataset(Dataset):
             scale=float(sc * scale),
             bbox_format="xyxy",
             keypoints_2d=mhr_keypoints_2d,
+            mask=masks,
         )
 
         # Apply transform pipeline
@@ -693,6 +704,8 @@ class MultiViewEvaluationDataset(Dataset):
         for key in data:
             item[key] = data[key]
 
+        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0 # N, 1, H, W
+        item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
         item["cam_int"] = torch.from_numpy(self.cam_int[index]).float()
         item["shape_params"] = torch.from_numpy(self.shape_params[index]).float()
         item["model_params"] = torch.from_numpy(self.model_params[index]).float()
