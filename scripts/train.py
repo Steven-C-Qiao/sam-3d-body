@@ -125,6 +125,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
             if missing_keys:
                 logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys")
             if unexpected_keys:
+                print(unexpected_keys)
                 logger.warning(
                     f"Unexpected keys (ignored): {len(unexpected_keys)} keys"
                 )
