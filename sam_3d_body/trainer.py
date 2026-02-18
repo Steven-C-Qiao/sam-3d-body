@@ -96,13 +96,17 @@ class Trainer(BaseLightningModule):
             if self.cfg.TRAIN.FREEZE_BACKBONE:
                 for param in self.model.parameters():
                     param.requires_grad = False
-            for param in self.model.head_pose.shape_uncertainty_proj.parameters():
-                param.requires_grad = True
-            for param in self.model.head_pose.scale_uncertainty_proj.parameters():
-                param.requires_grad = True
-            if hasattr(self.model.head_pose, "pose_uncertainty_proj"):
-                for param in self.model.head_pose.pose_uncertainty_proj.parameters():
-                    param.requires_grad = True
+                    
+            for param in [
+                self.model.head_pose.shape_uncertainty_proj,
+                self.model.head_pose.scale_uncertainty_proj,
+                self.model.head_pose.pose_3dof_uncertainty_proj,
+                self.model.head_pose.pose_1dof_uncertainty_proj,
+            ]:
+                for p in param.parameters():
+                    p.requires_grad = True
+            if self.model.use_uncertainty_token:
+                self.model.uncert_token.requires_grad = True
 
         self.scale_mean = self.model.head_pose.scale_mean.float()
         self.scale_comps = self.model.head_pose.scale_comps.float()
@@ -124,7 +128,9 @@ class Trainer(BaseLightningModule):
 
         metrics = self.metrics(outputs, batch)
 
-        self.log_and_visualise(loss_dict, metrics, batch, outputs, prefix="train_")
+        self.log_and_visualise(
+            loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
+        )
 
         # for k, v in loss_dict.items():
         #     print(f'{k}: {v.item():.3f}', end=' ')
@@ -140,6 +146,7 @@ class Trainer(BaseLightningModule):
         batch: Dict,
         outputs: Dict,
         prefix: str = "",
+        batch_idx: Optional[int] = None,
     ):
 
         metrics = {f"{prefix}{k}": v for k, v in metrics.items()}
@@ -162,8 +169,14 @@ class Trainer(BaseLightningModule):
         self.log_dict(metrics, sync_dist=True)
         self.log_dict(loss_dict, sync_dist=True)
 
-        should_visualize = self.global_step in [0, 1000, 2000, 3000, 4000] or (
-            self.global_step > 4000 and self.global_step % 5000 == 0
+
+        if prefix == "train_":
+            vis_step = int(self.global_step)
+        else:
+            vis_step = int(self.global_step if self.global_step > 0 else (batch_idx or 0))
+
+        should_visualize = vis_step in [0, 250, 500, 1000, 2000, 3000, 4000] or (
+            vis_step > 4000 and vis_step % 5000 == 0
         )
         global_rank = getattr(self, "global_rank", 0)
         if should_visualize and global_rank == 0:
@@ -172,27 +185,46 @@ class Trainer(BaseLightningModule):
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
             image = image.cpu().detach().numpy()  # [3, H, W]
 
+            image_crop = batch["img"][0,0].data.cpu().detach().numpy().transpose(1, 2, 0) * 255.0
+
             # Generate visualizations
             rend_img = my_visualize(
                 image, outputs, self.faces, stack_vertically=self.stack_vertically
             )
-            rend_img_samples = my_visualize_samples(
-                image, outputs, self.faces, stack_vertically=self.stack_vertically
+            affine = batch["affine_trans"][0, 0]
+            img_size = batch["img_size"][0, 0]
+            rend_img_samples_crops = my_visualize_samples(
+                image,
+                outputs,
+                self.faces,
+                stack_vertically=self.stack_vertically,
+                affine=affine,
+                img_size=img_size,
             )
-
+            rend_img_samples = my_visualize_samples(
+                image,
+                outputs,
+                self.faces,
+                stack_vertically=self.stack_vertically,
+            )
+            
             rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
             rend_img_samples_bgr = cv2.cvtColor(rend_img_samples, cv2.COLOR_RGB2BGR)
+            rend_img_samples_crops_bgr = cv2.cvtColor(rend_img_samples_crops, cv2.COLOR_RGB2BGR)
             cv2.imwrite(
-                os.path.join(self.vis_save_dir, f"{self.global_step:06d}_img.png"),
+                os.path.join(self.vis_save_dir, f"{vis_step:06d}_img.png"),
                 rend_img_bgr,
             )
             cv2.imwrite(
-                os.path.join(self.vis_save_dir, f"{self.global_step:06d}_samples.png"),
+                os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples.png"),
                 rend_img_samples_bgr,
             )
-
+            cv2.imwrite(
+                os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples_crops.png"),
+                rend_img_samples_crops_bgr,
+            )
             self.visualiser.visualise(
-                outputs, batch, batch_idx=None, global_step=self.global_step
+                outputs, batch, batch_idx=batch_idx, global_step=vis_step
             )
         return None
 
@@ -208,7 +240,9 @@ class Trainer(BaseLightningModule):
 
         metrics = self.metrics(outputs, batch)
 
-        self.log_and_visualise(loss_dict, metrics, batch, outputs, prefix="val_")
+        self.log_and_visualise(
+            loss_dict, metrics, batch, outputs, prefix="val_", batch_idx=batch_idx
+        )
 
         return loss_dict["total_loss"]
 
@@ -225,7 +259,9 @@ class Trainer(BaseLightningModule):
 
         metrics = self.metrics(outputs, batch)
 
-        self.log_and_visualise(loss_dict, metrics, batch, outputs, prefix="test_")
+        self.log_and_visualise(
+            loss_dict, metrics, batch, outputs, prefix="test_", batch_idx=batch_idx
+        )
 
         return loss_dict["total_loss"]
 
@@ -387,79 +423,6 @@ class Trainer(BaseLightningModule):
         optimizer = torch.optim.Adam(trainable_params, lr=self.cfg.TRAIN.LR)
         return optimizer
 
-    def on_save_checkpoint(self, checkpoint):
-        """
-        Override to only save trainable (unfrozen) parameters in checkpoints.
-        This reduces checkpoint size significantly when most parameters are frozen.
-        """
-        # Get the full state dict
-        state_dict = checkpoint["state_dict"]
-
-        # Get all trainable parameter names from the model
-        trainable_param_names = set()
-        total_params = 0
-        trainable_params = 0
-        for name, param in self.model.named_parameters():
-            total_params += 1
-            if param.requires_grad:
-                trainable_param_names.add(name)
-                trainable_params += 1
-
-        # Filter state_dict to only include trainable parameters
-        # PyTorch Lightning adds 'model.' prefix to model parameters
-        filtered_state_dict = {}
-        saved_model_params = 0
-
-        # Keys to exclude: scale_mean, scale_comps, scale_comps_pinv (extracted from loaded model, not trained)
-        exclude_keys = {"scale_mean", "scale_comps", "scale_comps_pinv"}
-
-        for key, value in state_dict.items():
-            # Skip scale-related keys that shouldn't be saved
-            if any(excluded in key for excluded in exclude_keys):
-                continue
-
-            # Check if this is a model parameter
-            if key.startswith("model."):
-                # Remove 'model.' prefix to get the actual parameter name
-                param_name = key[6:]  # Remove 'model.' prefix
-                # Only include if it's a trainable parameter
-                if param_name in trainable_param_names:
-                    filtered_state_dict[key] = value
-                    saved_model_params += 1
-            else:
-                # Keep non-model keys (optimizer states, etc.)
-                filtered_state_dict[key] = value
-
-        # Log checkpoint saving info
-        logger.info(
-            f"Saving checkpoint: {saved_model_params}/{total_params} trainable parameters "
-            f"({100*saved_model_params/total_params:.1f}% of model parameters)"
-        )
-
-        # Update checkpoint with filtered state dict
-        checkpoint["state_dict"] = filtered_state_dict
-
-        return checkpoint
-
-    def on_load_checkpoint(self, checkpoint):
-        """
-        Override to handle loading checkpoints that only contain trainable parameters.
-        Frozen parameters will keep their original loaded values.
-        """
-        # The checkpoint only contains trainable parameters
-        # Load them with strict=False so frozen parameters are not affected
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-            # Filter to only model parameters (remove optimizer states, etc.)
-            model_state_dict = {}
-            for key, value in state_dict.items():
-                if key.startswith("model."):
-                    # Remove 'model.' prefix for loading
-                    param_name = key[6:]
-                    model_state_dict[param_name] = value
-
-            if model_state_dict:
-                self.model.load_state_dict(model_state_dict, strict=False)
 
     def train_dataset(self):
         options = self.cfg.DATASET
@@ -482,32 +445,42 @@ class Trainer(BaseLightningModule):
 
     def val_dataset(self):
         datasets = self.cfg.DATASET.VAL_DS.split("_")
-        logger.info(f"Validation datasets are: {datasets}")
-        val_datasets = []
-        for dataset_name in datasets:
-            val_datasets.append(
-                BEDLAMDataset(
-                    options=self.cfg.DATASET,
-                    dataset=dataset_name,
-                    is_train=False,
-                )
-            )
-        return val_datasets
+        # logger.info(f"Validation datasets are: {datasets}")
+        # val_datasets = []
+        # for dataset_name in datasets:
+        #     val_datasets.append(
+        #         BEDLAMDataset(
+        #             options=self.cfg.DATASET,
+        #             dataset=dataset_name,
+        #             is_train=False,
+        #         )
+        #     )
+        val_datasets = [BEDLAMDataset(self.cfg.DATASET, ds) for ds in datasets]
+        val_ds = ConcatDataset(val_datasets)
+        return val_ds
 
     def val_dataloader(self):
         self.val_ds = self.val_dataset()
-        dataloaders = []
-        for val_ds in self.val_ds:
-            dataloaders.append(
-                DataLoader(
-                    dataset=val_ds,
-                    batch_size=self.cfg.DATASET.BATCH_SIZE,
-                    shuffle=False,
-                    num_workers=self.cfg.DATASET.NUM_WORKERS,
-                    drop_last=True,
-                )
-            )
-        return dataloaders
+        # dataloaders = []
+        # for val_ds in self.val_ds:
+        #     dataloaders.append(
+        #         DataLoader(
+        #             dataset=val_ds,
+        #             batch_size=self.cfg.DATASET.BATCH_SIZE,
+        #             shuffle=False,
+        #             num_workers=self.cfg.DATASET.NUM_WORKERS,
+        #             drop_last=True,
+        #         )
+        #     )
+        # return dataloaders
+        return DataLoader(
+            dataset=self.val_ds,
+            batch_size=self.cfg.DATASET.BATCH_SIZE,
+            shuffle=True,
+            num_workers=self.cfg.DATASET.NUM_WORKERS,
+            pin_memory=self.cfg.DATASET.PIN_MEMORY,
+            drop_last=True,
+        )
 
     # def test_dataset(self):
     #     """
@@ -559,57 +532,30 @@ class Trainer(BaseLightningModule):
         Each sample corresponds to a unique serial number (serno) and contains
         `num_view` different camera views of the same subject.
         """
-        options = self.cfg.DATASET
         if dataset_name is not None:
-            options.VAL_DS = dataset_name
+            self.cfg.DATASET.VAL_DS = dataset_name
 
-        if options.VAL_DS == "ssp3d":
+        if self.cfg.DATASET.VAL_DS == "ssp3d":
             from sam_3d_body.data.ssp3d_dataset import MultiSSP3DDataset
-
             logger.info(f"SSP-3D dataset with num_view={num_view}")
             return MultiSSP3DDataset(
-                "/scratches/kyuban/cq244/datasets/SSP-3D/ssp_3d", num_view=num_view
+                "/scratches/kyuban/cq244/datasets/SSP-3D/ssp_3d", num_view=num_view, cfg=self.cfg
             )
-        elif options.VAL_DS == "4d-dress":
+        elif self.cfg.DATASET.VAL_DS == "4d-dress":
             from sam_3d_body.data.d4dress_dataset import MultiD4DressDataset
 
             logger.info(f"4D-DRESS dataset with num_view={num_view}")
             ids = [
-                "00122",
-                "00123",
-                "00127",
-                "00129",
-                "00134",
-                "00135",
-                "00136",
-                "00137",
-                "00140",
-                "00147",
-                "00148",
-                "00149",
-                "00151",
-                "00152",
-                "00154",
-                "00156",
-                "00160",
-                "00163",
-                "00167",
-                "00168",
-                "00169",
-                "00170",
-                "00174",
-                "00175",
-                "00176",
-                "00179",
-                "00180",
-                "00185",
-                "00187",
-                "00190",
+                "00122","00123","00127","00129","00134",
+                "00135","00136","00137","00140","00147",
+                "00148","00149","00151","00152","00154",
+                "00156","00160","00163","00167","00168",
+                "00169","00170","00174","00175","00176",
+                "00179","00180","00185","00187","00190",
             ]
-            return MultiD4DressDataset(ids)
+            return MultiD4DressDataset(ids, cfg=self.cfg)
 
-        # Use the same datasets as training by default (first dataset only)
-        dataset_names = options.VAL_DS.split("_")
+        dataset_names = self.cfg.DATASET.VAL_DS.split("_")
         dataset_name = dataset_names[0]
 
         logger.info(
@@ -618,7 +564,7 @@ class Trainer(BaseLightningModule):
         )
 
         multiview_ds = MultiViewEvaluationDataset(
-            options=options,
+            options=self.cfg.DATASET,
             dataset=dataset_name,
             num_view=num_view,
             is_train=True,  # uses training BEDLAM splits
@@ -939,24 +885,24 @@ class Trainer(BaseLightningModule):
             )
 
             metrics["per_view_mpjpe"].append(per_view_mpjpe.mean().item())
-            metrics["merged_mpjpe"].append(merged_mpjpe.mean().item())
             metrics["best_per_view_mpjpe"].append(per_view_mpjpe.min().item())
             metrics["mean_mpjpe"].append(mean_mpjpe.mean().item())
+            metrics["merged_mpjpe"].append(merged_mpjpe.mean().item())
 
             metrics["per_view_pve"].append(per_view_pve.mean().item())
-            metrics["merged_pve"].append(merged_pve.mean().item())
             metrics["best_per_view_pve"].append(per_view_pve.min().item())
             metrics["mean_pve"].append(mean_pve.mean().item())
+            metrics["merged_pve"].append(merged_pve.mean().item())
 
             metrics["per_view_pampjpe"].append(per_view_pampjpe.mean().item())
-            metrics["merged_pampjpe"].append(merged_pampjpe.mean().item())
             metrics["best_per_view_pampjpe"].append(per_view_pampjpe.min().item())
             metrics["mean_pampjpe"].append(mean_pampjpe.mean().item())
+            metrics["merged_pampjpe"].append(merged_pampjpe.mean().item())
 
             metrics["per_view_pvetsc"].append(per_view_pvetsc.mean().item())
-            metrics["merged_pvetsc"].append(merged_pvetsc.mean().item())
             metrics["best_per_view_pvetsc"].append(per_view_pvetsc.min().item())
             metrics["mean_pvetsc"].append(mean_pvetsc.mean().item())
+            metrics["merged_pvetsc"].append(merged_pvetsc.mean().item())
 
             # Initialize gallery: list of lists to store rendered images [bs][num_views]
             gallery = [[None for _ in range(num_views)] for _ in range(bs)]
@@ -964,7 +910,51 @@ class Trainer(BaseLightningModule):
             renderer = Renderer(
                 focal_length=outputs["mhr"]["focal_length"][0], faces=self.faces
             )
+
             for i in range(1):
+                all_distances = []
+                pred_vertex_dists = {}
+                merged_vertex_dists = {}
+
+                for view in range(num_views):
+                    flat_idx = i * num_views + view
+
+                    verts = (
+                        outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
+                    )
+                    gt_verts = (
+                        batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
+                    )
+                    merged_verts = verts_star[flat_idx].cpu().detach().numpy()
+
+                    pred_dist = np.linalg.norm(verts - gt_verts, axis=1)
+                    merged_dist = np.linalg.norm(merged_verts - gt_verts, axis=1)
+
+                    pred_vertex_dists[view] = pred_dist
+                    merged_vertex_dists[view] = merged_dist
+
+                    all_distances.append(pred_dist)
+                    all_distances.append(merged_dist)
+
+                all_distances = np.concatenate(all_distances)
+                min_dist = float(all_distances.min()) if all_distances.size > 0 else 0.0
+                max_dist = float(all_distances.max()) if all_distances.size > 0 else 1.0
+
+                if max_dist > min_dist:
+                    denom = max_dist - min_dist
+                else:
+                    denom = 1.0
+
+                def build_vertex_colors(dists: np.ndarray) -> np.ndarray:
+                    """Map distances to RGBA vertex colors using shared viridis scale."""
+                    normalized = (dists - min_dist) / denom
+                    normalized = np.clip(normalized, 0.0, 1.0)
+                    colors_rgb = plt.cm.viridis(normalized)[..., :3]  # (V, 3)
+                    vertex_colors = np.ones((colors_rgb.shape[0], 4), dtype=np.float32)
+                    vertex_colors[:, :3] = colors_rgb
+                    return vertex_colors
+
+                # Second pass: render GT (solid color), and pred/merged with per-vertex viridis colors
                 for view in range(num_views):
                     img_for_render = batch["img_ori"][view][i].cpu().detach().numpy()
 
@@ -992,6 +982,7 @@ class Trainer(BaseLightningModule):
 
                     merged_verts = verts_star[flat_idx].cpu().detach().numpy()
 
+                    # GT: keep fixed LIGHT_BLUE color
                     gt_rendered_img = (
                         renderer(
                             gt_verts,
@@ -1007,32 +998,38 @@ class Trainer(BaseLightningModule):
                         * 255
                     ).astype(np.uint8)
 
+                    # Predicted mesh: per-vertex viridis colors from distance to GT
+                    pred_colors = build_vertex_colors(pred_vertex_dists[view])
                     rendered_img = (
                         renderer(
                             verts,
                             cam_t,
                             img_for_render.copy(),
-                            mesh_base_color=(1.0, 0.8, 0.5),  # light orange
+                            mesh_base_color=(1.0, 0.8, 0.5),  # unused when vertex_colors is set
                             scene_bg_color=(1, 1, 1),
                             camera_center=(
                                 batch["cam_int"][flat_idx][0, 2],
                                 batch["cam_int"][flat_idx][1, 2],
                             ),
+                            vertex_colors=pred_colors,
                         )
                         * 255
                     ).astype(np.uint8)
 
+                    # Merged mesh: per-vertex viridis colors from distance to GT
+                    merged_colors = build_vertex_colors(merged_vertex_dists[view])
                     rendered_merged_img = (
                         renderer(
                             merged_verts,
                             cam_t,
                             img_for_render.copy(),
-                            mesh_base_color=(0.5, 1.0, 0.5),  # light green
+                            mesh_base_color=(0.5, 1.0, 0.5),  # unused when vertex_colors is set
                             scene_bg_color=(1, 1, 1),
                             camera_center=(
                                 batch["cam_int"][flat_idx][0, 2],
                                 batch["cam_int"][flat_idx][1, 2],
                             ),
+                            vertex_colors=merged_colors,
                         )
                         * 255
                     ).astype(np.uint8)

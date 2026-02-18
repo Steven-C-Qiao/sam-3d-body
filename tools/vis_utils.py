@@ -259,33 +259,94 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
 
 
 
-def my_visualize_samples(img_cv2, outputs, faces, stack_vertically=True):
+def my_visualize_samples(
+    img_cv2, outputs, faces, stack_vertically=True, affine=None, img_size=None
+):
 
     img_mesh = img_cv2.copy()
 
-    mhr_samples = outputs['mhr_samples'].cpu().detach().numpy()
+    # Prepare affine warp (from full image -> crop) if provided
+    warp_matrix = None
+    output_size = None
+    if affine is not None:
+        try:
+            import torch
 
-    outputs = outputs['mhr']
+            if isinstance(affine, torch.Tensor):
+                affine_np = affine.detach().cpu().numpy()
+            else:
+                affine_np = np.asarray(affine)
+        except ImportError:
+            affine_np = np.asarray(affine)
+
+        # Remove batch dimension if present
+        if affine_np.ndim == 3:
+            affine_np = affine_np[0]
+
+        # Support common shapes: (2, 3), (3, 3), or (3, 2)
+        if affine_np.shape == (2, 3):
+            M = affine_np
+        elif affine_np.shape == (3, 3):
+            M = affine_np[:2, :]
+        elif affine_np.shape == (3, 2):
+            M = affine_np.T
+        else:
+            M = None
+
+        if img_size is not None:
+            try:
+                if isinstance(img_size, torch.Tensor):
+                    img_size_np = img_size.detach().cpu().numpy()
+                else:
+                    img_size_np = np.asarray(img_size)
+            except Exception:
+                img_size_np = np.asarray(img_size)
+
+            # img_size is typically [2] = (width, height) or a scalar (e.g. 256)
+            if img_size_np.ndim == 0:
+                crop_size = int(img_size_np)
+            else:
+                # Use the first element; crops are usually square (e.g. 256x256)
+                crop_size = int(img_size_np.reshape(-1)[0])
+
+            output_size = (crop_size, crop_size)
+
+        if M is not None and output_size is not None:
+            warp_matrix = M
+
+    # If we have a warp, also precompute the cropped base image
+    base_img = img_cv2.copy()
+    if warp_matrix is not None:
+        base_img_uint8 = base_img.astype(np.uint8)
+        base_img = cv2.warpAffine(base_img_uint8, warp_matrix, output_size)
+
+    mhr_samples = outputs["mhr_samples"].cpu().detach().numpy()
+
+    outputs = outputs["mhr"]
     for key in outputs:
         try:
             outputs[key] = outputs[key].cpu().detach().numpy()
-        except:
+        except Exception:
             pass
-    person_output = outputs 
+    person_output = outputs
 
     img_mesh_list = []
     for i in range(mhr_samples.shape[1]):
         img_mesh = img_cv2.copy()
-        all_pred_vertices = (mhr_samples[0, i] + person_output['pred_cam_t'][0])
+        all_pred_vertices = mhr_samples[0, i] + person_output["pred_cam_t"][0]
         all_faces = faces
-        
+
         # Pull out a fake translation; take the closest two
-        fake_pred_cam_t = (np.max(all_pred_vertices[-2*18439:], axis=0) + np.min(all_pred_vertices[-2*18439:], axis=0)) / 2
+        fake_pred_cam_t = (
+            np.max(all_pred_vertices[-2 * 18439 :], axis=0)
+            + np.min(all_pred_vertices[-2 * 18439 :], axis=0)
+        ) / 2
         all_pred_vertices = all_pred_vertices - fake_pred_cam_t
 
         # Render front view
-
-        renderer = Renderer(focal_length=person_output["focal_length"][0], faces=all_faces)
+        renderer = Renderer(
+            focal_length=person_output["focal_length"][0], faces=all_faces
+        )
         img_mesh = (
             renderer(
                 all_pred_vertices,
@@ -296,15 +357,19 @@ def my_visualize_samples(img_cv2, outputs, faces, stack_vertically=True):
             )
             * 255
         )
+
+        # If an affine is provided, convert rendered full image to cropped space
+        if warp_matrix is not None:
+            img_mesh_uint8 = img_mesh.astype(np.uint8)
+            img_mesh = cv2.warpAffine(img_mesh_uint8, warp_matrix, output_size)
+
         img_mesh_list.append(img_mesh)
 
     if stack_vertically:
         img_mesh_list = np.concatenate(img_mesh_list, axis=0)
-        cur_img = np.concatenate([img_cv2, img_mesh_list], axis=0)
+        cur_img = np.concatenate([base_img, img_mesh_list], axis=0)
     else:
         img_mesh_list = np.concatenate(img_mesh_list, axis=1)
-        cur_img = np.concatenate([img_cv2, img_mesh_list], axis=1)
+        cur_img = np.concatenate([base_img, img_mesh_list], axis=1)
 
     return cur_img
-
-    

@@ -115,7 +115,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         logger=tensorboard_logger,
         num_sanity_val_steps=num_sanity_val_steps,
     )
-    trainer.test(model, ckpt_path=resume_path)
+    trainer.validate(model, ckpt_path=resume_path)
 
 
 if __name__ == "__main__":

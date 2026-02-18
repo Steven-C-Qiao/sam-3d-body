@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sam_3d_body.models.sampling import gen_samples
 from sam_3d_body.data.utils.prepare_batch import prepare_batch
 from sam_3d_body.models.decoders.prompt_encoder import PositionEmbeddingRandom
 from sam_3d_body.models.modules.mhr_utils import (
@@ -70,6 +71,10 @@ class SAM3DBody(BaseModel):
         self.sample_scale = getattr(self.cfg.MODEL, "SAMPLE_SCALE", True)
         self.sample_pose = getattr(self.cfg.MODEL, "SAMPLE_POSE", True)
         self.full_cov = getattr(self.cfg.MODEL, "FULL_COV", True)
+        # Whether to use a dedicated uncertainty token in the decoder
+        self.use_uncertainty_token = getattr(
+            self.cfg.MODEL, "UNCERTAINTY_TOKEN", False
+        )
 
         # Create backbone feature extractor for human crops
         self.backbone = create_backbone(self.cfg.MODEL.BACKBONE.TYPE, self.cfg)
@@ -262,6 +267,14 @@ class SAM3DBody(BaseModel):
             add_identity=False,
         )
 
+        # Learnable uncertainty token for better uncertainty prediction (optional)
+        # This token attends to all other tokens and image features but is only used for uncertainty
+        if self.use_uncertainty_token:
+            self.uncert_token = nn.Parameter(
+                torch.zeros(1, 1, self.cfg.MODEL.DECODER.DIM)
+            )
+            nn.init.normal_(self.uncert_token, std=0.02)
+
     def _get_decoder_condition(self, batch: Dict) -> Optional[torch.Tensor]:
         num_person = batch["img"].shape[1]
 
@@ -358,6 +371,17 @@ class SAM3DBody(BaseModel):
         num_pose_token = token_embeddings.shape[1]
         assert num_pose_token == 1
 
+        # Optionally insert uncertainty token right after pose token (at index 1)
+        uncert_token_idx = None
+        if getattr(self, "use_uncertainty_token", False):
+            uncert_token_emb = self.uncert_token.expand(
+                batch_size, -1, -1
+            )  # B x 1 x D
+            token_embeddings = torch.cat(
+                [token_embeddings, uncert_token_emb], dim=1
+            )  # B x 2 x D (pose token + uncertainty token)
+            uncert_token_idx = 1  # Index of uncertainty token in the sequence
+
         image_augment, token_augment, token_mask = None, None, None
         if hasattr(self, "prompt_encoder") and keypoints is not None:
             if prev_estimate is None:
@@ -412,8 +436,19 @@ class SAM3DBody(BaseModel):
             )
 
             token_augment = torch.zeros_like(token_embeddings)
-            token_augment[:, [num_pose_token]] = prev_embeddings
-            token_augment[:, (num_pose_token + 1) :] = prompt_embeddings
+            # Tokens currently: [pose] or [pose, uncert], then we concatenate prev & prompt.
+            # Compute where the newly added prev and prompt tokens live in the sequence.
+            start_new = token_embeddings.shape[1] - (
+                prev_embeddings.shape[1] + prompt_embeddings.shape[1]
+            )
+            prev_start = start_new
+            prompt_start = start_new + prev_embeddings.shape[1]
+            token_augment[:, prev_start : prev_start + prev_embeddings.shape[1]] = (
+                prev_embeddings
+            )
+            token_augment[
+                :, prompt_start : prompt_start + prompt_embeddings.shape[1]
+            ] = prompt_embeddings
             token_mask = None
 
             if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
@@ -482,17 +517,23 @@ class SAM3DBody(BaseModel):
 
         # We're doing intermediate model predictions
         def token_to_pose_output_fn(tokens, prev_pose_output, layer_idx):
-            # Get the pose token
+            # Get the pose token (index 0) and (optionally) the uncertainty token
             pose_token = tokens[:, 0]
+            uncert_token = (
+                tokens[:, uncert_token_idx]
+                if uncert_token_idx is not None
+                else None
+            )
 
             prev_pose = init_pose.view(batch_size, -1)
             prev_camera = init_camera.view(batch_size, -1)
 
-            # Get pose outputs
+            # Get pose outputs, passing uncertainty token for uncertainty predictions
             pose_output = self.head_pose(
                 pose_token,
                 prev_pose,
                 full_cov=self.full_cov,
+                uncert_token=uncert_token,
             )
             # Get Camera Translation
             if hasattr(self, "head_camera"):
@@ -521,7 +562,7 @@ class SAM3DBody(BaseModel):
                 args = kp3d_token_update_fn(kps3d_emb_start_idx, *args)
             return args
 
-        pose_token, pose_output = self.decoder(
+        tokens_output, pose_output = self.decoder(
             token_embeddings,
             image_embeddings,
             token_augment,
@@ -531,9 +572,12 @@ class SAM3DBody(BaseModel):
             keypoint_token_update_fn=keypoint_token_update_fn_comb,
         )
 
+        # Extract pose token (index 0) from final tokens
+        pose_token = tokens_output[:, 0]
+
         if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
             return (
-                pose_token[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+                tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
                 pose_output,
             )
         else:
@@ -779,7 +823,7 @@ class SAM3DBody(BaseModel):
         if num_samples > 0:
             output_mhr = outputs["mhr"]
 
-            from sam_3d_body.models.sampling import gen_samples
+            
 
             global_rot_6d_mean = output_mhr["pred_pose_raw"][:, :6]
             global_rot_mat_mean = rot6d_to_rotmat(global_rot_6d_mean)

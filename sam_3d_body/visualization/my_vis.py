@@ -1,45 +1,18 @@
-import torch
 import os
-
+import torch
 import matplotlib
-
-matplotlib.use("Agg")  # Set the backend to Agg before importing pyplot
-import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from mpl_toolkits.mplot3d import Axes3D
-import matplotlib.cm as cm
-
 import numpy as np
 import pytorch_lightning as pl
-import matplotlib.colors
+from loguru import logger
 
-# import scenepic as sp
-from einops import rearrange
-from collections import defaultdict
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
-# Pyrender imports for mesh rendering
+
 if "PYOPENGL_PLATFORM" not in os.environ:
     os.environ["PYOPENGL_PLATFORM"] = "egl"
 import pyrender
 import trimesh
-
-try:
-    from loguru import logger
-except ImportError:
-    import logging
-
-    logger = logging.getLogger(__name__)
-
-
-try:
-    import pyvista as pv
-
-    PV_AVAILABLE = True
-    # Set PyVista to use offscreen rendering
-    pv.OFF_SCREEN = True
-except ImportError:
-    PV_AVAILABLE = False
 
 
 class Visualiser(pl.LightningModule):
@@ -50,10 +23,7 @@ class Visualiser(pl.LightningModule):
         self.cfg = cfg
         self._suffix = ""
         self.faces = faces  # Store faces for mesh rendering
-
-        # self.threshold = 50
-        # print("Visualiser confidence threshold:", self.threshold)
-
+        
     def set_global_rank(self, global_rank):
         self.rank = global_rank
 
@@ -700,16 +670,6 @@ class Visualiser(pl.LightningModule):
         affine_trans = batch["affine_trans"][batch_idx, 0]  # [2, 3] or [3, 3]
         img_size = batch["img_size"][batch_idx, 0]  # [2] (width, height)
 
-        # Ensure img_size is a 2-element array
-        if isinstance(img_size, np.ndarray):
-            if img_size.shape == ():
-                img_size = np.array([img_size, img_size])
-            elif len(img_size.shape) == 1 and len(img_size) >= 2:
-                img_size = img_size[:2]
-            else:
-                img_size = np.array([256, 256])
-        else:
-            img_size = np.array([256, 256])
 
         # Denormalize using img_size: (normalized + 0.5) * img_size
         # This gives cropped pixel coordinates
@@ -810,116 +770,35 @@ class Visualiser(pl.LightningModule):
         # For consistency with other visualisation functions, only visualise the first element in the batch
         batch_idx = 0
 
-        # Extract keypoints for this batch item
-        # GT keypoints are now normalized to [-0.5, 0.5] in cropped coordinate space
+        img_size = batch["img_size"][batch_idx, 0][0]
+
         gt_kp2d_normalized = batch["keypoints_2d"][
             batch_idx, :, :
         ]  # [N, 2] in normalized coords [-0.5, 0.5]
-        # Unnormalize GT to pixel coordinates [0, 256]
-        gt_kp2d = (gt_kp2d_normalized + 0.5) * 256  # [N, 2]
+        gt_kp2d = (gt_kp2d_normalized + 0.5) * img_size  # [N, 2]
 
         # Predicted keypoints in cropped normalized coords [-0.5, 0.5]
         pred_kp2d_cropped_normalised = predictions["mhr"]["pred_keypoints_2d_cropped"][
             batch_idx
         ]  # [N, 2]
-        # Convert to pixel coordinates
-        pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * 256  # [N, 2]
+        pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * img_size  # [N, 2]
 
-        # Use pre-computed normalized cropped sample keypoints if available
-        if "mhr_samples_keypoints_2d_cropped" in predictions:
-            sample_kp2d_cropped_normalized = predictions[
-                "mhr_samples_keypoints_2d_cropped"
-            ][
-                batch_idx
-            ]  # [num_samples, N, 2]
-            num_samples = sample_kp2d_cropped_normalized.shape[0]
-            # Unnormalize to pixel coordinates [0, 256]
-            sample_kp2d_cropped_coords = (
-                sample_kp2d_cropped_normalized + 0.5
-            ) * 256  # [num_samples, N, 2]
-        else:
-            # Fallback: convert from full image coordinates (old method)
-            sample_kp2d_full = predictions["mhr_samples_keypoints_2d"][
-                batch_idx
-            ]  # [num_samples, N, 2]
-            num_samples = sample_kp2d_full.shape[0]
-            sample_kp2d_cropped_coords = []
 
-            # Get affine transformation and image size from batch
-            if "affine_trans" in batch and "img_size" in batch:
-                try:
-                    affine_trans = batch["affine_trans"][
-                        batch_idx, 0
-                    ]  # [2, 3] or [3, 3]
-                    img_size = batch["img_size"][batch_idx, 0]  # [2] (width, height)
-
-                    # Ensure img_size is a 2-element array
-                    if isinstance(img_size, np.ndarray):
-                        if img_size.shape == ():
-                            img_size = np.array([img_size, img_size])
-                        elif len(img_size.shape) == 1 and len(img_size) >= 2:
-                            img_size = img_size[:2]
-                        else:
-                            img_size = np.array([256, 256])  # Default
-                    else:
-                        img_size = np.array([256, 256])  # Default
-
-                    # Convert sample keypoints from full image coords to cropped coords
-                    for i in range(num_samples):
-                        N_kp = sample_kp2d_full.shape[1]
-                        sample_kp2d_homogeneous = np.ones((N_kp, 3))
-                        sample_kp2d_homogeneous[:, :2] = sample_kp2d_full[i]  # [N, 2]
-
-                        # Apply affine transformation
-                        if affine_trans.shape == (2, 3):
-                            sample_kp2d_cropped = (
-                                sample_kp2d_homogeneous @ affine_trans.T
-                            )  # [N, 2]
-                        elif affine_trans.shape == (3, 3):
-                            sample_kp2d_transformed = (
-                                sample_kp2d_homogeneous @ affine_trans.T
-                            )  # [N, 3]
-                            sample_kp2d_cropped = sample_kp2d_transformed[
-                                :, :2
-                            ]  # [N, 2]
-                        else:
-                            sample_kp2d_cropped = sample_kp2d_full[i]
-
-                        # Normalize to [-0.5, 0.5] then unnormalize to pixel coords
-                        sample_kp2d_cropped_normalized = (
-                            sample_kp2d_cropped / img_size.reshape(1, 2) - 0.5
-                        )
-                        sample_kp2d_cropped_pixel = (
-                            sample_kp2d_cropped_normalized + 0.5
-                        ) * 256
-                        sample_kp2d_cropped_coords.append(sample_kp2d_cropped_pixel)
-
-                    sample_kp2d_cropped_coords = np.array(
-                        sample_kp2d_cropped_coords
-                    )  # [num_samples, N, 2]
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to convert sample keypoints to cropped coords: {e}. Skipping samples."
-                    )
-                    sample_kp2d_cropped_coords = None
-            else:
-                logger.warning(
-                    "affine_trans or img_size not found in batch. Skipping sample keypoint conversion."
-                )
-                sample_kp2d_cropped_coords = None
+        sample_kp2d_cropped_normalized = predictions[
+            "mhr_samples_keypoints_2d_cropped"
+        ][
+            batch_idx
+        ]  # [num_samples, N, 2]
+        num_samples = sample_kp2d_cropped_normalized.shape[0]
+        # Unnormalize to pixel coordinates [0, 256]
+        sample_kp2d_cropped_coords = (
+            sample_kp2d_cropped_normalized + 0.5
+        ) * img_size  # [num_samples, N, 2]
 
         # Get cropped image
         img = batch["img"][batch_idx, 0]  # [3, 256, 256] or [256, 256, 3]
-        if img.shape[0] == 3:
-            # CHW format, convert to HWC
-            img = img.transpose(1, 2, 0)
-        # Normalize if needed (assuming image is in [0, 1] or normalized range)
-        if img.max() <= 1.0:
-            img = (img * 255).astype(np.uint8)
-        else:
-            img = img.astype(np.uint8)
-
-        # Create visualization
+        img = ((img.transpose(1, 2, 0)) * 255).astype(np.uint8)
+        
         plt.figure(figsize=(10, 10))
         plt.imshow(img)
 

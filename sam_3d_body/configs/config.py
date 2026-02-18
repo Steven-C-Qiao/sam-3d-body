@@ -9,23 +9,23 @@ _C.TRAIN.MODEL_TYPE = "full"  # Options: "full" (SAM3DBody) or "toy" (ToyModel)
 _C.TRAIN.USE_FP16 = True
 _C.TRAIN.FP16_TYPE = "high"
 _C.TRAIN.LR = 2e-5
-_C.TRAIN.NUM_EPOCHS = 50
+_C.TRAIN.NUM_EPOCHS = 3
 _C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
-_C.TRAIN.FREEZE_BACKBONE = True 
+_C.TRAIN.FREEZE_BACKBONE = True
 
 
 _C.LOSS = CfgNode()
 _C.LOSS.SHAPE_PARAM_WEIGHT = 1.0
 _C.LOSS.SCALE_PARAM_WEIGHT = 1.0
 _C.LOSS.POSE_PARAM_WEIGHT = 1.0
-_C.LOSS.KP2D_WEIGHT = 100.0
-_C.LOSS.KP3D_WEIGHT = 100.0
+_C.LOSS.KP2D_WEIGHT = 0.0
+_C.LOSS.KP3D_WEIGHT = 0.0
 
 
 # Dataset hparams
 _C.DATASET = CfgNode()
 _C.DATASET.BATCH_SIZE = 32
-_C.DATASET.NUM_WORKERS = 8
+_C.DATASET.NUM_WORKERS = 16
 _C.DATASET.NOISE_FACTOR = 0.4
 _C.DATASET.SCALE_FACTOR = 0.0
 _C.DATASET.CROP_PROB = 0.0
@@ -33,8 +33,7 @@ _C.DATASET.CROP_FACTOR = 0.0
 _C.DATASET.PIN_MEMORY = True
 _C.DATASET.SHUFFLE_TRAIN = True
 _C.DATASET.TRAIN_DS = 'all'
-_C.DATASET.VAL_DS = 'orbit-archviz-15'
-_C.DATASET.IMG_RES = 256
+_C.DATASET.VAL_DS = 'static-hdri-bmi_orbit-archviz-15'
 _C.DATASET.MESH_COLOR = 'pinkish'
 _C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
 _C.DATASET.CROP_PERCENT = 0.8
@@ -45,10 +44,11 @@ _C.DATASET.FOCAL_LENGTH = 5000
 
 
 _C.MODEL = CfgNode()
-_C.MODEL.IMAGE_SIZE = [256, 256]
 _C.MODEL.IMAGE_MEAN = [0.485, 0.456, 0.406]
 _C.MODEL.IMAGE_STD = [0.229, 0.224, 0.225]
 
+_C.DATASET.IMAGE_SIZE = (512, 512)
+_C.MODEL.IMAGE_SIZE = (512, 512)
 
 
 _C.MODEL.ENABLE_BODY = True
@@ -57,7 +57,8 @@ _C.MODEL.DENSE_KEYPOINTS = True
 _C.MODEL.SAMPLE_SHAPE = True
 _C.MODEL.SAMPLE_SCALE = True
 _C.MODEL.SAMPLE_POSE = True 
-_C.MODEL.FULL_COV = True 
+_C.MODEL.FULL_COV = True
+_C.MODEL.UNCERTAINTY_TOKEN = True
 
 
 
@@ -212,6 +213,8 @@ DATASET_FILES = [
         'zoom-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221012_3-10_500_batch01hand_zoom_highSchoolGym_6fps.npz'),
         'static-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221013_3-10_500_batch01hand_static_highSchoolGym_6fps.npz'),
         'orbit-archviz-15': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221014_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
+        'static-hdri-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_3_250_highbmihand_6fps.npz'),
+
         # NOTE: Temporarily added zoom-suburbd for code testing
     },
     {

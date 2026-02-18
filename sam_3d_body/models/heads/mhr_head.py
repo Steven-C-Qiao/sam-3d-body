@@ -286,6 +286,7 @@ class MHRHead(nn.Module):
         do_pcblend=True,
         full_cov: bool = True,  # kept for API compatibility with MHRUncertaintyHead
         slim_keypoints=False,
+        uncert_token: Optional[torch.Tensor] = None,  # ignored in base class, kept for API compatibility
     ):
         """
         Args:
@@ -402,6 +403,7 @@ class MHRUncertaintyHead(MHRHead):
         ffn_zero_bias: bool = True,
         mlp_channel_div_factor: int = 8,
         enable_hand_model=False,
+        full_cov: bool = True,
     ):
         super().__init__(
             input_dim=input_dim,
@@ -413,6 +415,13 @@ class MHRUncertaintyHead(MHRHead):
             enable_hand_model=enable_hand_model,
         )
 
+        self.full_cov = full_cov
+        # Pose 3DoF uncertainty: full_cov -> 6 per joint (Cholesky flat), else 3 per joint (diagonal).
+        self.aa_3dof_dim = (
+            6 * self.num_body_3dof_joints if full_cov else 3 * self.num_body_3dof_joints
+        )
+        self.aa_1dof_dim = self.num_body_1dof_angles
+
         self.shape_uncertainty_proj = FFN(
             embed_dims=input_dim,
             feedforward_channels=input_dim // mlp_channel_div_factor,
@@ -421,15 +430,6 @@ class MHRUncertaintyHead(MHRHead):
             ffn_drop=0.0,
             add_identity=False,
         )
-
-        # Pose uncertainty in axis-angle space:
-        ### # - 3 for global rotation
-        # - 3 per 3-DoF body joint (NUM_BODY_3DOF_JOINTS)
-        # - 1 per 1-DoF body joint angle (NUM_BODY_1DOF_ANGLES) in angle space
-        self.aa_3dof_dim = (
-            3 * self.num_body_3dof_joints * 2
-        )  # NOTE: Adding full cov sampling, thus * 2
-        self.aa_1dof_dim = self.num_body_1dof_angles
 
         self.pose_3dof_uncertainty_proj = nn.Sequential(
             FFN(
@@ -514,28 +514,34 @@ class MHRUncertaintyHead(MHRHead):
         init_estimate: Optional[torch.Tensor] = None,
         do_pcblend=True,
         full_cov=True,
+        uncert_token: Optional[torch.Tensor] = None,
     ):
         """
         Args:
             x: pose token with shape [B, C], usually C=DECODER.DIM
             init_estimate: [B, self.npose]
+            uncert_token: optional uncertainty token with shape [B, C], used for uncertainty predictions
         """
         batch_size = x.shape[0]
         pred = self.proj(x)
 
-        shape_log_var = self.shape_uncertainty_proj(x)
+        # Use uncertainty token if provided, otherwise fall back to pose token
+        # This allows the uncertainty head to learn from a dedicated token
+        uncert_input = uncert_token if uncert_token is not None else x
+
+        shape_log_var = self.shape_uncertainty_proj(uncert_input)
         shape_uncertainty = torch.exp(shape_log_var)
 
-        scale_log_var = self.scale_uncertainty_proj(x)
+        scale_log_var = self.scale_uncertainty_proj(uncert_input)
         scale_uncertainty = torch.exp(scale_log_var)
 
-        pose_3dof_log_var = self.pose_3dof_uncertainty_proj(x)
-        if full_cov == True:
+        pose_3dof_log_var = self.pose_3dof_uncertainty_proj(uncert_input)
+        if self.full_cov:
             pose_3dof_uncertainty = pose_3dof_log_var
         else:
             pose_3dof_uncertainty = 0.01 * torch.exp(pose_3dof_log_var)
 
-        pose_1dof_log_var = self.pose_1dof_uncertainty_proj(x)
+        pose_1dof_log_var = self.pose_1dof_uncertainty_proj(uncert_input)
         pose_1dof_uncertainty = 0.01 * torch.exp(pose_1dof_log_var)
 
         pose_uncertainty = torch.cat(

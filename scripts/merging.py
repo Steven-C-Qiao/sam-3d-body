@@ -76,51 +76,32 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
     if load_path is not None:
         logger.info(f"Loading checkpoint: {load_path}")
         ckpt = torch.load(load_path, weights_only=False, map_location="cpu")
+        model_state_dict = ckpt["state_dict"]
 
-        # Extract state_dict from checkpoint
-        if "state_dict" in ckpt:
-            state_dict = ckpt["state_dict"]
-        else:
-            state_dict = ckpt
-
-        # PyTorch Lightning checkpoints have keys prefixed with 'model.'
-        # We need to strip this prefix when loading into model.model
-        model_state_dict = {}
-        for key, value in state_dict.items():
+        for key, value in model_state_dict.items():
             if key.startswith("model."):
-                # Remove 'model.' prefix to match the actual model structure
-                param_name = key[6:]  # Remove 'model.' prefix
+                param_name = key[6:]
                 model_state_dict[param_name] = value
-            elif not any(
-                k in key
-                for k in [
-                    "optimizer",
-                    "lr_scheduler",
-                    "epoch",
-                    "global_step",
-                    "callbacks",
-                ]
-            ):
-                # Try loading directly (might be a raw model checkpoint)
-                model_state_dict[key] = value
-
-        if model_state_dict:
+        
             missing_keys, unexpected_keys = trainer.model.load_state_dict(
                 model_state_dict, strict=False
             )
+            loaded_keys = list(model_state_dict.keys())
             logger.info(f"Loaded {len(model_state_dict)} parameters from checkpoint")
+            print("Loaded parameter keys:")
+            for k in loaded_keys:
+                print(k)
             if missing_keys:
-                # print(missing_keys)
                 logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys")
             if unexpected_keys:
-                # print(unexpected_keys)
                 logger.warning(
                     f"Unexpected keys (ignored): {len(unexpected_keys)} keys"
                 )
         else:
             logger.warning("No model parameters found in checkpoint state_dict!")
+            assert False
 
-    results = trainer.run_multiview_prediction(num_view=4, max_batches=10, dataset_name=dataset_name)
+    results = trainer.run_multiview_prediction(num_view=4, max_batches=5, dataset_name=dataset_name)
 
 
 if __name__ == "__main__":

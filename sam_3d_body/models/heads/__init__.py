@@ -21,6 +21,7 @@ def build_head(cfg, head_type="mhr", enable_hand_model=False, default_scale_fact
             mhr_model_path=cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH,
             mlp_channel_div_factor=cfg.MODEL.MHR_HEAD.get("MLP_CHANNEL_DIV_FACTOR", 1),
             enable_hand_model=enable_hand_model,
+            full_cov=cfg.MODEL.get("FULL_COV", True),
         )
     elif head_type == "perspective":
         return PerspectiveHead(

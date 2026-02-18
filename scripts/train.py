@@ -29,6 +29,15 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
 
     cfg = get_config_defaults()
 
+    # If we are loading weights from a checkpoint, also load and merge any
+    # experiment-specific YAML config into the defaults so that hyperparameters
+    # (e.g. LOSS weights, MODEL flags) match the original run.
+    if load_path is not None:
+        config_yaml_path = Path(exp_dir) / "config.yaml"
+        if config_yaml_path.exists():
+            logger.info(f"Loading config overrides from {config_yaml_path}")
+            cfg.merge_from_file(str(config_yaml_path))
+
     torch.set_float32_matmul_precision(cfg.TRAIN.FP16_TYPE)
 
     if dev:
@@ -55,6 +64,13 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     if not config_dst.exists():
         shutil.copy2(config_src, config_dst)
         logger.info(f"Copied config to {config_dst}")
+
+    # Additionally, save the effective config to YAML so it can be reloaded and
+    # merged with the defaults when loading from a checkpoint.
+    config_yaml_out = Path(exp_dir) / "config.yaml"
+    with open(config_yaml_out, "w") as f:
+        f.write(cfg.dump())
+    logger.info(f"Saved YAML config to {config_yaml_out}")
 
     model = Trainer(
         cfg=cfg,

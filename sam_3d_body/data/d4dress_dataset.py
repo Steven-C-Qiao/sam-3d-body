@@ -109,12 +109,11 @@ IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
 
 class MultiD4DressDataset(Dataset):
-    def __init__(self, ids):
-        
+    def __init__(self, ids, cfg):
+        self.cfg = cfg
         self.num_frames_pp = 4
         self.lengthen_by = 1
 
-        self.img_size = 256
         self.body_model = "smplx"
         self.num_joints = 55
 
@@ -138,7 +137,7 @@ class MultiD4DressDataset(Dataset):
         self.transform = Compose(
             [
                 FakeGetBBoxCenterScale(),
-                TopdownAffine(input_size=(256, 256), use_udp=False),
+                TopdownAffine(input_size=self.cfg.DATASET.IMAGE_SIZE, use_udp=False),
                 VisionTransformWrapper(ToTensor()),
             ]
         )

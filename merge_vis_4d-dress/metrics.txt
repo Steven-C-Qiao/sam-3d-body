@@ -1,0 +1,20 @@
+============================================================
+Average Metrics:
+============================================================
+per_view_mpjpe: 0.0303
+best_per_view_mpjpe: 0.0266
+mean_mpjpe: 0.0296
+merged_mpjpe: 0.0300
+per_view_pve: 0.0308
+best_per_view_pve: 0.0269
+mean_pve: 0.0301
+merged_pve: 0.0304
+per_view_pampjpe: 0.0246
+best_per_view_pampjpe: 0.0229
+mean_pampjpe: 0.0245
+merged_pampjpe: 0.0246
+per_view_pvetsc: 0.0243
+best_per_view_pvetsc: 0.0230
+mean_pvetsc: 0.0241
+merged_pvetsc: 0.0242
+============================================================

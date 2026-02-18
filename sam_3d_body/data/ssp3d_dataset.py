@@ -36,8 +36,9 @@ class FakeGetBBoxCenterScale(nn.Module):
 
 
 class SSP3DDataset(Dataset):
-    def __init__(self, ssp3d_dir_path):
+    def __init__(self, ssp3d_dir_path, cfg):
         super(SSP3DDataset, self).__init__()
+        self.cfg = cfg
 
         self.images_dir = os.path.join(ssp3d_dir_path, "images")
         self.silhouettes_dir = os.path.join(ssp3d_dir_path, "silhouettes")
@@ -62,7 +63,7 @@ class SSP3DDataset(Dataset):
         self.transform = Compose(
             [
                 FakeGetBBoxCenterScale(),
-                TopdownAffine(input_size=(256, 256), use_udp=False),
+                TopdownAffine(input_size=self.cfg.DATASET.IMAGE_SIZE, use_udp=False),
                 VisionTransformWrapper(ToTensor()),
             ]
         )
@@ -132,7 +133,7 @@ class MultiSSP3DDataset(Dataset):
     num_view images corresponding to each serno for multi-view evaluation.
     """
 
-    def __init__(self, ssp3d_dir_path, num_view=4):
+    def __init__(self, ssp3d_dir_path, num_view=4, cfg=None):
         super(MultiSSP3DDataset, self).__init__()
 
         self.dataset = SSP3DDataset(ssp3d_dir_path)

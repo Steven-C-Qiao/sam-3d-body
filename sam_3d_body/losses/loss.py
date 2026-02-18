@@ -9,23 +9,8 @@ import pytorch_lightning as pl
 from einops import rearrange
 from torch.distributions import MultivariateNormal
 from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
-from sam_3d_body.models.modules.mhr_utils import mhr_param_hand_mask
-
-
-def _build_tril(x):
-    assert x.shape[-1] == 6
-    B = x.shape[0]
-    L = torch.zeros(B, 3, 3, device=x.device, dtype=x.dtype)
-
-    eps = 1e-4
-    L[:, 0, 0] = F.softplus(x[:, 0]) + eps
-    L[:, 1, 0] = x[:, 1]
-    L[:, 1, 1] = F.softplus(x[:, 2]) + eps
-    L[:, 2, 0] = x[:, 3]
-    L[:, 2, 1] = x[:, 4]
-    L[:, 2, 2] = F.softplus(x[:, 5]) + eps
-
-    return L
+from sam_3d_body.models.modules.mhr_utils import mhr_param_hand_mask, mhr_cont_hand_idxs, mhr_param_hand_idxs
+from sam_3d_body.models.sampling import _build_tril
 
 
 class Loss(pl.LightningModule):
@@ -128,10 +113,6 @@ class Loss(pl.LightningModule):
                 self.cfg.LOSS.SCALE_PARAM_WEIGHT * loss_scale_params
             )
 
-        # Gaussian NLL loss on pose parameters in axis-angle space:
-        # - Global rotation (3D axis-angle)
-        # - 3-DoF body joints (3*NUM_BODY_3DOF_JOINTS axis-angle)
-        # - 1-DoF body joint angles (NUM_BODY_1DOF_ANGLES scalars)
         if self.cfg.LOSS.POSE_PARAM_WEIGHT > 0:
             # fmt: off
             all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
@@ -139,6 +120,8 @@ class Loss(pl.LightningModule):
             # fmt: on
             num_3dof_angles = len(all_param_3dof_rot_idxs) * 3  # 69
             num_1dof_angles = len(all_param_1dof_rot_idxs)  # 58
+            body_3dof_idxs = torch.tensor([v for v in all_param_3dof_rot_idxs.flatten() if v not in mhr_param_hand_idxs])
+            body_1dof_idxs = torch.tensor([v for v in all_param_1dof_rot_idxs if v not in mhr_param_hand_idxs])
 
             gt_pose = batch["model_params"][:, 6 : 6 + 133]
             gt_pose[..., mhr_param_hand_mask] = 0
@@ -148,11 +131,16 @@ class Loss(pl.LightningModule):
                 -1, (-1, 3)
             )  # B 23 3
 
+            # Find, amongst the 23 3dof joints, which ones are all zeroed out
+            zero_hand_indices_3dof = (gt_3dof_euler.abs().sum(dim=-1) == 0).all(dim=0).nonzero(as_tuple=True)[0]
+
             gt_3dof_rotmat = roma.euler_to_rotmat("XYZ", gt_3dof_euler)  # B 23 3 3
 
             gt_3dof_aa = matrix_to_axis_angle(gt_3dof_rotmat)  # B 23 3
 
             gt_1dof_angles = gt_pose[..., all_param_1dof_rot_idxs]  # B 58
+
+            nonzero_hand_indices_1dof = (gt_1dof_angles.abs() != 0).any(dim=0).nonzero(as_tuple=True)[0]
 
             pred_pose_euler = pred_mhr["body_pose"]
             pred_3dof_euler = pred_pose_euler[
@@ -160,11 +148,13 @@ class Loss(pl.LightningModule):
             ].unflatten(
                 -1, (-1, 3)
             )  # B 23 3
+            
             pred_3dof_rotmat = roma.euler_to_rotmat("XYZ", pred_3dof_euler)  # B 23 3 3
 
             pred_3dof_aa = matrix_to_axis_angle(pred_3dof_rotmat)  # B 23 3
 
             pred_1dof_angles = pred_pose_euler[..., all_param_1dof_rot_idxs]  # B 58
+            
 
             pred_var = pred_mhr["pose_uncertainty"]
             if self.cfg.MODEL.FULL_COV == True:
@@ -178,18 +168,40 @@ class Loss(pl.LightningModule):
                 )
 
                 var_1dofs = pred_var[:, 2 * num_3dof_angles :]
+                var_1dofs = var_1dofs[:, nonzero_hand_indices_1dof]
                 cholesky_1dofs = torch.sqrt(torch.diag_embed(var_1dofs))
+
+
+                dist_3dof = MultivariateNormal(
+                    pred_3dof_aa, 
+                    scale_tril=cholesky_3dofs
+                )
+                dist_1dof = MultivariateNormal(
+                    pred_1dof_angles[:, nonzero_hand_indices_1dof], 
+                    scale_tril=cholesky_1dofs
+                )
+                loss_3dof = -dist_3dof.log_prob(gt_3dof_aa)
+                loss_3dof.unflatten(0, (B, 23))[:, zero_hand_indices_3dof] = 0
+                loss_1dof = -dist_1dof.log_prob(gt_1dof_angles[:, nonzero_hand_indices_1dof])
+
+                # If any element of loss_3dof or loss_1dof is nan, set it to zero
+                if torch.isnan(loss_3dof).any():
+                    loss_3dof = torch.where(torch.isnan(loss_3dof), torch.zeros_like(loss_3dof), loss_3dof)
+                if torch.isnan(loss_1dof).any():
+                    loss_1dof = torch.where(torch.isnan(loss_1dof), torch.zeros_like(loss_1dof), loss_1dof)
+
 
             else:
                 assert pred_var.shape[-1] == (num_3dof_angles + num_1dof_angles)
-                raise NotImplementedError()
-                var_3dofs = pred_var[:, :num_3dof_angles]
+                var_3dofs = pred_var[:, :num_3dof_angles].unflatten(-1, (-1, 3))
                 var_1dofs = pred_var[:, num_3dof_angles:]
 
-            dist_3dof = MultivariateNormal(pred_3dof_aa, scale_tril=cholesky_3dofs)
-            dist_1dof = MultivariateNormal(pred_1dof_angles, scale_tril=cholesky_1dofs)
-            loss_3dof = -dist_3dof.log_prob(gt_3dof_aa)
-            loss_1dof = -dist_1dof.log_prob(gt_1dof_angles)
+                loss_3dof = self.gaussian_nll_loss(
+                    pred_3dof_aa, gt_3dof_aa, var_3dofs
+                )
+                loss_1dof = self.gaussian_nll_loss(
+                    pred_1dof_angles, gt_1dof_angles, var_1dofs
+                )   
 
             loss_dict["loss_pose_3dof"] = (
                 self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_3dof.mean()

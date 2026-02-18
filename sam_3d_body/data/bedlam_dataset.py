@@ -76,7 +76,7 @@ class DatasetHMR(Dataset):
         # If False, do not do augmentation
         self.use_augmentation = use_augmentation
 
-        input_size = (256, 256)
+        input_size = options.IMAGE_SIZE
         self.transform = Compose(
             [
                 # GetBBoxCenterScale(),
@@ -518,7 +518,7 @@ class MultiViewEvaluationDataset(Dataset):
         self.mhr_keypoints_2d = self.data["mhr_keypoints_2d"]
 
         # Setup transforms (no augmentation for evaluation)
-        input_size = (256, 256)
+        input_size = self.options.IMAGE_SIZE
         self.transform = Compose(
             [
                 FakeGetBBoxCenterScale(),

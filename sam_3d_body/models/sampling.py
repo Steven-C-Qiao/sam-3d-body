@@ -50,13 +50,13 @@ def _build_tril(x):
 
     eps = 1e-4
     L[:, 0, 0] = F.softplus(x[:, 0]) + eps
-    L[:, 1, 0] = x[:, 1]
+    L[:, 1, 0] = torch.sigmoid(x[:, 1]) - 0.5
     L[:, 1, 1] = F.softplus(x[:, 2]) + eps
-    L[:, 2, 0] = x[:, 3]
-    L[:, 2, 1] = x[:, 4]
+    L[:, 2, 0] = torch.sigmoid(x[:, 3]) - 0.5
+    L[:, 2, 1] = torch.sigmoid(x[:, 4]) - 0.5
     L[:, 2, 2] = F.softplus(x[:, 5]) + eps
 
-    return L
+    return L #* 0.1
 
 
 def _sample_full_covariance(x, cholesky_flat, num_samples=4):
@@ -72,6 +72,8 @@ def _sample_full_covariance(x, cholesky_flat, num_samples=4):
 
     # z = μ + ε Lᵀ  => Cov[z] = L Lᵀ
     z = x.unsqueeze(1) + torch.matmul(eps, L.transpose(-1, -2))  # [B, N, 3]
+
+
     return z
 
 
@@ -128,31 +130,39 @@ def gen_pose_samples(
 
     if sample_function == _sample_full_covariance:
         assert var.shape[-1] == (
-            2 * num_3dof_angles + num_1dof_angles  # 6 for cholesky flat for 3dofs
+            2 * num_3dof_angles + num_1dof_angles 
         )
         var_3dofs = var[:, : 2 * num_3dof_angles]
         var_1dofs = var[:, 2 * num_3dof_angles :]
+
+        body_aa_3dofs_sample = sample_function(
+            rearrange(body_aa_3dofs, " b (j c) -> (b j) c", c=3),
+            rearrange(var_3dofs, " b (j c) -> (b j) c", c=6),
+            num_samples,
+        )
+        body_aa_3dofs_sample = rearrange(
+            body_aa_3dofs_sample, "(b j) n c -> b n j c", b=body_aa_3dofs.shape[0]
+        )
+
+        body_rotmat_3dofs_sample = axis_angle_to_matrix(body_aa_3dofs_sample)
+        body_euler_3dofs_sample = matrix_to_euler_angles(body_rotmat_3dofs_sample, "XYZ")
+        body_euler_3dofs_sample = body_euler_3dofs_sample.flatten(-2, -1)
     else:
         assert var.shape[-1] == (
-            num_3dof_angles + num_1dof_angles  # 6 for cholesky flat for 3dofs
+            num_3dof_angles + num_1dof_angles 
         )
         var_3dofs = var[:, :num_3dof_angles]
         var_1dofs = var[:, num_3dof_angles:]
 
-    # no compatibility with _sample for now
-    assert sample_function == _sample_full_covariance
-    body_aa_3dofs_sample = sample_function(
-        rearrange(body_aa_3dofs, " b (j c) -> (b j) c", c=3),
-        rearrange(var_3dofs, " b (j c) -> (b j) c", c=6),
-        num_samples,
-    )
-    body_aa_3dofs_sample = rearrange(
-        body_aa_3dofs_sample, "(b j) n c -> b n j c", b=body_aa_3dofs.shape[0]
-    )
+        body_aa_3dofs_sample = _sample(
+            body_aa_3dofs, var[:, :num_3dof_angles], num_samples
+        ).unflatten(-1, (-1, 3))
 
-    body_rotmat_3dofs_sample = axis_angle_to_matrix(body_aa_3dofs_sample)
-    body_euler_3dofs_sample = matrix_to_euler_angles(body_rotmat_3dofs_sample, "XYZ")
-    body_euler_3dofs_sample = body_euler_3dofs_sample.flatten(-2, -1)
+        body_rotmat_3dofs_sample = axis_angle_to_matrix(body_aa_3dofs_sample)
+        body_euler_3dofs_sample = matrix_to_euler_angles(body_rotmat_3dofs_sample, "XYZ")
+        body_euler_3dofs_sample = body_euler_3dofs_sample.flatten(-2, -1)
+
+
 
     # ------ 1dofs ------
     body_cont_1dofs = body_cont_1dofs.unflatten(-1, (-1, 2))  # (sincos)
