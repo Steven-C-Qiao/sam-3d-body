@@ -315,6 +315,11 @@ class Trainer(BaseLightningModule):
             gt_keypoints_3d, trans_cam.unsqueeze(1), cam_int
         )[:, :70, :2]
 
+
+        j2d_by_projection = project(
+            gt_joint_coords, trans_cam.unsqueeze(1), cam_int
+        )[..., :2]
+
         # verts_2d = project(
         #     gt_verts, trans_cam.unsqueeze(1), cam_int
         # )[:, :, :2]
@@ -352,6 +357,12 @@ class Trainer(BaseLightningModule):
         gt_kp2d_crop = gt_kp2d_crop / img_size.unsqueeze(1) - 0.5  # [B, 70, 2]
 
         batch["keypoints_2d"] = gt_kp2d_crop
+
+        j2d_h = torch.cat([j2d_by_projection, torch.ones_like(j2d_by_projection[..., :1])], dim=-1).float()
+        j2d_crop = j2d_h @ affine.mT 
+        j2d_crop = j2d_crop[..., :2]
+        j2d_crop = j2d_crop / img_size.unsqueeze(1) - 0.5 
+        batch["joints_2d"] = j2d_crop
 
         model_parameters = batch["model_params"]
         model_parameters[:, :3] = 0

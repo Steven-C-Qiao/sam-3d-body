@@ -68,6 +68,7 @@ class DatasetHMR(Dataset):
             .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
+        self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility.npz")["visibility"]
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
         self.scale = self.data["scale"].astype(np.float32)
@@ -244,7 +245,7 @@ class DatasetHMR(Dataset):
         keypoints_orig = self.keypoints[index].copy()
         mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
         mhr_keypoints_2d_orig = self.mhr_keypoints_2d[index].copy()
-
+        visibility = self.visibility[index].copy()
         # if self.options.proj_verts:
         #     proj_verts_orig = self.proj_verts[index].copy()
         #     item['proj_verts_orig'] = torch.from_numpy(proj_verts_orig).float()
@@ -376,6 +377,7 @@ class DatasetHMR(Dataset):
             self.face_expr_params[index]
         ).float()
         item["scale_params"] = torch.from_numpy(self.model_params[index, -68:]).float()
+        item["visibility"] = torch.from_numpy(visibility).float()
 
         item["img"] = img
         item["pose"] = torch.from_numpy(pose).float()

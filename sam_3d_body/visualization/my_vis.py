@@ -754,6 +754,86 @@ class Visualiser(pl.LightningModule):
         plt.close()
 
     def visualise_2d_keypoints_cropped(self, predictions, batch):
+        batch_idx = 0
+        img_size = batch["img_size"][batch_idx, 0][0]
+
+        gt_kp2d_normalized = batch["joints_2d"][
+            batch_idx, :, :
+        ]  # [N, 2] in normalized coords [-0.5, 0.5]
+        gt_kp2d = (gt_kp2d_normalized + 0.5) * img_size  # [N, 2]
+
+        # Predicted keypoints in cropped normalized coords [-0.5, 0.5]
+        pred_kp2d_cropped_normalised = predictions["mhr"]["pred_keypoints_2d_cropped"][
+            batch_idx
+        ]  # [N, 2]
+        pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * img_size  # [N, 2]
+
+
+        sample_kp2d_cropped_normalized = predictions[
+            "mhr_samples_joints_2d_cropped"
+        ][
+            batch_idx
+        ]  # [num_samples, N, 2]
+        num_samples = sample_kp2d_cropped_normalized.shape[0]
+        # Unnormalize to pixel coordinates [0, 256]
+        sample_kp2d_cropped_coords = (
+            sample_kp2d_cropped_normalized + 0.5
+        ) * img_size  # [num_samples, N, 2]
+
+        # Get cropped image
+        img = batch["img"][batch_idx, 0]  # [3, 256, 256] or [256, 256, 3]
+        img = ((img.transpose(1, 2, 0)) * 255).astype(np.uint8)
+        
+        plt.figure(figsize=(10, 10))
+        plt.imshow(img)
+
+        # Plot GT keypoints
+        plt.scatter(
+            gt_kp2d[:, 0],
+            gt_kp2d[:, 1],
+            color="lime",
+            s=10,
+            marker="x",
+            label="GT",
+            linewidths=1,
+        )
+
+        # Plot predicted mean keypoints
+        plt.scatter(
+            pred_kp2d_cropped_coords[:, 0],
+            pred_kp2d_cropped_coords[:, 1],
+            color="red",
+            s=10,
+            marker="x",
+            label="Pred Mean",
+            linewidths=1,
+        )
+
+        # Plot sample keypoints if available
+        if sample_kp2d_cropped_coords is not None:
+            colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
+            for i in range(num_samples):
+                plt.scatter(
+                    sample_kp2d_cropped_coords[i, :, 0],
+                    sample_kp2d_cropped_coords[i, :, 1],
+                    color=colors[i],
+                    s=8,
+                    marker=".",
+                    alpha=0.6,
+                    label=f"Sample {i+1}" if i < 5 else None,
+                )  # Only label first 5
+
+        plt.legend()
+        plt.title(f"2D Keypoints Visualization (Batch {batch_idx})")
+        plt.tight_layout()
+
+        # Save using the visualiser's filename convention
+        filename = self._get_filename("_keypoints_2d_cropped")
+        save_path = os.path.join(self.save_dir, filename)
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+    def ori_visualise_2d_keypoints_cropped(self, predictions, batch):
         """
         Visualize ground truth, predicted mean, and sampled 2D keypoints on the cropped image.
 

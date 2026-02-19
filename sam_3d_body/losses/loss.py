@@ -47,6 +47,32 @@ class Loss(pl.LightningModule):
 
         pred_mhr = predictions["mhr"]
 
+        if self.cfg.LOSS.JOINTS_3D_WEIGHT > 0:
+            pred_joints_3d = predictions["mhr_samples_joints_3d"]
+            gt_joints_3d = batch["joints_3d"]
+            visibility = batch["visibility"]
+            visibility = visibility.unsqueeze(1).expand(-1, pred_joints_3d.shape[1], -1)
+            gt_joints_3d = gt_joints_3d.unsqueeze(1).expand(-1, pred_joints_3d.shape[1], -1, -1)
+
+            joints_3d_loss = self.mse_loss(pred_joints_3d, gt_joints_3d)
+            joints_3d_loss = joints_3d_loss.mean(dim=-1)
+            joints_3d_loss = joints_3d_loss * visibility
+            joints_3d_loss = joints_3d_loss.mean()
+            loss_dict["loss_joints_3d"] = (self.cfg.LOSS.JOINTS_3D_WEIGHT * joints_3d_loss)
+
+        if self.cfg.LOSS.JOINTS_2D_WEIGHT > 0:
+            pred_joints_2d = predictions["mhr_samples_joints_2d_cropped"]
+            gt_joints_2d = batch["joints_2d"]
+            visibility = batch["visibility"]
+            visibility = visibility.unsqueeze(1).expand(-1, pred_joints_2d.shape[1], -1)
+            gt_joints_2d = gt_joints_2d.unsqueeze(1).expand(-1, pred_joints_2d.shape[1], -1, -1)
+            joints_2d_loss = self.kp2d_loss(pred_joints_2d, gt_joints_2d)
+            joints_2d_loss = joints_2d_loss.mean(dim=-1)
+            joints_2d_loss = joints_2d_loss * visibility
+            joints_2d_loss = joints_2d_loss.mean()
+            loss_dict["loss_joints_2d"] = (self.cfg.LOSS.JOINTS_2D_WEIGHT * joints_2d_loss)
+
+
         if self.cfg.LOSS.KP2D_WEIGHT > 0:
             pred_kp2d_samples = predictions["mhr_samples_keypoints_2d_cropped"]
             num_samples = pred_kp2d_samples.shape[1]
@@ -264,6 +290,9 @@ class Loss(pl.LightningModule):
         loss_dict["total_loss"] = sum(
             v for k, v in loss_dict.items() if k != "total_loss"
         )
+
+        if torch.isnan(loss_dict['total_loss']):
+            loss_dict['total_loss'] = torch.zeros_like(loss_dict['total_loss'])
 
         # for k, v in loss_dict.items():
         #     print(f"{k}: {v.item():.3f}", end=" ")

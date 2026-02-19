@@ -82,15 +82,20 @@ class FeatureRenderer(pl.LightningModule):
 
         self._set_cameras(PerspectiveCameras().to(self.device))
 
-    def forward(self, mesh, **kwargs):
-
-        # images = self.renderer(mesh)
+    def forward(self, mesh, render_img=False, **kwargs):
+        if render_img:
+            images = self.renderer(mesh)
+            maps = images[..., :-1]
+            mask = images[..., -1]
+        else:
+            maps = None
+            mask = None
 
         fragments = self.renderer.rasterizer(mesh)
 
         ret = {
-            # "maps": images[..., :-1],  # All channels except the last (alpha)
-            # "mask": images[..., -1],  # Last channel is the alpha/mask
+            'maps': maps,
+            'mask': mask,
             "fragments": fragments,
         }
 
@@ -140,8 +145,6 @@ def check_joint_visibility(
 
     in_bounds = (x_pixel >= 0) & (x_pixel < W) & (y_pixel >= 0) & (y_pixel < H)
 
-
-
     # Gather depths at each (N, J) pixel location for all faces_per_pixel K.
     # Build batch indices with same shape as (N, J) so advanced indexing
     # produces an output of shape (N, J, K), not (N, N, J, K).
@@ -149,7 +152,6 @@ def check_joint_visibility(
     depths_at_pixels = zbuf[batch_idx, y_idx, x_idx, :]  # (N, J, K)
 
     valid_mask = depths_at_pixels > -1
-
 
     # Count how many faces are strictly in front of the joint along the ray
     # j2d_depth: (N, J) -> (N, J, 1) to compare with (N, J, K)
@@ -180,6 +182,9 @@ if __name__ == "__main__":
     faces = ckpt["head_pose.faces"].cpu().detach().numpy()
     faces = torch.tensor(faces, dtype=torch.long, device=device)
 
+    keypoint_mapping = ckpt["head_pose.keypoint_mapping"]
+    keypoint_mapping = keypoint_mapping.to(device)
+
 
     all_npzs = sorted([
         os.path.join(DATA_BASE_PATH, "training_labels/all_npz_12_training_extra_mhr", f)
@@ -188,7 +193,7 @@ if __name__ == "__main__":
                 DATA_BASE_PATH, "training_labels/all_npz_12_training_extra_mhr"
             )
         )
-        if (f.endswith(".npz") and not f.endswith("_visibility.npz"))
+        if (f.endswith(".npz") and not f.endswith("_visibility.npz") and not f.endswith("_visibility_308.npz"))
     ])
 
     
@@ -196,13 +201,13 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         for npz_path in all_npzs:
-            path_if_already_done = npz_path[:-4] + "_visibility.npz"
+            path_if_already_done = npz_path[:-4] + "_visibility_308.npz"
             if os.path.exists(path_if_already_done):
                 print(f'{npz_path} already done')
                 continue
 
 
-            vertices, joints3d = [], []
+            vertices, joints3d, vert_joints_308 = [], [], []
             data = np.load(npz_path)
 
             new_data = {}
@@ -229,8 +234,19 @@ if __name__ == "__main__":
                 vertices.append(verts)
                 joints3d.append(j3d)
 
+                v_j = torch.cat([verts, j3d], dim=1)
+                v_j_308 = (
+                    (
+                        keypoint_mapping @ v_j.permute(1, 0, 2).flatten(1, 2)
+                    )
+                    .reshape(-1, v_j.shape[0], 3)
+                    .permute(1, 0, 2)
+                )
+                vert_joints_308.append(v_j_308)
+
             vertices = torch.cat(vertices, dim=0)
             joints3d = torch.cat(joints3d, dim=0)
+            vert_joints_308 = torch.cat(vert_joints_308, dim=0)
 
 
             closeup = "closeup" in npz_path.lower()
@@ -245,12 +261,14 @@ if __name__ == "__main__":
             )
 
             all_visibilities = []
+            all_visibilities_308 = []
             for i in tqdm(range(0, num_samples, chunk_size)):
                 
                 end_idx = min(i + chunk_size, num_samples)
 
                 verts = vertices[i:end_idx]
                 j3d = joints3d[i:end_idx]
+                j3d_308 = vert_joints_308[i:end_idx]
 
                 trans_cam = data["trans_cam"][i:end_idx]
                 cam_t = data["cam_ext"][i:end_idx, :3, -1]
@@ -267,6 +285,12 @@ if __name__ == "__main__":
 
                 j2d, j2d_depth = project(
                     j3d,
+                    cam_t[:, None],
+                    cam_int,
+                    return_depth=True,
+                )
+                j2d_308, j2d_depth_308 = project(
+                    j3d_308,
                     cam_t[:, None],
                     cam_int,
                     return_depth=True,
@@ -307,20 +331,34 @@ if __name__ == "__main__":
                     depth_tolerance=0.01,  # Adjust based on your scale
                 ).cpu().numpy()
 
+                visibility_308 = check_joint_visibility(
+                    j2d_308,
+                    j2d_depth_308,
+                    fragments=fragments,
+                    depth_tolerance=0.01,  # Adjust based on your scale
+                ).cpu().numpy()
+
                 all_visibilities.append(visibility)
+                all_visibilities_308.append(visibility_308)
 
 
                 # fig = plt.figure()
                 # axes = fig.add_subplot(1, 1, 1)
                 # axes.imshow(pytorch3d_output[0])
                 # axes.set_title("PyTorch3D Renderer")
+                # # scatter = axes.scatter(
+                # #     j2d[0, :, 0].cpu().detach().numpy(), j2d[0, :, 1].cpu().detach().numpy(), c=visibility[0], cmap="cool", s=1, vmin=0, vmax=1
+                # # )
                 # scatter = axes.scatter(
-                #     j2d[0, :, 0].cpu().detach().numpy(), j2d[0, :, 1].cpu().detach().numpy(), c=visibility[0], cmap="cool", s=1, vmin=0, vmax=1
+                #     j2d_308[0, :, 0].cpu().detach().numpy(), j2d_308[0, :, 1].cpu().detach().numpy(), c=visibility_308[0], cmap="cool", s=1, vmin=0, vmax=1
                 # )
                 # plt.tight_layout()
-                # plt.savefig('visibility.png')
+                # plt.savefig('visibility_308.png')
                 # plt.close()
 
             all_visibilities = np.concatenate(all_visibilities, axis=0)
-            np.savez(os.path.join(npz_path[:-4] + "_visibility.npz"), visibility=all_visibilities)
-            print(f'Saved visibility labels to {npz_path[:-4] + "_visibility.npz"}')
+            all_visibilities_308 = np.concatenate(all_visibilities_308, axis=0)
+            np.savez(os.path.join(npz_path[:-4] + "_visibility_308.npz"), visibility=all_visibilities, visibility_308=all_visibilities_308)
+            print(f'Saved visibility labels to {npz_path[:-4] + "_visibility_308.npz"}')
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()

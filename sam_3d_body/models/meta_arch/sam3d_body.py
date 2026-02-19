@@ -864,6 +864,7 @@ class SAM3DBody(BaseModel):
             verts[..., [1, 2]] *= -1  # Camera system difference
             j3d[..., [1, 2]] *= -1
             j3d = j3d[:, :70]
+            jcoords[..., [1, 2]] *= -1
             if (
                 hasattr(self, "mhr_dense_kp_indices")
                 and self.mhr_dense_kp_indices is not None
@@ -873,8 +874,10 @@ class SAM3DBody(BaseModel):
 
             outputs["mhr_samples"] = verts.view(B, num_samples, -1, 3)
             outputs["mhr_samples_keypoints_3d"] = j3d.view(B, num_samples, -1, 3)
+            outputs["mhr_samples_joints_3d"] = jcoords.view(B, num_samples, -1, 3)
 
             j3d_flat = j3d.view(B * num_samples, -1, 3)
+            jcoords_flat = jcoords.view(B * num_samples, -1, 3)
 
             pred_cam_expanded = output_mhr["pred_cam"].repeat_interleave(
                 num_samples, dim=0
@@ -909,15 +912,12 @@ class SAM3DBody(BaseModel):
                     "USE_INTRIN_CENTER", False
                 ),
             )
-
-            # Get full image 2D keypoints: [B * num_samples, N, 2]
             mhr_sample_keypoints_2d_full = cam_out_samples["pred_keypoints_2d"]
-
-            # Reshape full image keypoints to [B, num_samples, N, 2]
             mhr_sample_keypoints_2d = mhr_sample_keypoints_2d_full.view(
                 B, num_samples, -1, 2
             )
             outputs["mhr_samples_keypoints_2d"] = mhr_sample_keypoints_2d
+
 
             # Convert from full image coordinates to cropped pixel space
             # Add homogeneous coordinate for affine transformation
@@ -973,6 +973,35 @@ class SAM3DBody(BaseModel):
                 mhr_sample_keypoints_2d_cropped
             )
 
+
+
+            cam_out_samples_joints_2d = self.head_camera.perspective_projection(
+                jcoords_flat,
+                pred_cam_expanded,
+                bbox_center_expanded,
+                bbox_scale_expanded,
+                ori_img_size_expanded,
+                cam_int_expanded,
+                use_intrin_center=self.cfg.MODEL.DECODER.get(
+                    "USE_INTRIN_CENTER", False),
+            )
+            mhr_sample_joints_2d_full = cam_out_samples_joints_2d["pred_keypoints_2d"]
+            mhr_sample_joints_2d = mhr_sample_joints_2d_full.view(
+                B, num_samples, -1, 2
+            )
+            outputs["mhr_samples_joints_2d"] = mhr_sample_joints_2d
+
+            mhr_sample_joints_2d_h = torch.cat(
+                [mhr_sample_joints_2d_full, torch.ones_like(mhr_sample_joints_2d_full[..., :1])],
+                dim=-1,
+            )
+            mhr_sample_joints_2d_crop = mhr_sample_joints_2d_h @ affine_trans_flat_samples.mT
+            mhr_sample_joints_2d_crop = mhr_sample_joints_2d_crop[..., :2]
+            mhr_sample_joints_2d_crop = mhr_sample_joints_2d_crop / img_size_flat_samples - 0.5
+            mhr_sample_joints_2d_cropped = mhr_sample_joints_2d_crop.view(
+                B, num_samples, -1, 2)
+            outputs["mhr_samples_joints_2d_cropped"] = mhr_sample_joints_2d_cropped
+            
         return outputs
 
     # fmt: off
