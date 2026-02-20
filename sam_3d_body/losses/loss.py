@@ -10,7 +10,7 @@ from einops import rearrange
 from torch.distributions import MultivariateNormal
 from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
 from sam_3d_body.models.modules.mhr_utils import mhr_param_hand_mask, mhr_cont_hand_idxs, mhr_param_hand_idxs
-from sam_3d_body.models.sampling import _build_tril
+from sam_3d_body.models.sampling import build_tril
 
 
 class Loss(pl.LightningModule):
@@ -189,7 +189,7 @@ class Loss(pl.LightningModule):
                 gt_3dof_aa = gt_3dof_aa.flatten(0, 1)
                 cholesky_flat_3dofs = pred_var[:, : 2 * num_3dof_angles]
 
-                cholesky_3dofs = _build_tril(
+                cholesky_3dofs = build_tril(
                     rearrange(cholesky_flat_3dofs, "b (j c) -> (b j) c", c=6)
                 )
 

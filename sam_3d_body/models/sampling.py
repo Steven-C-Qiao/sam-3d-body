@@ -43,7 +43,13 @@ def _sample(x, var, num_samples=4):
     return x + noise
 
 
-def _build_tril(x):
+def build_tril(x):
+    """
+    Args:
+        x: [B, 6]: flat cholesky factor
+    Returns:
+        [B, 3, 3]: lower triangular positive semi-definite cholesky factor
+    """
     assert x.shape[-1] == 6
     B = x.shape[0]
     L = torch.zeros(B, 3, 3, device=x.device, dtype=x.dtype)
@@ -56,21 +62,27 @@ def _build_tril(x):
     L[:, 2, 1] = torch.sigmoid(x[:, 4]) - 0.5
     L[:, 2, 2] = F.softplus(x[:, 5]) + eps
 
-    return L #* 0.1
+    return L 
 
 
 def _sample_full_covariance(x, cholesky_flat, num_samples=4):
+    """
+    Args:
+        x: [B, 3]: mean axis-angle
+        cholesky_flat: [B, 6]: flat cholesky factor
+
+    Returns:
+        [B, num_samples, 3]: samples z = μ + ε Lᵀ  => Cov[z] = L Lᵀ
+    """
     assert x.shape[-1] == 3
     assert cholesky_flat.shape[-1] == 6
 
     B, D = x.shape
-    L = _build_tril(cholesky_flat)  # [B, 3, 3]
+    L = build_tril(cholesky_flat)  # [B, 3, 3]
 
     eps = torch.randn(
-        B, num_samples, D, device=x.device, dtype=x.dtype  # ~ N(0, I)
-    )  # [B, N, 3]
-
-    # z = μ + ε Lᵀ  => Cov[z] = L Lᵀ
+        B, num_samples, D, device=x.device, dtype=x.dtype
+    )
     z = x.unsqueeze(1) + torch.matmul(eps, L.transpose(-1, -2))  # [B, N, 3]
 
 
@@ -101,9 +113,17 @@ def sample_scale(scale_mean, scale_var, num_samples=4):
     return scale_68D
 
 
-def gen_pose_samples(
+def sample_pose(
     body_pose_cont, var, num_samples=4, sample_function=_sample_full_covariance
 ):
+    """
+        body_pose_cont: [B, 133]: 3DoF in 6D +  1DoF in sincos + 1DoF transl    
+            3DoF: 6D -> rotation matrix -> axis-angle -> sample -> rotation matrix -> euler
+            1DoF: sincos -> angle -> sample
+
+        Ret:
+            fed into head_pose.mhr_forward
+    """
     # fmt: off
     all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
     all_param_1dof_rot_idxs = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 74, 75, 77, 78, 80, 81, 83, 84, 89, 90, 94, 95, 101, 102, 104, 105, 107, 108, 110, 111, 116, 117, 118, 119, 120, 121, 122, 123])
@@ -223,7 +243,7 @@ def gen_samples(
             sample_function = _sample_full_covariance
         else:
             sample_function = _sample
-        pose_samples = gen_pose_samples(
+        pose_samples = sample_pose(
             pose_mean, pose_var, num_samples, sample_function=sample_function
         )
     elif pose_mean is not None:

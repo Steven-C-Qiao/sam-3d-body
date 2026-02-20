@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import shutil
 import torch
@@ -19,7 +17,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 import sys
 
-sys.path.append(".")
 from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
