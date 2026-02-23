@@ -341,7 +341,7 @@ class ToyModel(BaseModel):
         mhr_sample_keypoints_3d = torch.stack(mhr_sample_keypoints_3d, dim=1)
         
         outputs['mhr_samples'] = mhr_sample_verts
-        outputs['mhr_samples_keypoints_3d'] = mhr_sample_keypoints_3d
+        outputs['kp3d_samples'] = mhr_sample_keypoints_3d
         
         # Project sampled 3D keypoints to 2D
         # Reshape samples from [B, num_samples, N, 3] to [B * num_samples, N, 3]
@@ -392,7 +392,7 @@ class ToyModel(BaseModel):
         
         # Reshape full image keypoints to [B, num_samples, N, 2]
         mhr_sample_keypoints_2d = mhr_sample_keypoints_2d_full.view(B, num_samples, N, 2)
-        outputs['mhr_samples_keypoints_2d'] = mhr_sample_keypoints_2d
+        outputs['kp2d_samples'] = mhr_sample_keypoints_2d
         
         # Convert from full image coordinates to cropped pixel space
         # Add homogeneous coordinate for affine transformation
@@ -414,7 +414,7 @@ class ToyModel(BaseModel):
         
         # Reshape back to [B, num_samples, N, 2]
         mhr_sample_keypoints_2d_cropped = mhr_sample_keypoints_2d_crop.view(B, num_samples, N, 2)
-        outputs['mhr_samples_keypoints_2d_cropped'] = mhr_sample_keypoints_2d_cropped
+        outputs['kp2d_samples_cropped'] = mhr_sample_keypoints_2d_cropped
         
         return outputs
 

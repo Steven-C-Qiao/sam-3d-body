@@ -25,6 +25,11 @@ scale_bias = np.load(os.path.join(path, "scale_mean.npy"))
 scale_comps = np.load(os.path.join(path, "scale_comps.npy"))
 
 
+def aa_to_euler(aa, euler_convention="XYZ"):
+    rotmat = axis_angle_to_matrix(aa)
+    euler = matrix_to_euler_angles(rotmat, euler_convention)
+    return euler
+
 def _sample(x, var, num_samples=4):
     """
     Args:
@@ -135,18 +140,16 @@ def gen_pose_samples(
         var_3dofs = var[:, : 2 * num_3dof_angles]
         var_1dofs = var[:, 2 * num_3dof_angles :]
 
-        body_aa_3dofs_sample = sample_function(
+        aa_3dof_samples = sample_function(
             rearrange(body_aa_3dofs, " b (j c) -> (b j) c", c=3),
             rearrange(var_3dofs, " b (j c) -> (b j) c", c=6),
             num_samples,
         )
-        body_aa_3dofs_sample = rearrange(
-            body_aa_3dofs_sample, "(b j) n c -> b n j c", b=body_aa_3dofs.shape[0]
+        aa_3dof_samples = rearrange(
+            aa_3dof_samples, "(b j) n c -> b n j c", b=body_aa_3dofs.shape[0]
         )
-
-        body_rotmat_3dofs_sample = axis_angle_to_matrix(body_aa_3dofs_sample)
-        body_euler_3dofs_sample = matrix_to_euler_angles(body_rotmat_3dofs_sample, "XYZ")
-        body_euler_3dofs_sample = body_euler_3dofs_sample.flatten(-2, -1)
+        euler_3dof_samples = aa_to_euler(aa_3dof_samples, "XYZ")
+        euler_3dof_samples = euler_3dof_samples.flatten(-2, -1)
     else:
         assert var.shape[-1] == (
             num_3dof_angles + num_1dof_angles 
@@ -154,14 +157,12 @@ def gen_pose_samples(
         var_3dofs = var[:, :num_3dof_angles]
         var_1dofs = var[:, num_3dof_angles:]
 
-        body_aa_3dofs_sample = _sample(
+        aa_3dof_samples = _sample(
             body_aa_3dofs, var[:, :num_3dof_angles], num_samples
         ).unflatten(-1, (-1, 3))
 
-        body_rotmat_3dofs_sample = axis_angle_to_matrix(body_aa_3dofs_sample)
-        body_euler_3dofs_sample = matrix_to_euler_angles(body_rotmat_3dofs_sample, "XYZ")
-        body_euler_3dofs_sample = body_euler_3dofs_sample.flatten(-2, -1)
-
+        euler_3dof_samples = aa_to_euler(aa_3dof_samples, "XYZ")
+        euler_3dof_samples = euler_3dof_samples.flatten(-2, -1)
 
 
     # ------ 1dofs ------
@@ -180,7 +181,7 @@ def gen_pose_samples(
         .repeat(1, num_samples, 1)
     )
 
-    body_pose_params[..., all_param_3dof_rot_idxs.flatten()] = body_euler_3dofs_sample
+    body_pose_params[..., all_param_3dof_rot_idxs.flatten()] = euler_3dof_samples
     body_pose_params[..., all_param_1dof_rot_idxs] = body_params_1dofs_sample
     body_pose_params[..., all_param_1dof_trans_idxs] = body_trans_sample
 

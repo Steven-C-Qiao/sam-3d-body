@@ -48,7 +48,7 @@ class Loss(pl.LightningModule):
         pred_mhr = predictions["mhr"]
 
         if self.cfg.LOSS.JOINTS_3D_WEIGHT > 0:
-            pred_joints_3d = predictions["mhr_samples_joints_3d"]
+            pred_joints_3d = predictions["j3d_samples"]
             gt_joints_3d = batch["joints_3d"]
             visibility = batch["visibility"]
             visibility = visibility.unsqueeze(1).expand(-1, pred_joints_3d.shape[1], -1)
@@ -61,7 +61,7 @@ class Loss(pl.LightningModule):
             loss_dict["loss_joints_3d"] = (self.cfg.LOSS.JOINTS_3D_WEIGHT * joints_3d_loss)
 
         if self.cfg.LOSS.JOINTS_2D_WEIGHT > 0:
-            pred_joints_2d = predictions["mhr_samples_joints_2d_cropped"]
+            pred_joints_2d = predictions["j2d_samples_cropped"]
             gt_joints_2d = batch["joints_2d"]
             visibility = batch["visibility"]
             visibility = visibility.unsqueeze(1).expand(-1, pred_joints_2d.shape[1], -1)
@@ -74,7 +74,7 @@ class Loss(pl.LightningModule):
 
 
         if self.cfg.LOSS.KP2D_WEIGHT > 0:
-            pred_kp2d_samples = predictions["mhr_samples_keypoints_2d_cropped"]
+            pred_kp2d_samples = predictions["kp2d_samples_cropped"]
             num_samples = pred_kp2d_samples.shape[1]
 
             gt_kp2d = batch["keypoints_2d"]
@@ -91,7 +91,7 @@ class Loss(pl.LightningModule):
             )
 
         if self.cfg.LOSS.KP3D_WEIGHT > 0:
-            pred_kp3d_samples = predictions["mhr_samples_keypoints_3d"]
+            pred_kp3d_samples = predictions["kp3d_samples"]
 
             # pred_kp3d is in the wrong way up in 3D space, and projects correctly onto the image.
             # Thus, flip gt_kp3d for loss. Both pred and gt are upside down

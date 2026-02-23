@@ -311,65 +311,59 @@ class Trainer(BaseLightningModule):
             projected_points = torch.einsum("bij, bkj->bki", cam_int, projected_points)
             return projected_points
 
-        keypoints_2d_by_projection = project(
+        kp2d = project(
             gt_keypoints_3d, trans_cam.unsqueeze(1), cam_int
         )[:, :70, :2]
 
+        # import matplotlib.pyplot as plt
+        # plt.imshow(batch["img_ori"][0].data.cpu().numpy())
+        # plt.scatter(verts_2d[0,:, 0].cpu().numpy(), verts_2d[0,:, 1].cpu().numpy(), s=0.1, c='red')
+        # plt.title("2D projected mesh vertices")
+        # plt.axis("off")
+        # plt.savefig("temp_vis.png")
+        # plt.close()
 
-        j2d_by_projection = project(
-            gt_joint_coords, trans_cam.unsqueeze(1), cam_int
-        )[..., :2]
+        # import ipdb; ipdb.set_trace()
 
-        # verts_2d = project(
-        #     gt_verts, trans_cam.unsqueeze(1), cam_int
-        # )[:, :, :2]
-
-        # # import matplotlib.pyplot as plt
-        # # plt.imshow(batch["img_ori"][0].data.cpu().numpy())
-        # # plt.scatter(verts_2d[0,:, 0].cpu().numpy(), verts_2d[0,:, 1].cpu().numpy(), s=0.1, c='red')
-        # # plt.title("2D projected mesh vertices")
-        # # plt.axis("off")
-        # # plt.savefig("temp_vis.png")
-        # # plt.close()
-
-        # # import ipdb; ipdb.set_trace()
-
-        # Ground-truth 2D keypoints: 70 canonical + optional dense vertices projected
+        # Optionally append dense keypoints 
         if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
             dense_kp2d = project(
                 gt_verts[:, self.mhr_dense_kp_indices, :],
                 trans_cam.unsqueeze(1),
                 cam_int,
             )[:, :, :2]
-            kp2d = torch.cat([keypoints_2d_by_projection, dense_kp2d], dim=1)
-        else:
-            kp2d = keypoints_2d_by_projection
+            kp2d = torch.cat([kp2d, dense_kp2d], dim=1)
 
         gt_kp2d_h = torch.cat([kp2d, torch.ones_like(kp2d[..., :1])], dim=-1).float()
         affine = batch["affine_trans"][:, 0].float()
         img_size = batch["img_size"][:, 0]
 
         gt_kp2d_crop = gt_kp2d_h @ affine.mT  # [B, 70, 3] @ [B, 3, 2] = [B, 70, 2]
-        gt_kp2d_crop = gt_kp2d_crop[..., :2]
+        # gt_kp2d_crop = gt_kp2d_crop[..., :2]
 
-        # Normalize to [-0.5, 0.5], same as _full_to_crop
-        # img_size needs to be [B, 1, 2] for proper broadcasting
         gt_kp2d_crop = gt_kp2d_crop / img_size.unsqueeze(1) - 0.5  # [B, 70, 2]
-
         batch["keypoints_2d"] = gt_kp2d_crop
 
-        j2d_h = torch.cat([j2d_by_projection, torch.ones_like(j2d_by_projection[..., :1])], dim=-1).float()
+        # --- temp mirror for joints --- 
+        j2d = project(
+            gt_joint_coords, trans_cam.unsqueeze(1), cam_int
+        )[..., :2]
+        j2d_h = torch.cat([j2d, torch.ones_like(j2d[..., :1])], dim=-1).float()
         j2d_crop = j2d_h @ affine.mT 
         j2d_crop = j2d_crop[..., :2]
         j2d_crop = j2d_crop / img_size.unsqueeze(1) - 0.5 
         batch["joints_2d"] = j2d_crop
 
+
+        # ------------ gt for no glob rot ------------
         model_parameters = batch["model_params"]
+
+        # No global transl 
         model_parameters[:, :3] = 0
+
         global_rot = batch["model_params"][:, 3:6]
 
-        # Add 180-degree rotation around X-axis
-        global_rot_mat = roma.euler_to_rotmat("xyz", global_rot)  # B x 3 x 3
+        global_rotmat = roma.euler_to_rotmat("xyz", global_rot)  # B x 3 x 3
 
         batch_size = global_rot.shape[0]
         rot_180_x = (
@@ -381,14 +375,10 @@ class Trainer(BaseLightningModule):
             .unsqueeze(0)
             .expand(batch_size, -1, -1)
         )
+        new_global_rotmat = torch.bmm(rot_180_x, global_rotmat)
 
-        # Multiply rotations: new_rot = rot_180_x @ global_rot_mat
-        new_global_rot_mat = torch.bmm(rot_180_x, global_rot_mat)
+        global_rot = roma.rotmat_to_euler("xyz", new_global_rotmat)
 
-        # Convert back to Euler angles
-        global_rot = roma.rotmat_to_euler("xyz", new_global_rot_mat)
-
-        # Update model_parameters with the new global_rot
         model_parameters[:, 3:6] = global_rot
 
         gt_mhr_output = mhr_model.mhr(
@@ -1481,7 +1471,7 @@ class Trainer(BaseLightningModule):
         """
         import matplotlib.pyplot as plt
 
-        if "mhr_samples_keypoints_2d" not in outputs:
+        if "kp2d_samples" not in outputs:
             logger.warning(
                 "No sample keypoints found in outputs. Skipping visualization."
             )
@@ -1503,7 +1493,7 @@ class Trainer(BaseLightningModule):
 
         # Extract sample keypoints (in full image coords)
         sample_kp2d_full = (
-            outputs["mhr_samples_keypoints_2d"][batch_idx].cpu().detach().numpy()
+            outputs["kp2d_samples"][batch_idx].cpu().detach().numpy()
         )  # [num_samples, 70, 2]
 
         # Convert samples to cropped coordinates

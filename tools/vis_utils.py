@@ -320,7 +320,7 @@ def my_visualize_samples(
         base_img_uint8 = base_img.astype(np.uint8)
         base_img = cv2.warpAffine(base_img_uint8, warp_matrix, output_size)
 
-    mhr_samples = outputs["mhr_samples"].cpu().detach().numpy()
+    mhr_samples = outputs["verts_samples"].cpu().detach().numpy()
 
     outputs = outputs["mhr"]
     for key in outputs:

@@ -152,8 +152,8 @@ class Metrics(pl.LightningModule):
                 pve_mean = self.pve(pred_kp3d[:, 70:, :], gt_kp3d[:, 70:, :])
                 metrics["pve"] = pve_mean
 
-        if "mhr_samples_keypoints_3d" in predictions:
-            pred_kp3d_samples = predictions["mhr_samples_keypoints_3d"]
+        if "kp3d_samples" in predictions:
+            pred_kp3d_samples = predictions["kp3d_samples"]
             num_samples = pred_kp3d_samples.shape[1]
             gt_kp3d_samples = batch["keypoints_3d"][:, None].expand(
                 -1, num_samples, -1, -1
