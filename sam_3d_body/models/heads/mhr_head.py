@@ -56,11 +56,6 @@ class MHRHead(nn.Module):
         self.enable_hand_model = enable_hand_model
 
         self.body_cont_dim = 260
-        # 3-DoF body joints represented as 6D rotations in the continuous space.
-        self.num_body_3dof_joints = NUM_BODY_3DOF_JOINTS
-        self.num_body_3dof_cont_dims = self.num_body_3dof_joints * 6
-        # 1-DoF body joint rotations represented as single angles in model space.
-        self.num_body_1dof_angles = NUM_BODY_1DOF_ANGLES
         self.npose = (
             6  # Global Rotation
             + self.body_cont_dim  # then body
@@ -204,15 +199,8 @@ class MHRHead(nn.Module):
 
         body_pose_params = body_pose_params[..., :130]
 
-        # Convert from scale and shape params to actual scales and vertices
-        ## Add singleton batches in case...
-        if len(scale_params.shape) == 1:
-            scale_params = scale_params[None]
-        if len(shape_params.shape) == 1:
-            shape_params = shape_params[None]
-        ## Convert scale...
+
         if scale_offsets is not None:
-            # modifying to serve as workaround 
             # scales = scales + scale_offsets
             scales = scale_offsets 
         else:
@@ -417,10 +405,12 @@ class MHRUncertaintyHead(MHRHead):
 
         self.full_cov = full_cov
         # Pose 3DoF uncertainty: full_cov -> 6 per joint (Cholesky flat), else 3 per joint (diagonal).
-        self.aa_3dof_dim = (
-            6 * self.num_body_3dof_joints if full_cov else 3 * self.num_body_3dof_joints
-        )
-        self.aa_1dof_dim = self.num_body_1dof_angles
+        if self.full_cov:
+            self.aa_3dof_dim = 6 * (23 - 10) # All - hands 3dof rotations * 6
+        else:
+            self.aa_3dof_dim = 3 * 23 # All 3dof rotations * 3
+        
+        self.aa_1dof_dim = 58 - (58 - 34) # All 1dof rotations except hands 
 
         self.shape_uncertainty_proj = FFN(
             embed_dims=input_dim,
@@ -539,10 +529,10 @@ class MHRUncertaintyHead(MHRHead):
         if self.full_cov:
             pose_3dof_uncertainty = pose_3dof_log_var
         else:
-            pose_3dof_uncertainty = 0.01 * torch.exp(pose_3dof_log_var)
+            pose_3dof_uncertainty = torch.exp(pose_3dof_log_var)
 
         pose_1dof_log_var = self.pose_1dof_uncertainty_proj(uncert_input)
-        pose_1dof_uncertainty = 0.01 * torch.exp(pose_1dof_log_var)
+        pose_1dof_uncertainty = torch.exp(pose_1dof_log_var)
 
         pose_uncertainty = torch.cat(
             [pose_3dof_uncertainty, pose_1dof_uncertainty], dim=1
@@ -640,8 +630,6 @@ class MHRUncertaintyHead(MHRHead):
             "mhr_model_params": mhr_model_params,
             "shape_uncertainty": shape_uncertainty,
             "scale_uncertainty": scale_uncertainty,
-            "pose_3dof_uncertainty": pose_3dof_uncertainty,
-            "pose_1dof_uncertainty": pose_1dof_uncertainty,
             "pose_uncertainty": pose_uncertainty,
         }
 

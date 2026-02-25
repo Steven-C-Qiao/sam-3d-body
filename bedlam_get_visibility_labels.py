@@ -21,7 +21,7 @@ from pytorch3d.renderer import (
 from pytorch3d.renderer.blending import hard_rgb_blend, BlendParams
 
 
-DATA_BASE_PATH = "/scratch/cq244/BEDLAM/data/"
+DATA_BASE_PATH = "/scratches/columbo2/cq244/BEDLAM/data/"
 NPZ_PATH = os.path.join(
     DATA_BASE_PATH,
     "training_labels/all_npz_12_training_extra_mhr/20221010_3_1000_batch01hand_6fps.npz",
@@ -30,7 +30,7 @@ IMAGE_DIR = os.path.join(
     DATA_BASE_PATH, "training_images/20221010_3_1000_batch01hand_6fps"
 )
 MHR_MODEL_PATH = (
-    "/scratch/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
+    "/scratches/columbo2/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
 )
 
 
@@ -176,7 +176,7 @@ if __name__ == "__main__":
     )
 
     ckpt = torch.load(
-        "/scratch/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/model.ckpt",
+        "/scratches/columbo2/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/model.ckpt",
         weights_only=False,
     )
     faces = ckpt["head_pose.faces"].cpu().detach().numpy()

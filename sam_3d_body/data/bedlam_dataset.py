@@ -67,7 +67,8 @@ class DatasetHMR(Dataset):
             .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
-        self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility.npz")["visibility"]
+        # self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility.npz")["visibility"]
+        self.visibility = np.ones((self.data["imgname"].shape[0], 1))
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
         self.scale = self.data["scale"].astype(np.float32)
@@ -82,12 +83,13 @@ class DatasetHMR(Dataset):
             ]
         )
         self.cam_int = self.data["cam_int"].astype(np.float32)
+
         self.shape_params = self.data["identity_coeffs"]
         self.model_params = self.data["lbs_model_params"]
         self.face_expr_params = self.data["face_expr_coeffs"]
 
-        self.cam_ext = self.data["cam_ext"]
-        self.trans_cam = self.data["trans_cam"]
+        self.cam_ext = self.data["cam_ext"].astype(np.float32)
+        self.trans_cam = self.data["trans_cam"].astype(np.float32)
 
         # self.mhr_keypoints_2d = self.data["mhr_keypoints_2d"]
 
@@ -171,7 +173,7 @@ class DatasetHMR(Dataset):
         item = {}
         scale = self.scale[index].copy()
         center = self.center[index].copy()
-        mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
+        # mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
 
         sc = 1.0
 
@@ -179,36 +181,42 @@ class DatasetHMR(Dataset):
         maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + "_env.png")
         item["imgname"] = imgname
     
-        cv_img = read_img(imgname)
-        masks = cv2.imread(maskname, 0)
+        try:
+            cv_img = read_img(imgname)
+        except Exception as E:
+            print(E)
+            logger.info(f"@{imgname}@ from {self.dataset}")
+            cv_img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        # masks = cv2.imread(maskname, 0)
         if "closeup" in self.dataset:
             cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
             masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
 
         item["img_ori"] = cv_img
-        item["mask_ori"] = masks
+        # item["mask_ori"] = masks
 
         img = self.rgb_processing(cv_img)
 
         data_info = dict(
             img=img,
-            center=center,
-            scale=float(sc * scale),
+            center=center.astype(np.float32),
+            scale=(sc * scale).astype(np.float32),
             bbox_format="xyxy",
-            keypoints_2d=mhr_keypoints_2d,
-            mask=masks,
+            # keypoints_2d=mhr_keypoints_2d,
+            # mask=masks,
         )
         data_list = [self.transform(data_info)]
         data = default_collate(data_list)
 
         for key in data:
             item[key] = data[key]
-        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
-        item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
+        # item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
+        # item["mask"] = None
+        # item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
     
         item["person_valid"] = torch.ones((1, 1))
         
-        item["scale"] = sc * scale
+        item["scale"] = (sc * scale).astype(np.float32)
         item["center"] = center.astype(np.float32)
         item["shape_params"] = self.shape_params[index]
         item["model_params"] = self.model_params[index]
@@ -218,9 +226,10 @@ class DatasetHMR(Dataset):
 
         item["cam_int"] = self.cam_int[index]
         item["focal_length"] = torch.tensor(
-            [self.cam_int[index][0, 0], self.cam_int[index][1, 1]]
+            [self.cam_int[index][0, 0], self.cam_int[index][1, 1]],
         )
-        item["cam_ext"] = self.cam_ext[index] + self.trans_cam[index]
+        self.cam_ext[index][:3, 3] += self.trans_cam[index]
+        item["cam_ext"] = self.cam_ext[index]
         item["trans_cam"] = self.trans_cam[index]
 
         item["dataset_name"] = self.dataset

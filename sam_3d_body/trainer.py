@@ -20,7 +20,7 @@ from .data.bedlam_dataset import DatasetHMR as BEDLAMDataset
 from .data.bedlam_dataset import MultiViewEvaluationDataset
 from .metrics.metrics_tracker import Metrics
 from .visualization.my_vis import Visualiser
-from .configs.config import INDICES_PATH
+# from .configs.config import INDICES_PATH
 
 import sys
 from pathlib import Path
@@ -74,7 +74,7 @@ class Trainer(BaseLightningModule):
         )
         self.mhr_dense_kp_indices = None
         if self.use_dense_keypoints:
-            mhr_dense_kp_indices_np = np.load(INDICES_PATH)
+            # mhr_dense_kp_indices_np = np.load(INDICES_PATH)
             self.mhr_dense_kp_indices = torch.from_numpy(mhr_dense_kp_indices_np).long()
             # Expose to the meta-arch and the MHR head for dense keypoint extraction
             setattr(self.model, "mhr_dense_kp_indices", self.mhr_dense_kp_indices)

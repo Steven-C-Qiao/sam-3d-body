@@ -751,13 +751,13 @@ class SAM3DBody(BaseModel):
 
 
         # Mask condition if available
-        if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_EMBED_TYPE", None) is not None:
-            # v1: non-iterative mask conditioning
-            if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_PROMPT", "v1") == "v1":
-                mask_embeddings = self._get_mask_prompt(batch, image_embeddings)
-                image_embeddings = image_embeddings + mask_embeddings
-            else:
-                raise NotImplementedError
+        # if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_EMBED_TYPE", None) is not None:
+        #     # v1: non-iterative mask conditioning
+        #     if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_PROMPT", "v1") == "v1":
+        #         mask_embeddings = self._get_mask_prompt(batch, image_embeddings)
+        #         image_embeddings = image_embeddings + mask_embeddings
+        #     else:
+        #         raise NotImplementedError
 
 
         # Prepare input for promptable decoder
@@ -813,15 +813,19 @@ class SAM3DBody(BaseModel):
             )
             global_trans = torch.zeros_like(global_rot_euler_mean)
 
-            shape_samples, scale_samples, pose_samples = gen_samples(
+            samples_dict = gen_samples(
                 output_mhr,
                 num_samples,
                 sample_pose=self.sample_pose,
                 full_cov=self.full_cov,
+                scale_bias=self.head_pose.scale_mean.float(),
+                scale_comps=self.head_pose.scale_comps.float(),
             )
-            shape_samples = shape_samples.view(-1, shape_samples.shape[-1])
-            scale_samples = scale_samples.view(-1, scale_samples.shape[-1])
-            pose_samples = pose_samples.view(-1, pose_samples.shape[-1])
+            shape_samples = samples_dict["shape_samples"].view(-1, samples_dict["shape_samples"].shape[-1])
+            scale_samples = samples_dict["scale_samples"].view(-1, samples_dict["scale_samples"].shape[-1])
+            pose_samples = samples_dict["pose_samples"].view(-1, samples_dict["pose_samples"].shape[-1])
+            dist_3dof = samples_dict["dist_3dof"]
+            outputs["dist_3dof"] = dist_3dof
 
             mhr_output = self.head_pose.mhr_forward(
                 scale_params=torch.zeros_like(scale_samples),
@@ -904,10 +908,10 @@ class SAM3DBody(BaseModel):
 
             affine = self._flatten_person(batch["affine_trans"])[
                 self.body_batch_idx
-            ].repeat_interleave(num_samples, dim=0)
+            ].repeat_interleave(num_samples, dim=0).float()
             img_size = self._flatten_person(batch["img_size"])[
                 self.body_batch_idx
-            ].repeat_interleave(num_samples, dim=0)
+            ].repeat_interleave(num_samples, dim=0).unsqueeze(1)
 
             kp2d_samples_crop = kp2d_samples_h @ affine.mT
             # kp2d_samples_crop = kp2d_samples_crop[..., :2]

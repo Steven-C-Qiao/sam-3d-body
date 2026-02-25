@@ -35,9 +35,9 @@ _C.DATASET.CROP_FACTOR = 0.0
 _C.DATASET.PIN_MEMORY = True
 _C.DATASET.SHUFFLE_TRAIN = True
 _C.DATASET.TRAIN_DS = 'all'
-_C.DATASET.VAL_DS = 'static-hdri-bmi_orbit-archviz-15'
+_C.DATASET.VAL_DS = 'zoom-suburbd'
 _C.DATASET.MESH_COLOR = 'pinkish'
-_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
+_C.DATASET.DATASETS_AND_RATIOS = 'zoom-suburbd_static-suburbd-bmi'
 _C.DATASET.CROP_PERCENT = 0.8
 _C.DATASET.ALB = True
 _C.DATASET.ALB_PROB = 0.3
@@ -137,7 +137,8 @@ def get_config_defaults():
 
 
 import os 
-PATH = "/scratches/juban/cq244/BEDLAM/"
+# PATH = "/scratches/juban/cq244/BEDLAM/"
+PATH = "/scratch/cq244/BEDLAM/"
 
 
 SMPL_MODEL_DIR = os.path.join(PATH, 'data/body_models/SMPL_python_v.1.1.0/smpl/models')
@@ -208,56 +209,56 @@ DATASET_FILES = [
         '3dpw-val-cam': os.path.join(PATH, 'data/eval_data_parsed/3dpw_validation.npz'),
         'rich': os.path.join(PATH, 'data/eval_data_parsed/rich_test.npz'),
         'h36m-p1': os.path.join(PATH, 'data/eval_data_parsed/h36m_valid_protocol1.npz'),
-        'orbit-stadium-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_3-8_250_highbmihand_orbit_stadium_6fps.npz'),
-        'orbit-archviz-objocc': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221018_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
-        'zoom-suburbb-frameocc': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221018_1_250_batch01hand_zoom_suburb_b_6fps.npz'),
-        'static-hdri-frameocc': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221018_3-8_250_batch01hand_6fps.npz'),
-        'zoom-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221012_3-10_500_batch01hand_zoom_highSchoolGym_6fps.npz'),
-        'static-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221013_3-10_500_batch01hand_static_highSchoolGym_6fps.npz'),
-        'orbit-archviz-15': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221014_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
-        'static-hdri-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_3_250_highbmihand_6fps.npz'),
+        'orbit-stadium-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221019_3-8_250_highbmihand_orbit_stadium_6fps.npz'),
+        'orbit-archviz-objocc': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221018_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
+        'zoom-suburbb-frameocc': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221018_1_250_batch01hand_zoom_suburb_b_6fps.npz'),
+        'static-hdri-frameocc': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221018_3-8_250_batch01hand_6fps.npz'),
+        'zoom-gym': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221012_3-10_500_batch01hand_zoom_highSchoolGym_6fps.npz'),
+        'static-gym': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221013_3-10_500_batch01hand_static_highSchoolGym_6fps.npz'),
+        'orbit-archviz-15': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221014_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
+        'static-hdri-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221019_3_250_highbmihand_6fps.npz'),
 
         # NOTE: Temporarily added zoom-suburbd for code testing
     },
     {
-        'agora-bfh': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/agora-bfh.npz'),
-        'agora-body': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/agora-body.npz'),
-        '3dpw-train-smplx': os.path.join(PATH, 'data/training_labels/3dpw_train_smplx.npz'),
+        'agora-bfh': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/agora-bfh.npz'), # was _extra_mhr 
+        'agora-body': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/agora-body.npz'),
+        '3dpw-train-smplx': os.path.join(PATH, 'data/bedlam_labels/3dpw_train_smplx.npz'),
 
-        'zoom-suburbd': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221010_3-10_500_batch01hand_zoom_suburb_d_6fps.npz'),
-        'closeup-suburba': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221011_1_250_batch01hand_closeup_suburb_a_6fps.npz'),
-        'closeup-suburbb': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221011_1_250_batch01hand_closeup_suburb_b_6fps.npz'),
-        'closeup-suburbc': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221011_1_250_batch01hand_closeup_suburb_c_6fps.npz'),
-        'closeup-suburbd': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221011_1_250_batch01hand_closeup_suburb_d_6fps.npz'),
-        'closeup-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221012_1_500_batch01hand_closeup_highSchoolGym_6fps.npz'),
-        'zoom-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221012_3-10_500_batch01hand_zoom_highSchoolGym_6fps.npz'),
-        'static-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221013_3-10_500_batch01hand_static_highSchoolGym_6fps.npz'),
-        'static-office': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221013_3_250_batch01hand_static_bigOffice_6fps.npz'),
-        'orbit-office': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221013_3_250_batch01hand_orbit_bigOffice_6fps.npz'),
-        'orbit-archviz-15': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221014_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
-        'orbit-archviz-19': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221015_3_250_batch01hand_orbit_archVizUI3_time19_6fps.npz'),
-        'orbit-archviz-12': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221015_3_250_batch01hand_orbit_archVizUI3_time12_6fps.npz'),
-        'orbit-archviz-10': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221015_3_250_batch01hand_orbit_archVizUI3_time10_6fps.npz'),
-        'static-hdri': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221010_3_1000_batch01hand_6fps.npz'),
-        'static-hdri-zoomed': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221017_3_1000_batch01hand_6fps.npz'),
-        'staticzoomed-suburba-frameocc': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221017_1_250_batch01hand_closeup_suburb_a_6fps.npz'),
-        'pitchup-stadium': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221018_3-8_250_batch01hand_pitchUp52_stadium_6fps.npz'),
-        'static-hdri-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_3_250_highbmihand_6fps.npz'),
-        'closeup-suburbb-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_1_250_highbmihand_closeup_suburb_b_6fps.npz'),
-        'closeup-suburbc-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_1_250_highbmihand_closeup_suburb_c_6fps.npz'),
-        'static-suburbd-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_3-8_1000_highbmihand_static_suburb_d_6fps.npz'),
-        'zoom-gym-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221020-3-8_250_highbmihand_zoom_highSchoolGym_a_6fps.npz'),
-        'pitchdown-stadium': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221018_3-8_250_batch01hand_pitchDown52_stadium_6fps.npz'),
-        'static-office-hair': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221022_3_250_batch01handhair_static_bigOffice_30fps.npz'),
-        'zoom-suburbd-hair': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221024_10_100_batch01handhair_zoom_suburb_d_30fps.npz'),
-        'static-gym-hair': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221024_3-10_100_batch01handhair_static_highSchoolGym_30fps.npz'),
-        'orbit-stadium-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_3-8_250_highbmihand_orbit_stadium_6fps.npz'),
+        'zoom-suburbd': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221010_3-10_500_batch01hand_zoom_suburb_d_6fps_mhr.npz'),
+        'closeup-suburba': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221011_1_250_batch01hand_closeup_suburb_a_6fps.npz'),
+        'closeup-suburbb': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221011_1_250_batch01hand_closeup_suburb_b_6fps.npz'),
+        'closeup-suburbc': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221011_1_250_batch01hand_closeup_suburb_c_6fps.npz'),
+        'closeup-suburbd': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221011_1_250_batch01hand_closeup_suburb_d_6fps.npz'),
+        'closeup-gym': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221012_1_500_batch01hand_closeup_highSchoolGym_6fps.npz'),
+        'zoom-gym': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221012_3-10_500_batch01hand_zoom_highSchoolGym_6fps.npz'),
+        'static-gym': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221013_3-10_500_batch01hand_static_highSchoolGym_6fps.npz'),
+        'static-office': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221013_3_250_batch01hand_static_bigOffice_6fps.npz'),
+        'orbit-office': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221013_3_250_batch01hand_orbit_bigOffice_6fps.npz'),
+        'orbit-archviz-15': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221014_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
+        'orbit-archviz-19': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221015_3_250_batch01hand_orbit_archVizUI3_time19_6fps.npz'),
+        'orbit-archviz-12': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221015_3_250_batch01hand_orbit_archVizUI3_time12_6fps.npz'),
+        'orbit-archviz-10': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221015_3_250_batch01hand_orbit_archVizUI3_time10_6fps.npz'),
+        'static-hdri': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221010_3_1000_batch01hand_6fps.npz'),
+        'static-hdri-zoomed': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221017_3_1000_batch01hand_6fps.npz'),
+        'staticzoomed-suburba-frameocc': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221017_1_250_batch01hand_closeup_suburb_a_6fps.npz'),
+        'pitchup-stadium': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221018_3-8_250_batch01hand_pitchUp52_stadium_6fps.npz'),
+        'static-hdri-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221019_3_250_highbmihand_6fps.npz'),
+        'closeup-suburbb-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221019_1_250_highbmihand_closeup_suburb_b_6fps.npz'),
+        'closeup-suburbc-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221019_1_250_highbmihand_closeup_suburb_c_6fps.npz'),
+        'static-suburbd-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221019_3-8_1000_highbmihand_static_suburb_d_6fps_mhr.npz'),
+        'zoom-gym-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221020-3-8_250_highbmihand_zoom_highSchoolGym_a_6fps.npz'),
+        'pitchdown-stadium': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221018_3-8_250_batch01hand_pitchDown52_stadium_6fps.npz'),
+        'static-office-hair': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221022_3_250_batch01handhair_static_bigOffice_30fps.npz'),
+        'zoom-suburbd-hair': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221024_10_100_batch01handhair_zoom_suburb_d_30fps.npz'),
+        'static-gym-hair': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221024_3-10_100_batch01handhair_static_highSchoolGym_30fps.npz'),
+        'orbit-stadium-bmi': os.path.join(PATH, 'data/bedlam_labels/all_npz_12_training/20221019_3-8_250_highbmihand_orbit_stadium_6fps.npz'),
 
-        'coco': os.path.join(PATH, 'data/real_training_labels/coco.npz'),
-        'mpii': os.path.join(PATH, 'data/real_training_labels//mpii.npz'),
-        'h36m': os.path.join(PATH, 'data/real_training_labels//h36m_train.npz'),
-        'mpi-inf-3dhp': os.path.join(PATH, 'data/real_training_labels//mpi_inf_3dhp_train.npz'),
-        '3dpw-train-smpl': os.path.join(PATH, 'data/real_training_labels/3dpw_train.npz'),
+        'coco': os.path.join(PATH, 'data/real_bedlam_labels/coco.npz'),
+        'mpii': os.path.join(PATH, 'data/real_bedlam_labels/mpii.npz'),
+        'h36m': os.path.join(PATH, 'data/real_bedlam_labels/h36m_train.npz'),
+        'mpi-inf-3dhp': os.path.join(PATH, 'data/real_bedlam_labels/mpi_inf_3dhp_train.npz'),
+        '3dpw-train-smpl': os.path.join(PATH, 'data/real_bedlam_labels/3dpw_train.npz'),
     }
 ]
 
