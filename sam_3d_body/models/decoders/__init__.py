@@ -27,6 +27,11 @@ def build_decoder(cfg, context_dim=None):
             do_interm_preds=cfg.get("DO_INTERM_PREDS", False),
             do_keypoint_tokens=cfg.get("DO_KEYPOINT_TOKENS", False),
             keypoint_token_update=cfg.get("KEYPOINT_TOKEN_UPDATE", None),
+            use_lora=cfg.get("USE_LORA", False),
+            lora_r=cfg.get("LORA_R", 8),
+            lora_alpha=cfg.get("LORA_ALPHA", 16),
+            lora_dropout=cfg.get("LORA_DROPOUT", 0.0),
+            lora_target_modules=cfg.get("LORA_TARGET_MODULES", None),
         )
     else:
         raise ValueError("Invalid decoder type: ", cfg.TYPE)

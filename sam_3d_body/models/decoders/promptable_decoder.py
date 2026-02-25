@@ -8,6 +8,12 @@ import torch.nn as nn
 
 from ..modules.transformer import build_norm_layer, TransformerDecoderLayer
 
+try:
+    from peft import LoraConfig, get_peft_model, TaskType
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+
 
 class PromptableDecoder(nn.Module):
     """Cross-attention based Transformer decoder with prompts input.
@@ -58,6 +64,11 @@ class PromptableDecoder(nn.Module):
         do_interm_preds: bool = False,
         do_keypoint_tokens: bool = False,
         keypoint_token_update: bool = False,
+        use_lora: bool = False,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.0,
+        lora_target_modules: Optional[list] = None,
     ):
         super().__init__()
 
@@ -91,6 +102,24 @@ class PromptableDecoder(nn.Module):
         self.frozen = frozen
         self._freeze_stages()
 
+        # Store LoRA config for later application
+        # We apply LoRA after initialization to avoid issues with PEFT wrapping
+        self._use_lora = use_lora
+        self._lora_r = lora_r
+        self._lora_alpha = lora_alpha
+        self._lora_dropout = lora_dropout
+        self._lora_target_modules = lora_target_modules
+        
+        # Create separate LoRA layers if enabled (keeping original layers frozen)
+        self.lora_layers = None
+        if use_lora:
+            if not PEFT_AVAILABLE:
+                raise ImportError(
+                    "PEFT library is required for LoRA support. "
+                    "Please install it with: pip install peft"
+                )
+            self._create_lora_layers()
+
     def forward(
         self,
         token_embedding: torch.Tensor,
@@ -108,6 +137,11 @@ class PromptableDecoder(nn.Module):
         Args:
             token_embedding: [B, N, C]
             image_embedding: [B, C, H, W]
+        
+        Returns:
+            If LoRA is enabled: (original_output, lora_output) or 
+                                (original_output, all_pose_outputs_orig), (lora_output, all_pose_outputs_lora)
+            If LoRA is disabled: original_output or (original_output, all_pose_outputs)
         """
         if channel_first:
             image_embedding = image_embedding.flatten(2).permute(0, 2, 1)
@@ -121,11 +155,57 @@ class PromptableDecoder(nn.Module):
                     assert len(hand_augment.shape) == 3
                     hand_augment = hand_augment.repeat(len(hand_embeddings), 1, 1)
 
+        # Run original frozen decoder
+        orig_output = self._forward_path(
+            self.layers,
+            token_embedding,
+            image_embedding,
+            token_augment,
+            image_augment,
+            token_mask,
+            hand_embeddings,
+            hand_augment,
+            token_to_pose_output_fn,
+            keypoint_token_update_fn,
+        )
+
+        # Run LoRA path if enabled
+        if self._use_lora and self.lora_layers is not None:
+            lora_output = self._forward_path(
+                self.lora_layers,
+                token_embedding,
+                image_embedding,
+                token_augment,
+                image_augment,
+                token_mask,
+                hand_embeddings,
+                hand_augment,
+                token_to_pose_output_fn,
+                keypoint_token_update_fn,
+            )
+            return orig_output, lora_output
+        else:
+            return orig_output
+
+    def _forward_path(
+        self,
+        layers,
+        token_embedding: torch.Tensor,
+        image_embedding: torch.Tensor,
+        token_augment: Optional[torch.Tensor],
+        image_augment: Optional[torch.Tensor],
+        token_mask: Optional[torch.Tensor],
+        hand_embeddings: Optional[torch.Tensor],
+        hand_augment: Optional[torch.Tensor],
+        token_to_pose_output_fn,
+        keypoint_token_update_fn,
+    ):
+        """Helper method to run forward through a set of layers."""
         if self.do_interm_preds:
             assert token_to_pose_output_fn is not None
             all_pose_outputs = []
 
-        for layer_idx, layer in enumerate(self.layers):
+        for layer_idx, layer in enumerate(layers):
             if hand_embeddings is None:
                 token_embedding, image_embedding = layer(
                     token_embedding,
@@ -144,7 +224,7 @@ class PromptableDecoder(nn.Module):
                 )
                 image_embedding = image_embedding[:, : image_augment.shape[1]]
 
-            if self.do_interm_preds and layer_idx < len(self.layers) - 1:
+            if self.do_interm_preds and layer_idx < len(layers) - 1:
                 curr_pose_output = token_to_pose_output_fn(
                     self.norm_final(token_embedding),
                     prev_pose_output=(
@@ -171,7 +251,6 @@ class PromptableDecoder(nn.Module):
                 layer_idx=layer_idx,
             )
             all_pose_outputs.append(curr_pose_output)
-
             return out, all_pose_outputs
         else:
             return out
@@ -184,6 +263,42 @@ class PromptableDecoder(nn.Module):
             self.norm_final.eval()
             for param in self.parameters():
                 param.requires_grad = False
+
+    def _create_lora_layers(self):
+        """Create separate LoRA-wrapped layers while keeping original layers frozen."""
+        if self._lora_target_modules is None:
+            # Default target modules for transformer decoder
+            # These will match Linear layers in attention and FFN modules
+            # PEFT matches by module name, so we need to match the actual names
+            # in the TransformerDecoderLayer structure
+            target_modules = ["q_proj", "k_proj", "v_proj", "proj"]
+        else:
+            target_modules = self._lora_target_modules
+
+        # Create LoRA config
+        lora_config = LoraConfig(
+            r=self._lora_r,
+            lora_alpha=self._lora_alpha,
+            target_modules=target_modules,
+            lora_dropout=self._lora_dropout,
+            bias="none",
+            task_type=TaskType.FEATURE_EXTRACTION,
+        )
+
+        # Create LoRA-wrapped copies of each layer.
+        # We deep copy the layers to avoid modifying the original frozen layers.
+        # Important: we only keep the *base_model* (original module type with LoRA
+        # weights injected), not the PeftModel wrapper, so the forward signature
+        # stays the same and no HF-style kwargs (e.g. input_ids) are introduced.
+        import copy
+        self.lora_layers = nn.ModuleList()
+        for layer in self.layers:
+            # Deep copy the layer to create a separate instance
+            lora_layer = copy.deepcopy(layer)
+            # Let PEFT inject LoRA adapters into the copied layer
+            peft_wrapped = get_peft_model(lora_layer, lora_config)
+            # Extract the mutated base model (a TransformerDecoderLayer with LoRA)
+            self.lora_layers.append(peft_wrapped.base_model)
 
     def train(self, mode=True):
         """

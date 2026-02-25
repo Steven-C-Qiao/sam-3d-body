@@ -544,7 +544,7 @@ class SAM3DBody(BaseModel):
                 args = kp3d_token_update_fn(kps3d_emb_start_idx, *args)
             return args
 
-        tokens_output, pose_output = self.decoder(
+        decoder_output = self.decoder(
             token_embeddings,
             image_embeddings,
             token_augment,
@@ -554,16 +554,64 @@ class SAM3DBody(BaseModel):
             keypoint_token_update_fn=keypoint_token_update_fn_comb,
         )
 
-        # Extract pose token (index 0) from final tokens
-        pose_token = tokens_output[:, 0]
-
-        if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
-            return (
-                tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
-                pose_output,
-            )
+        # Handle dual outputs when LoRA is enabled
+        use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
+        if use_lora:
+            assert isinstance(decoder_output, tuple) and len(decoder_output) == 2
+            # LoRA is enabled: decoder returns (orig_output, lora_output)
+            orig_output, lora_output = decoder_output
+            
+            # Process original output
+            # orig_output can be: tokens_output OR (tokens_output, all_pose_outputs) when do_interm_preds
+            if isinstance(orig_output, tuple) and len(orig_output) == 2:
+                tokens_output_orig, pose_output_orig = orig_output
+            else:
+                tokens_output_orig = orig_output
+                pose_output_orig = None
+            
+            # Process LoRA output
+            if isinstance(lora_output, tuple) and len(lora_output) == 2:
+                tokens_output_lora, pose_output_lora = lora_output
+            else:
+                tokens_output_lora = lora_output
+                pose_output_lora = None
+            
+            # Extract pose tokens
+            pose_token_orig = tokens_output_orig[:, 0]
+            pose_token_lora = tokens_output_lora[:, 0]
+            
+            # Return both outputs
+            if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
+                return (
+                    (
+                        tokens_output_orig[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+                        pose_output_orig,
+                    ),
+                    (
+                        tokens_output_lora[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+                        pose_output_lora,
+                    ),
+                )
+            else:
+                return (pose_token_orig, pose_output_orig), (pose_token_lora, pose_output_lora)
         else:
-            return pose_token, pose_output
+            # LoRA is disabled: original behavior
+            if isinstance(decoder_output, tuple):
+                tokens_output, pose_output = decoder_output
+            else:
+                tokens_output = decoder_output
+                pose_output = None
+            
+            # Extract pose token (index 0) from final tokens
+            pose_token = tokens_output[:, 0]
+
+            if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
+                return (
+                    tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+                    pose_output,
+                )
+            else:
+                return pose_token, pose_output
 
     @torch.no_grad()
     def _get_keypoint_prompt(self, batch, pred_keypoints_2d, force_dummy=False):
@@ -769,8 +817,9 @@ class SAM3DBody(BaseModel):
 
         # Forward promptable decoder to get updated pose tokens and regression output
         pose_output, pose_output_hand = None, None
+        pose_output_lora = None
         if len(self.body_batch_idx):
-            tokens_output, pose_output = self.forward_decoder(
+            decoder_result = self.forward_decoder(
                 image_embeddings[self.body_batch_idx],
                 init_estimate=None,
                 keypoints=keypoints_prompt[self.body_batch_idx],
@@ -778,13 +827,26 @@ class SAM3DBody(BaseModel):
                 condition_info=condition_info[self.body_batch_idx],
                 batch=batch,
             )
-            pose_output = pose_output[-1]
+            
+            # Handle dual outputs when LoRA is enabled
+            use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
+            if use_lora and isinstance(decoder_result, tuple) and len(decoder_result) == 2:
+                # LoRA enabled: (orig_output, lora_output)
+                (tokens_output, pose_output), (tokens_output_lora, pose_output_lora) = decoder_result
+                pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
+                pose_output_lora = pose_output_lora[-1] if isinstance(pose_output_lora, list) else pose_output_lora
+            else:
+                # LoRA disabled: original behavior
+                tokens_output, pose_output = decoder_result
+                pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
 
         output = {
             "mhr": pose_output,  # mhr prediction output
             "condition_info": condition_info,
             "image_embeddings": image_embeddings,
         }
+        if pose_output_lora is not None:
+            output["mhr_lora"] = pose_output_lora  # LoRA prediction output
         return output
     # fmt: on
 
@@ -969,7 +1031,7 @@ class SAM3DBody(BaseModel):
                 dim=-1,
             )
 
-        tokens_output, pose_output = self.forward_decoder(
+        decoder_result = self.forward_decoder(
             image_embeddings,
             init_estimate=None,  # not recurring previous estimate
             keypoints=keypoint_prompt,
@@ -977,9 +1039,21 @@ class SAM3DBody(BaseModel):
             condition_info=condition_info,
             batch=batch,
         )
-        pose_output = pose_output[-1]
-
-        output.update({"mhr": pose_output})
+        
+        # Handle dual outputs when LoRA is enabled
+        use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
+        if use_lora and isinstance(decoder_result, tuple) and len(decoder_result) == 2:
+            # LoRA enabled: (orig_output, lora_output)
+            (tokens_output, pose_output), (tokens_output_lora, pose_output_lora) = decoder_result
+            pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
+            pose_output_lora = pose_output_lora[-1] if isinstance(pose_output_lora, list) else pose_output_lora
+            output.update({"mhr": pose_output, "mhr_lora": pose_output_lora})
+        else:
+            # LoRA disabled: original behavior
+            tokens_output, pose_output = decoder_result
+            pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
+            output.update({"mhr": pose_output})
+        
         return output, keypoint_prompt
 
     def _get_hand_box(self, pose_output, batch):
