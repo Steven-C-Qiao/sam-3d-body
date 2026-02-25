@@ -46,6 +46,10 @@ class Loss(pl.LightningModule):
         B, N = batch["img"].shape[:2]
 
         pred_mhr = predictions["mhr"]
+        lora_output = predictions["lora_output"]
+        shape_uncertainty = lora_output["shape_uncertainty"]
+        scale_uncertainty = lora_output["scale_uncertainty"]
+        pose_uncertainty = lora_output["pose_uncertainty"]
 
         if self.cfg.LOSS.JOINTS_3D_WEIGHT > 0:
             pred_joints_3d = predictions["j3d_samples"]
@@ -114,7 +118,7 @@ class Loss(pl.LightningModule):
         if self.cfg.LOSS.SHAPE_PARAM_WEIGHT > 0:
             gt_shape_params = batch["shape_params"]
             pred_shape_params = pred_mhr["shape"]
-            pred_shape_uncertainty = pred_mhr["shape_uncertainty"]
+            pred_shape_uncertainty = shape_uncertainty
 
             loss_shape_params = self.gaussian_nll_loss(
                 pred_shape_params, gt_shape_params, pred_shape_uncertainty
@@ -128,7 +132,7 @@ class Loss(pl.LightningModule):
 
             gt_scale = batch["scale_params"]
             pred_scale = pred_mhr["scale"]
-            pred_scale_var = pred_mhr["scale_uncertainty"]
+            pred_scale_var = scale_uncertainty
 
             pred_scale = self.scale_mean[None, :] + pred_scale @ self.scale_comps
 
@@ -177,7 +181,7 @@ class Loss(pl.LightningModule):
             pred_1dof_angles = pred_pose_euler[..., all_param_1dof_rot_idxs_except_hands]  # B 58
             
 
-            pred_var = pred_mhr["pose_uncertainty"]
+            pred_var = pose_uncertainty
             if self.cfg.MODEL.FULL_COV == True:
                 var_1dofs = pred_var[:, 6*13:]
 

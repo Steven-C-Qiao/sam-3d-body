@@ -229,6 +229,7 @@ def gen_pose_samples(
 
 def gen_samples(
     output,
+    uncertainty_dict,
     num_samples=5,
     sample_pose=True,
     full_cov=True,
@@ -247,13 +248,17 @@ def gen_samples(
         pose_samples: [B, N, 133] body pose params (Euler 133-dim)
     """
     shape_mean = output["shape"]
-    shape_var = output["shape_uncertainty"]
+    # shape_var = output["shape_uncertainty"]
 
     scale_mean = output["scale"]
-    scale_var = output["scale_uncertainty"]
+    # scale_var = output["scale_uncertainty"]
 
     pose_mean = output["pred_pose_raw"][:, 6:]
-    pose_var = output["pose_uncertainty"]
+    # pose_var = output["pose_uncertainty"]
+
+    shape_var = uncertainty_dict["shape_uncertainty"]
+    scale_var = uncertainty_dict["scale_uncertainty"]
+    pose_var = uncertainty_dict["pose_uncertainty"]
 
     shape_samples = sample_shape(shape_mean, shape_var, num_samples)
     scale_samples = sample_scale(scale_mean, scale_var, num_samples, scale_bias=scale_bias, scale_comps=scale_comps)

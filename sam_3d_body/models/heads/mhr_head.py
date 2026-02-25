@@ -274,7 +274,6 @@ class MHRHead(nn.Module):
         do_pcblend=True,
         full_cov: bool = True,  # kept for API compatibility with MHRUncertaintyHead
         slim_keypoints=False,
-        uncert_token: Optional[torch.Tensor] = None,  # ignored in base class, kept for API compatibility
     ):
         """
         Args:
@@ -379,6 +378,126 @@ class MHRHead(nn.Module):
         }
 
         return output
+
+class UncertaintyHead(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        mlp_depth: int = 1,
+        mhr_model_path: str = "",
+        extra_joint_regressor: str = "",
+        ffn_zero_bias: bool = True,
+        mlp_channel_div_factor: int = 8,
+        full_cov: bool = True,
+    ):
+        super().__init__()
+        self.num_shape_comps = 45
+        self.num_scale_comps = 28
+        self.num_hand_comps = 54
+        self.num_face_comps = 72
+
+        self.full_cov = full_cov
+        if self.full_cov:
+            self.aa_3dof_dim = 6 * (23 - 10) # All - hands 3dof rotations * 6
+        else:
+            self.aa_3dof_dim = 3 * 23 # All 3dof rotations * 3
+        
+        self.aa_1dof_dim = 58 - (58 - 34) # All 1dof rotations except hands 
+
+        self.shape_uncertainty_proj = FFN(
+            embed_dims=input_dim,
+            feedforward_channels=input_dim // mlp_channel_div_factor,
+            output_dims=self.num_shape_comps,
+            num_fcs=6,
+            ffn_drop=0.0,
+            add_identity=False,
+        )
+
+        self.pose_3dof_uncertainty_proj = nn.Sequential(
+            FFN(
+                embed_dims=input_dim,
+                feedforward_channels=input_dim // 2,
+                output_dims=input_dim // 2,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+            FFN(
+                embed_dims=input_dim // 2,
+                feedforward_channels=input_dim // 4,
+                output_dims=input_dim // 4,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+            FFN(
+                embed_dims=input_dim // 4,
+                feedforward_channels=input_dim // 4,
+                output_dims=self.aa_3dof_dim,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+        )
+        self.pose_1dof_uncertainty_proj = nn.Sequential(
+            FFN(
+                embed_dims=input_dim,
+                feedforward_channels=input_dim // 2,
+                output_dims=input_dim // 4,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+            FFN(
+                embed_dims=input_dim // 4,
+                feedforward_channels=input_dim // 4,
+                output_dims=self.aa_1dof_dim,
+                num_fcs=2,
+                ffn_drop=0.0,
+                add_identity=False,
+            ),
+        )
+
+        selected_scale_comps_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
+        num_scales = len(selected_scale_comps_indices)
+
+        self.scale_uncertainty_proj = FFN(
+            embed_dims=input_dim,
+            feedforward_channels=input_dim // mlp_channel_div_factor,
+            output_dims=num_scales,
+            num_fcs=6,
+            ffn_drop=0.0,
+            add_identity=False,
+        )
+
+    def forward(
+        self,
+        y: torch.Tensor,
+    ):
+
+        shape_log_var = self.shape_uncertainty_proj(y)
+        shape_uncertainty = torch.exp(shape_log_var)
+
+        scale_log_var = self.scale_uncertainty_proj(y)
+        scale_uncertainty = torch.exp(scale_log_var)
+
+        pose_3dof_log_var = self.pose_3dof_uncertainty_proj(y)
+        if self.full_cov:
+            pose_3dof_uncertainty = pose_3dof_log_var
+        else:
+            pose_3dof_uncertainty = torch.exp(pose_3dof_log_var)
+
+        pose_1dof_log_var = self.pose_1dof_uncertainty_proj(y)
+        pose_1dof_uncertainty = torch.exp(pose_1dof_log_var)
+
+        pose_uncertainty = torch.cat(
+            [pose_3dof_uncertainty, pose_1dof_uncertainty], dim=1
+        )
+        return {
+            "shape_uncertainty": shape_uncertainty,
+            "scale_uncertainty": scale_uncertainty,
+            "pose_uncertainty": pose_uncertainty,
+        }
 
 
 class MHRUncertaintyHead(MHRHead):
@@ -504,39 +623,15 @@ class MHRUncertaintyHead(MHRHead):
         init_estimate: Optional[torch.Tensor] = None,
         do_pcblend=True,
         full_cov=True,
-        uncert_token: Optional[torch.Tensor] = None,
+        x_var: Optional[torch.Tensor] = None, # the uncertainty token    
     ):
         """
         Args:
             x: pose token with shape [B, C], usually C=DECODER.DIM
             init_estimate: [B, self.npose]
-            uncert_token: optional uncertainty token with shape [B, C], used for uncertainty predictions
         """
         batch_size = x.shape[0]
         pred = self.proj(x)
-
-        # Use uncertainty token if provided, otherwise fall back to pose token
-        # This allows the uncertainty head to learn from a dedicated token
-        uncert_input = uncert_token if uncert_token is not None else x
-
-        shape_log_var = self.shape_uncertainty_proj(uncert_input)
-        shape_uncertainty = torch.exp(shape_log_var)
-
-        scale_log_var = self.scale_uncertainty_proj(uncert_input)
-        scale_uncertainty = torch.exp(scale_log_var)
-
-        pose_3dof_log_var = self.pose_3dof_uncertainty_proj(uncert_input)
-        if self.full_cov:
-            pose_3dof_uncertainty = pose_3dof_log_var
-        else:
-            pose_3dof_uncertainty = torch.exp(pose_3dof_log_var)
-
-        pose_1dof_log_var = self.pose_1dof_uncertainty_proj(uncert_input)
-        pose_1dof_uncertainty = torch.exp(pose_1dof_log_var)
-
-        pose_uncertainty = torch.cat(
-            [pose_3dof_uncertainty, pose_1dof_uncertainty], dim=1
-        )
 
         if init_estimate is not None:
             pred = pred + init_estimate
@@ -628,9 +723,31 @@ class MHRUncertaintyHead(MHRHead):
             "faces": self.faces.cpu().numpy(),
             "joint_global_rots": joint_global_rots,
             "mhr_model_params": mhr_model_params,
-            "shape_uncertainty": shape_uncertainty,
-            "scale_uncertainty": scale_uncertainty,
-            "pose_uncertainty": pose_uncertainty,
         }
+
+        if x_var is not None:
+            y = x_var
+
+            shape_log_var = self.shape_uncertainty_proj(y)
+            shape_uncertainty = torch.exp(shape_log_var)
+
+            scale_log_var = self.scale_uncertainty_proj(y)
+            scale_uncertainty = torch.exp(scale_log_var)
+
+            pose_3dof_log_var = self.pose_3dof_uncertainty_proj(y)
+            if self.full_cov:
+                pose_3dof_uncertainty = pose_3dof_log_var
+            else:
+                pose_3dof_uncertainty = torch.exp(pose_3dof_log_var)
+
+            pose_1dof_log_var = self.pose_1dof_uncertainty_proj(y)
+            pose_1dof_uncertainty = torch.exp(pose_1dof_log_var)
+
+            pose_uncertainty = torch.cat(
+                [pose_3dof_uncertainty, pose_1dof_uncertainty], dim=1
+            )
+            output["shape_uncertainty"] = shape_uncertainty
+            output["scale_uncertainty"] = scale_uncertainty
+            output["pose_uncertainty"] = pose_uncertainty
 
         return output

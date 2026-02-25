@@ -94,19 +94,52 @@ class Trainer(BaseLightningModule):
             self.model.load_state_dict(state_dict, strict=False)
 
             if self.cfg.TRAIN.FREEZE_BACKBONE:
+                # Freeze all parameters first
                 for param in self.model.parameters():
                     param.requires_grad = False
+            
+            # Unfreeze LoRA parameters if LoRA is enabled
+            use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
+            lora_param_count = 0
+            if use_lora and hasattr(self.model, "decoder") and hasattr(self.model.decoder, "lora_layers"):
+                if self.model.decoder.lora_layers is not None:
+                    for lora_layer in self.model.decoder.lora_layers:
+                        # LoRA parameters are injected into the base model by PEFT
+                        # They typically have names containing "lora_A" and "lora_B"
+                        for name, param in lora_layer.named_parameters():
+                            if "lora" in name.lower():
+                                param.requires_grad = True
+                                lora_param_count += param.numel()
                     
+            # Unfreeze uncertainty parameters
             for param in [
-                self.model.head_pose.shape_uncertainty_proj,
-                self.model.head_pose.scale_uncertainty_proj,
-                self.model.head_pose.pose_3dof_uncertainty_proj,
-                self.model.head_pose.pose_1dof_uncertainty_proj,
+                # self.model.head_pose.shape_uncertainty_proj,
+                # self.model.head_pose.scale_uncertainty_proj,
+                # self.model.head_pose.pose_3dof_uncertainty_proj,
+                # self.model.head_pose.pose_1dof_uncertainty_proj,
+                self.model.head_uncertainty,
             ]:
                 for p in param.parameters():
                     p.requires_grad = True
-            if self.model.use_uncertainty_token:
-                self.model.uncert_token.requires_grad = True
+            
+            # Count and print trainable vs frozen parameters
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            frozen_params = sum(p.numel() for p in self.model.parameters() if not p.requires_grad)
+            decoder_params = sum(p.numel() for p in self.model.decoder.parameters())
+            decoder_lora_params = sum(p.numel() for p in self.model.decoder.lora_layers.parameters())
+            total_params = trainable_params + frozen_params
+            
+            logger.info("=" * 60)
+            logger.info("Parameter Statistics:")
+            logger.info("=" * 60)
+            logger.info(f"Total parameters: {total_params:,}")
+            logger.info(f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
+            logger.info(f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.2f}%)")
+            logger.info(f"Decoder parameters: {decoder_params:,} ({100 * decoder_params / total_params:.2f}%)")
+            logger.info(f"Decoder LoRA parameters: {decoder_lora_params:,} ({100 * decoder_lora_params / total_params:.2f}%)")
+            if use_lora:
+                logger.info(f"LoRA trainable parameters: {lora_param_count:,}")
+            logger.info("=" * 60)
 
         self.scale_mean = self.model.head_pose.scale_mean.float()
         self.scale_comps = self.model.head_pose.scale_comps.float()

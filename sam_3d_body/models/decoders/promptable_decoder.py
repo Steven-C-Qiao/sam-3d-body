@@ -129,6 +129,7 @@ class PromptableDecoder(nn.Module):
         token_mask: Optional[torch.Tensor] = None,
         channel_first: bool = True,
         token_to_pose_output_fn=None,
+        token_to_uncertainty_output_fn=None,
         keypoint_token_update_fn=None,
         hand_embeddings=None,
         hand_augment=None,
@@ -180,8 +181,9 @@ class PromptableDecoder(nn.Module):
                 token_mask,
                 hand_embeddings,
                 hand_augment,
-                token_to_pose_output_fn,
+                token_to_uncertainty_output_fn,
                 keypoint_token_update_fn,
+                lora_path=True,
             )
             return orig_output, lora_output
         else:
@@ -197,12 +199,13 @@ class PromptableDecoder(nn.Module):
         token_mask: Optional[torch.Tensor],
         hand_embeddings: Optional[torch.Tensor],
         hand_augment: Optional[torch.Tensor],
-        token_to_pose_output_fn,
+        token_to_output_fn,
         keypoint_token_update_fn,
+        lora_path: bool = False,
     ):
         """Helper method to run forward through a set of layers."""
         if self.do_interm_preds:
-            assert token_to_pose_output_fn is not None
+            assert token_to_output_fn is not None
             all_pose_outputs = []
 
         for layer_idx, layer in enumerate(layers):
@@ -224,8 +227,11 @@ class PromptableDecoder(nn.Module):
                 )
                 image_embedding = image_embedding[:, : image_augment.shape[1]]
 
-            if self.do_interm_preds and layer_idx < len(layers) - 1:
-                curr_pose_output = token_to_pose_output_fn(
+            if lora_path:
+                pass
+
+            elif self.do_interm_preds and layer_idx < len(layers) - 1:
+                curr_pose_output = token_to_output_fn(
                     self.norm_final(token_embedding),
                     prev_pose_output=(
                         all_pose_outputs[-1] if len(all_pose_outputs) > 0 else None
@@ -242,8 +248,12 @@ class PromptableDecoder(nn.Module):
 
         out = self.norm_final(token_embedding)
 
+        if lora_path:
+            uncertainty_output = token_to_output_fn(out)
+            return uncertainty_output 
+
         if self.do_interm_preds:
-            curr_pose_output = token_to_pose_output_fn(
+            curr_pose_output = token_to_output_fn(
                 out,
                 prev_pose_output=(
                     all_pose_outputs[-1] if len(all_pose_outputs) > 0 else None

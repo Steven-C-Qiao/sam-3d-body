@@ -56,7 +56,6 @@ class SAM3DBody(BaseModel):
         self.sample_scale = self.cfg.MODEL.SAMPLE_SCALE
         self.sample_pose = self.cfg.MODEL.SAMPLE_POSE
         self.full_cov = self.cfg.MODEL.FULL_COV
-        self.use_uncertainty_token = self.cfg.MODEL.UNCERTAINTY_TOKEN
 
         # Create backbone feature extractor for human crops
         self.backbone = create_backbone(self.cfg.MODEL.BACKBONE.TYPE, self.cfg)
@@ -69,6 +68,8 @@ class SAM3DBody(BaseModel):
         self.head_pose.hand_pose_comps.data = (
             torch.eye(54).to(self.head_pose.hand_pose_comps.data).float()
         )
+
+        self.head_uncertainty = build_head(self.cfg, "uncertainty")
 
         # Initialize pose token with learnable params
         # Note: bias/initial value should be zero-pose in cont, not all-zeros
@@ -249,14 +250,6 @@ class SAM3DBody(BaseModel):
             add_identity=False,
         )
 
-        # Learnable uncertainty token for better uncertainty prediction (optional)
-        # This token attends to all other tokens and image features but is only used for uncertainty
-        if self.use_uncertainty_token:
-            self.uncert_token = nn.Parameter(
-                torch.zeros(1, 1, self.cfg.MODEL.DECODER.DIM)
-            )
-            nn.init.normal_(self.uncert_token, std=0.02)
-
     def _get_decoder_condition(self, batch: Dict) -> Optional[torch.Tensor]:
         num_person = batch["img"].shape[1]
 
@@ -352,17 +345,6 @@ class SAM3DBody(BaseModel):
 
         num_pose_token = token_embeddings.shape[1]
         assert num_pose_token == 1
-
-        # Optionally insert uncertainty token right after pose token (at index 1)
-        uncert_token_idx = None
-        if getattr(self, "use_uncertainty_token", False):
-            uncert_token_emb = self.uncert_token.expand(
-                batch_size, -1, -1
-            )  # B x 1 x D
-            token_embeddings = torch.cat(
-                [token_embeddings, uncert_token_emb], dim=1
-            )  # B x 2 x D (pose token + uncertainty token)
-            uncert_token_idx = 1  # Index of uncertainty token in the sequence
 
         image_augment, token_augment, token_mask = None, None, None
         if hasattr(self, "prompt_encoder") and keypoints is not None:
@@ -499,23 +481,17 @@ class SAM3DBody(BaseModel):
 
         # We're doing intermediate model predictions
         def token_to_pose_output_fn(tokens, prev_pose_output, layer_idx):
-            # Get the pose token (index 0) and (optionally) the uncertainty token
+            # Get the pose token (index 0)
             pose_token = tokens[:, 0]
-            uncert_token = (
-                tokens[:, uncert_token_idx]
-                if uncert_token_idx is not None
-                else None
-            )
 
             prev_pose = init_pose.view(batch_size, -1)
             prev_camera = init_camera.view(batch_size, -1)
 
-            # Get pose outputs, passing uncertainty token for uncertainty predictions
+            # Get pose outputs
             pose_output = self.head_pose(
                 pose_token,
                 prev_pose,
                 full_cov=self.full_cov,
-                uncert_token=uncert_token,
             )
             # Get Camera Translation
             if hasattr(self, "head_camera"):
@@ -530,6 +506,12 @@ class SAM3DBody(BaseModel):
             )
 
             return pose_output
+
+        def token_to_uncertainty_output_fn(tokens):
+            token = tokens[:, 0]
+            uncertainty_output = self.head_uncertainty(token)
+            return uncertainty_output
+
 
         kp_token_update_fn = self.keypoint_token_update_fn
 
@@ -551,6 +533,7 @@ class SAM3DBody(BaseModel):
             image_augment,
             token_mask,
             token_to_pose_output_fn=token_to_pose_output_fn,
+            token_to_uncertainty_output_fn=token_to_uncertainty_output_fn,
             keypoint_token_update_fn=keypoint_token_update_fn_comb,
         )
 
@@ -570,15 +553,15 @@ class SAM3DBody(BaseModel):
                 pose_output_orig = None
             
             # Process LoRA output
-            if isinstance(lora_output, tuple) and len(lora_output) == 2:
-                tokens_output_lora, pose_output_lora = lora_output
-            else:
-                tokens_output_lora = lora_output
-                pose_output_lora = None
+            # if isinstance(lora_output, tuple) and len(lora_output) == 2:
+            #     tokens_output_lora, pose_output_lora = lora_output
+            # else:
+            #     tokens_output_lora = lora_output
+            #     pose_output_lora = None
             
             # Extract pose tokens
             pose_token_orig = tokens_output_orig[:, 0]
-            pose_token_lora = tokens_output_lora[:, 0]
+            # pose_token_lora = tokens_output_lora[:, 0]
             
             # Return both outputs
             if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
@@ -587,13 +570,11 @@ class SAM3DBody(BaseModel):
                         tokens_output_orig[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
                         pose_output_orig,
                     ),
-                    (
-                        tokens_output_lora[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
-                        pose_output_lora,
-                    ),
+                    lora_output,
                 )
             else:
-                return (pose_token_orig, pose_output_orig), (pose_token_lora, pose_output_lora)
+                # return (pose_token_orig, pose_output_orig), (pose_token_lora, pose_output_lora)
+                return(pose_token_orig, pose_output_orig), lora_output # which is the uncertainty 
         else:
             # LoRA is disabled: original behavior
             if isinstance(decoder_output, tuple):
@@ -832,9 +813,8 @@ class SAM3DBody(BaseModel):
             use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
             if use_lora and isinstance(decoder_result, tuple) and len(decoder_result) == 2:
                 # LoRA enabled: (orig_output, lora_output)
-                (tokens_output, pose_output), (tokens_output_lora, pose_output_lora) = decoder_result
+                (tokens_output, pose_output), lora_output = decoder_result
                 pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
-                pose_output_lora = pose_output_lora[-1] if isinstance(pose_output_lora, list) else pose_output_lora
             else:
                 # LoRA disabled: original behavior
                 tokens_output, pose_output = decoder_result
@@ -845,8 +825,8 @@ class SAM3DBody(BaseModel):
             "condition_info": condition_info,
             "image_embeddings": image_embeddings,
         }
-        if pose_output_lora is not None:
-            output["mhr_lora"] = pose_output_lora  # LoRA prediction output
+        if lora_output is not None:
+            output["lora_output"] = lora_output  # LoRA prediction output
         return output
     # fmt: on
 
@@ -877,6 +857,7 @@ class SAM3DBody(BaseModel):
 
             samples_dict = gen_samples(
                 output_mhr,
+                outputs["lora_output"],
                 num_samples,
                 sample_pose=self.sample_pose,
                 full_cov=self.full_cov,
