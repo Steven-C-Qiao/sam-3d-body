@@ -798,7 +798,6 @@ class SAM3DBody(BaseModel):
 
         # Forward promptable decoder to get updated pose tokens and regression output
         pose_output, pose_output_hand = None, None
-        pose_output_lora = None
         if len(self.body_batch_idx):
             decoder_result = self.forward_decoder(
                 image_embeddings[self.body_batch_idx],

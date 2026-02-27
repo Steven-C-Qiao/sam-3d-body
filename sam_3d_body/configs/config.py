@@ -97,7 +97,7 @@ _C.MODEL.DECODER.USE_LORA = True
 _C.MODEL.DECODER.LORA_R = 16
 _C.MODEL.DECODER.LORA_ALPHA = 32
 _C.MODEL.DECODER.LORA_DROPOUT = 0.0
-_C.MODEL.DECODER.LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "proj", "layers.1"]
+_C.MODEL.DECODER.LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "proj", "layers.1", "ffn.layers.0.0"]
 
 _C.MODEL.PROMPT_ENCODER = CfgNode()
 _C.MODEL.PROMPT_ENCODER.ENABLE = True

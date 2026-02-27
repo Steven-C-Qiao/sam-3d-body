@@ -62,7 +62,7 @@ def _build_tril(x):
     L[:, 2, 1] = torch.sigmoid(x[:, 4]) - 0.5
     L[:, 2, 2] = F.softplus(x[:, 5]) + eps
 
-    return L #* 0.1
+    return L * 0.1
 
 
 def _sample_full_covariance(x, cholesky_flat, num_samples=4):
