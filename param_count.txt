@@ -1,0 +1,26 @@
+
+2026-02-25 15:16:08.901 | INFO     | sam_3d_body.trainer:__init__:208 - ============================================================
+2026-02-25 15:16:08.901 | INFO     | sam_3d_body.trainer:__init__:209 - Parameter Statistics:
+2026-02-25 15:16:08.901 | INFO     | sam_3d_body.trainer:__init__:210 - ============================================================
+2026-02-25 15:16:08.901 | INFO     | sam_3d_body.trainer:__init__:211 - Total parameters: 1,390,238,146
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:212 - Trainable parameters: 12,968,871 (0.93%)
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:213 - Frozen parameters: 1,377,269,275 (99.07%)
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:214 - 
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:215 - Key Components Breakdown:
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:216 - ------------------------------------------------------------
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:217 - Backbone:               840,633,600 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:218 - Decoder (original):      79,505,408 total,         614,400 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:220 - Decoder (LoRA):          40,058,880 total,         614,400 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:222 - Decoder (hand):          79,505,408 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:223 - Head (pose):            185,883,595 total,      12,353,447 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:224 - Head (camera):             1,052,675 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:226 - Head (pose hand):       185,883,595 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:228 - Head (camera hand):       1,052,675 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:230 - Prompt encoder:             493,324 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:232 - Prompt to token:          1,311,744 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:234 - Init/prev layers:         2,148,352 total,               0 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:236 - Embeddings:                 288,788 total,           1,024 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:238 - Uncertainty layers:      12,354,471 total,      12,354,471 trainable
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:240 - 
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:241 - LoRA trainable parameters: 614,400
+2026-02-25 15:16:08.902 | INFO     | sam_3d_body.trainer:__init__:242 - ============================================================

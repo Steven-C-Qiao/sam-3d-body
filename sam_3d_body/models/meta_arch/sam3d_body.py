@@ -8,17 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sam_3d_body.models.sampling import gen_samples
-from sam_3d_body.data.utils.prepare_batch import prepare_batch
 from sam_3d_body.models.decoders.prompt_encoder import PositionEmbeddingRandom
 from sam_3d_body.models.modules.mhr_utils import (
     fix_wrist_euler,
     rotation_angle_difference,
-    compact_cont_to_model_params_body,
-    mhr_param_hand_mask,
-    NUM_BODY_3DOF_JOINTS,
-    BODY_1DOF_ROT_IDXS,
-    NUM_BODY_1DOF_ANGLES,
 )
 from sam_3d_body.utils import recursive_to
 from sam_3d_body.utils.logging import get_pylogger
@@ -29,19 +22,12 @@ from ..heads import build_head
 from ..modules.camera_embed import CameraEncoder
 from ..modules.transformer import FFN, MLP
 from ..modules import rot6d_to_rotmat
-from ..modules.geometry_utils import rotmat_to_rot6d
 
 from .base_model import BaseModel
 
-from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
-
+from sam_3d_body.models.sampling import gen_samples
 
 logger = get_pylogger(__name__)
-
-# Number of 3-DoF body joints used in the compact body pose representation.
-# (Defined once in `mhr_utils` and imported here.)
-NUM_BODY_3DOF_CONT_DIMS = NUM_BODY_3DOF_JOINTS * 6  # each joint as 6D rotation
-
 
 # fmt: off
 PROMPT_KEYPOINTS = {  # keypoint_idx: prompt_idx
@@ -66,15 +52,10 @@ class SAM3DBody(BaseModel):
             "image_std", torch.tensor(self.cfg.MODEL.IMAGE_STD).view(-1, 1, 1), False
         )
 
-        # Sampling options (can be toggled in config; default to True if absent)
-        self.sample_shape = getattr(self.cfg.MODEL, "SAMPLE_SHAPE", True)
-        self.sample_scale = getattr(self.cfg.MODEL, "SAMPLE_SCALE", True)
-        self.sample_pose = getattr(self.cfg.MODEL, "SAMPLE_POSE", True)
-        self.full_cov = getattr(self.cfg.MODEL, "FULL_COV", True)
-        # Whether to use a dedicated uncertainty token in the decoder
-        self.use_uncertainty_token = getattr(
-            self.cfg.MODEL, "UNCERTAINTY_TOKEN", False
-        )
+        self.sample_shape = self.cfg.MODEL.SAMPLE_SHAPE
+        self.sample_scale = self.cfg.MODEL.SAMPLE_SCALE
+        self.sample_pose = self.cfg.MODEL.SAMPLE_POSE
+        self.full_cov = self.cfg.MODEL.FULL_COV
 
         # Create backbone feature extractor for human crops
         self.backbone = create_backbone(self.cfg.MODEL.BACKBONE.TYPE, self.cfg)
@@ -87,6 +68,8 @@ class SAM3DBody(BaseModel):
         self.head_pose.hand_pose_comps.data = (
             torch.eye(54).to(self.head_pose.hand_pose_comps.data).float()
         )
+
+        self.head_uncertainty = build_head(self.cfg, "uncertainty")
 
         # Initialize pose token with learnable params
         # Note: bias/initial value should be zero-pose in cont, not all-zeros
@@ -267,14 +250,6 @@ class SAM3DBody(BaseModel):
             add_identity=False,
         )
 
-        # Learnable uncertainty token for better uncertainty prediction (optional)
-        # This token attends to all other tokens and image features but is only used for uncertainty
-        if self.use_uncertainty_token:
-            self.uncert_token = nn.Parameter(
-                torch.zeros(1, 1, self.cfg.MODEL.DECODER.DIM)
-            )
-            nn.init.normal_(self.uncert_token, std=0.02)
-
     def _get_decoder_condition(self, batch: Dict) -> Optional[torch.Tensor]:
         num_person = batch["img"].shape[1]
 
@@ -370,17 +345,6 @@ class SAM3DBody(BaseModel):
 
         num_pose_token = token_embeddings.shape[1]
         assert num_pose_token == 1
-
-        # Optionally insert uncertainty token right after pose token (at index 1)
-        uncert_token_idx = None
-        if getattr(self, "use_uncertainty_token", False):
-            uncert_token_emb = self.uncert_token.expand(
-                batch_size, -1, -1
-            )  # B x 1 x D
-            token_embeddings = torch.cat(
-                [token_embeddings, uncert_token_emb], dim=1
-            )  # B x 2 x D (pose token + uncertainty token)
-            uncert_token_idx = 1  # Index of uncertainty token in the sequence
 
         image_augment, token_augment, token_mask = None, None, None
         if hasattr(self, "prompt_encoder") and keypoints is not None:
@@ -517,23 +481,17 @@ class SAM3DBody(BaseModel):
 
         # We're doing intermediate model predictions
         def token_to_pose_output_fn(tokens, prev_pose_output, layer_idx):
-            # Get the pose token (index 0) and (optionally) the uncertainty token
+            # Get the pose token (index 0)
             pose_token = tokens[:, 0]
-            uncert_token = (
-                tokens[:, uncert_token_idx]
-                if uncert_token_idx is not None
-                else None
-            )
 
             prev_pose = init_pose.view(batch_size, -1)
             prev_camera = init_camera.view(batch_size, -1)
 
-            # Get pose outputs, passing uncertainty token for uncertainty predictions
+            # Get pose outputs
             pose_output = self.head_pose(
                 pose_token,
                 prev_pose,
                 full_cov=self.full_cov,
-                uncert_token=uncert_token,
             )
             # Get Camera Translation
             if hasattr(self, "head_camera"):
@@ -549,6 +507,12 @@ class SAM3DBody(BaseModel):
 
             return pose_output
 
+        def token_to_uncertainty_output_fn(tokens):
+            token = tokens[:, 0]
+            uncertainty_output = self.head_uncertainty(token)
+            return uncertainty_output
+
+
         kp_token_update_fn = self.keypoint_token_update_fn
 
         # Now for 3D
@@ -562,26 +526,73 @@ class SAM3DBody(BaseModel):
                 args = kp3d_token_update_fn(kps3d_emb_start_idx, *args)
             return args
 
-        tokens_output, pose_output = self.decoder(
+        decoder_output = self.decoder(
             token_embeddings,
             image_embeddings,
             token_augment,
             image_augment,
             token_mask,
             token_to_pose_output_fn=token_to_pose_output_fn,
+            token_to_uncertainty_output_fn=token_to_uncertainty_output_fn,
             keypoint_token_update_fn=keypoint_token_update_fn_comb,
         )
 
-        # Extract pose token (index 0) from final tokens
-        pose_token = tokens_output[:, 0]
-
-        if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
-            return (
-                tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
-                pose_output,
-            )
+        # Handle dual outputs when LoRA is enabled
+        use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
+        if use_lora:
+            assert isinstance(decoder_output, tuple) and len(decoder_output) == 2
+            # LoRA is enabled: decoder returns (orig_output, lora_output)
+            orig_output, lora_output = decoder_output
+            
+            # Process original output
+            # orig_output can be: tokens_output OR (tokens_output, all_pose_outputs) when do_interm_preds
+            if isinstance(orig_output, tuple) and len(orig_output) == 2:
+                tokens_output_orig, pose_output_orig = orig_output
+            else:
+                tokens_output_orig = orig_output
+                pose_output_orig = None
+            
+            # Process LoRA output
+            # if isinstance(lora_output, tuple) and len(lora_output) == 2:
+            #     tokens_output_lora, pose_output_lora = lora_output
+            # else:
+            #     tokens_output_lora = lora_output
+            #     pose_output_lora = None
+            
+            # Extract pose tokens
+            pose_token_orig = tokens_output_orig[:, 0]
+            # pose_token_lora = tokens_output_lora[:, 0]
+            
+            # Return both outputs
+            if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
+                return (
+                    (
+                        tokens_output_orig[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+                        pose_output_orig,
+                    ),
+                    lora_output,
+                )
+            else:
+                # return (pose_token_orig, pose_output_orig), (pose_token_lora, pose_output_lora)
+                return(pose_token_orig, pose_output_orig), lora_output # which is the uncertainty 
         else:
-            return pose_token, pose_output
+            # LoRA is disabled: original behavior
+            if isinstance(decoder_output, tuple):
+                tokens_output, pose_output = decoder_output
+            else:
+                tokens_output = decoder_output
+                pose_output = None
+            
+            # Extract pose token (index 0) from final tokens
+            pose_token = tokens_output[:, 0]
+
+            if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
+                return (
+                    tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+                    pose_output,
+                )
+            else:
+                return pose_token, pose_output
 
     @torch.no_grad()
     def _get_keypoint_prompt(self, batch, pred_keypoints_2d, force_dummy=False):
@@ -769,13 +780,13 @@ class SAM3DBody(BaseModel):
 
 
         # Mask condition if available
-        if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_EMBED_TYPE", None) is not None:
-            # v1: non-iterative mask conditioning
-            if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_PROMPT", "v1") == "v1":
-                mask_embeddings = self._get_mask_prompt(batch, image_embeddings)
-                image_embeddings = image_embeddings + mask_embeddings
-            else:
-                raise NotImplementedError
+        # if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_EMBED_TYPE", None) is not None:
+        #     # v1: non-iterative mask conditioning
+        #     if self.cfg.MODEL.PROMPT_ENCODER.get("MASK_PROMPT", "v1") == "v1":
+        #         mask_embeddings = self._get_mask_prompt(batch, image_embeddings)
+        #         image_embeddings = image_embeddings + mask_embeddings
+        #     else:
+        #         raise NotImplementedError
 
 
         # Prepare input for promptable decoder
@@ -788,7 +799,7 @@ class SAM3DBody(BaseModel):
         # Forward promptable decoder to get updated pose tokens and regression output
         pose_output, pose_output_hand = None, None
         if len(self.body_batch_idx):
-            tokens_output, pose_output = self.forward_decoder(
+            decoder_result = self.forward_decoder(
                 image_embeddings[self.body_batch_idx],
                 init_estimate=None,
                 keypoints=keypoints_prompt[self.body_batch_idx],
@@ -796,13 +807,25 @@ class SAM3DBody(BaseModel):
                 condition_info=condition_info[self.body_batch_idx],
                 batch=batch,
             )
-            pose_output = pose_output[-1]
+            
+            # Handle dual outputs when LoRA is enabled
+            use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
+            if use_lora and isinstance(decoder_result, tuple) and len(decoder_result) == 2:
+                # LoRA enabled: (orig_output, lora_output)
+                (tokens_output, pose_output), lora_output = decoder_result
+                pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
+            else:
+                # LoRA disabled: original behavior
+                tokens_output, pose_output = decoder_result
+                pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
 
         output = {
             "mhr": pose_output,  # mhr prediction output
             "condition_info": condition_info,
             "image_embeddings": image_embeddings,
         }
+        if lora_output is not None:
+            output["lora_output"] = lora_output  # LoRA prediction output
         return output
     # fmt: on
 
@@ -823,8 +846,6 @@ class SAM3DBody(BaseModel):
         if num_samples > 0:
             output_mhr = outputs["mhr"]
 
-            
-
             global_rot_6d_mean = output_mhr["pred_pose_raw"][:, :6]
             global_rot_mat_mean = rot6d_to_rotmat(global_rot_6d_mean)
             global_rot_euler_mean = roma.rotmat_to_euler("ZYX", global_rot_mat_mean)
@@ -833,15 +854,20 @@ class SAM3DBody(BaseModel):
             )
             global_trans = torch.zeros_like(global_rot_euler_mean)
 
-            shape_samples, scale_samples, pose_samples = gen_samples(
+            samples_dict = gen_samples(
                 output_mhr,
+                outputs["lora_output"],
                 num_samples,
                 sample_pose=self.sample_pose,
                 full_cov=self.full_cov,
+                scale_bias=self.head_pose.scale_mean.float(),
+                scale_comps=self.head_pose.scale_comps.float(),
             )
-            shape_samples = shape_samples.view(-1, shape_samples.shape[-1])
-            scale_samples = scale_samples.view(-1, scale_samples.shape[-1])
-            pose_samples = pose_samples.view(-1, pose_samples.shape[-1])
+            shape_samples = samples_dict["shape_samples"].view(-1, samples_dict["shape_samples"].shape[-1])
+            scale_samples = samples_dict["scale_samples"].view(-1, samples_dict["scale_samples"].shape[-1])
+            pose_samples = samples_dict["pose_samples"].view(-1, samples_dict["pose_samples"].shape[-1])
+            dist_3dof = samples_dict["dist_3dof"]
+            outputs["dist_3dof"] = dist_3dof
 
             mhr_output = self.head_pose.mhr_forward(
                 scale_params=torch.zeros_like(scale_samples),
@@ -872,9 +898,9 @@ class SAM3DBody(BaseModel):
                 dense_kp3d = verts[:, self.mhr_dense_kp_indices]
                 j3d = torch.cat([j3d, dense_kp3d], dim=1)
 
-            outputs["mhr_samples"] = verts.view(B, num_samples, -1, 3)
-            outputs["mhr_samples_keypoints_3d"] = j3d.view(B, num_samples, -1, 3)
-            outputs["mhr_samples_joints_3d"] = jcoords.view(B, num_samples, -1, 3)
+            outputs["verts_samples"] = verts.view(B, num_samples, -1, 3)
+            outputs["kp3d_samples"] = j3d.view(B, num_samples, -1, 3)
+            outputs["j3d_samples"] = jcoords.view(B, num_samples, -1, 3)
 
             j3d_flat = j3d.view(B * num_samples, -1, 3)
             jcoords_flat = jcoords.view(B * num_samples, -1, 3)
@@ -901,7 +927,7 @@ class SAM3DBody(BaseModel):
             cam_int_expanded = cam_int_flat.repeat_interleave(num_samples, dim=0)
 
             # Project to 2D (full image coordinates)
-            cam_out_samples = self.head_camera.perspective_projection(
+            kp2d_samples = self.head_camera.perspective_projection(
                 j3d_flat,
                 pred_cam_expanded,
                 bbox_center_expanded,
@@ -911,71 +937,32 @@ class SAM3DBody(BaseModel):
                 use_intrin_center=self.cfg.MODEL.DECODER.get(
                     "USE_INTRIN_CENTER", False
                 ),
-            )
-            mhr_sample_keypoints_2d_full = cam_out_samples["pred_keypoints_2d"]
-            mhr_sample_keypoints_2d = mhr_sample_keypoints_2d_full.view(
-                B, num_samples, -1, 2
-            )
-            outputs["mhr_samples_keypoints_2d"] = mhr_sample_keypoints_2d
+            )["pred_keypoints_2d"]
+            outputs["kp2d_samples"] = kp2d_samples.view(B, num_samples, -1, 2)
 
-
-            # Convert from full image coordinates to cropped pixel space
-            # Add homogeneous coordinate for affine transformation
-            mhr_sample_keypoints_2d_h = torch.cat(
+            kp2d_samples_h = torch.cat(
                 [
-                    mhr_sample_keypoints_2d_full,
-                    torch.ones_like(mhr_sample_keypoints_2d_full[..., :1]),
+                    kp2d_samples,
+                    torch.ones_like(kp2d_samples[..., :1]),
                 ],
                 dim=-1,
             )  # [B * num_samples, N, 3]
 
-            # Get affine transformation for samples
-            # affine_trans shape: [B*N, 2, 3] (from _flatten_person)
-            affine_trans_flat = self._flatten_person(batch["affine_trans"])[
+            affine = self._flatten_person(batch["affine_trans"])[
                 self.body_batch_idx
-            ]
-            affine_trans_expanded = (
-                affine_trans_flat.unsqueeze(1)
-                .expand(-1, num_samples, -1, -1)
-                .float()
-                .contiguous()
-            )
-            affine_trans_flat_samples = affine_trans_expanded.view(
-                B * num_samples, 2, 3
-            )
+            ].repeat_interleave(num_samples, dim=0).float()
+            img_size = self._flatten_person(batch["img_size"])[
+                self.body_batch_idx
+            ].repeat_interleave(num_samples, dim=0).unsqueeze(1)
 
-            # Apply affine transformation to convert to cropped pixel space
-            # [B * num_samples, N, 3] @ [B * num_samples, 3, 2] = [B * num_samples, N, 2]
-            mhr_sample_keypoints_2d_crop = (
-                mhr_sample_keypoints_2d_h @ affine_trans_flat_samples.mT
-            )
-            mhr_sample_keypoints_2d_crop = mhr_sample_keypoints_2d_crop[..., :2]
-
-            # Normalize to [-0.5, 0.5] to match pred_keypoints_2d_cropped coordinate space
-            # Get img_size for samples: [B * num_samples, 1, 2]
-            img_size_flat = self._flatten_person(batch["img_size"])[self.body_batch_idx]
-            img_size_expanded = (
-                img_size_flat.unsqueeze(1)
-                .expand(-1, num_samples, -1)
-                .float()
-                .contiguous()
-            )
-            img_size_flat_samples = img_size_expanded.view(B * num_samples, 1, 2)
-            mhr_sample_keypoints_2d_crop = (
-                mhr_sample_keypoints_2d_crop / img_size_flat_samples - 0.5
-            )
-
-            # Reshape back to [B, num_samples, N, 2]
-            mhr_sample_keypoints_2d_cropped = mhr_sample_keypoints_2d_crop.view(
+            kp2d_samples_crop = kp2d_samples_h @ affine.mT
+            # kp2d_samples_crop = kp2d_samples_crop[..., :2]
+            kp2d_samples_crop = (kp2d_samples_crop / img_size - 0.5).view(
                 B, num_samples, -1, 2
             )
-            outputs["mhr_samples_keypoints_2d_cropped"] = (
-                mhr_sample_keypoints_2d_cropped
-            )
+            outputs["kp2d_samples_cropped"] = kp2d_samples_crop
 
-
-
-            cam_out_samples_joints_2d = self.head_camera.perspective_projection(
+            jcoords_samples = self.head_camera.perspective_projection(
                 jcoords_flat,
                 pred_cam_expanded,
                 bbox_center_expanded,
@@ -983,25 +970,23 @@ class SAM3DBody(BaseModel):
                 ori_img_size_expanded,
                 cam_int_expanded,
                 use_intrin_center=self.cfg.MODEL.DECODER.get(
-                    "USE_INTRIN_CENTER", False),
-            )
-            mhr_sample_joints_2d_full = cam_out_samples_joints_2d["pred_keypoints_2d"]
-            mhr_sample_joints_2d = mhr_sample_joints_2d_full.view(
-                B, num_samples, -1, 2
-            )
-            outputs["mhr_samples_joints_2d"] = mhr_sample_joints_2d
+                    "USE_INTRIN_CENTER", False
+                ),
+            )["pred_keypoints_2d"]
 
-            mhr_sample_joints_2d_h = torch.cat(
-                [mhr_sample_joints_2d_full, torch.ones_like(mhr_sample_joints_2d_full[..., :1])],
+            outputs["j2d_samples"] = jcoords_samples.view(B, num_samples, -1, 2)
+
+            jcoords_samples_h = torch.cat(
+                [jcoords_samples, torch.ones_like(jcoords_samples[..., :1])],
                 dim=-1,
             )
-            mhr_sample_joints_2d_crop = mhr_sample_joints_2d_h @ affine_trans_flat_samples.mT
-            mhr_sample_joints_2d_crop = mhr_sample_joints_2d_crop[..., :2]
-            mhr_sample_joints_2d_crop = mhr_sample_joints_2d_crop / img_size_flat_samples - 0.5
-            mhr_sample_joints_2d_cropped = mhr_sample_joints_2d_crop.view(
-                B, num_samples, -1, 2)
-            outputs["mhr_samples_joints_2d_cropped"] = mhr_sample_joints_2d_cropped
-            
+            jcoords_samples_crop = jcoords_samples_h @ affine.mT
+            # jcoords_samples_crop = jcoords_samples_crop[..., :2]
+            jcoords_samples_crop = jcoords_samples_crop / img_size - 0.5
+            outputs["j2d_samples_cropped"] = jcoords_samples_crop.view(
+                B, num_samples, -1, 2
+            )
+
         return outputs
 
     # fmt: off
@@ -1026,7 +1011,7 @@ class SAM3DBody(BaseModel):
                 dim=-1,
             )
 
-        tokens_output, pose_output = self.forward_decoder(
+        decoder_result = self.forward_decoder(
             image_embeddings,
             init_estimate=None,  # not recurring previous estimate
             keypoints=keypoint_prompt,
@@ -1034,9 +1019,21 @@ class SAM3DBody(BaseModel):
             condition_info=condition_info,
             batch=batch,
         )
-        pose_output = pose_output[-1]
-
-        output.update({"mhr": pose_output})
+        
+        # Handle dual outputs when LoRA is enabled
+        use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
+        if use_lora and isinstance(decoder_result, tuple) and len(decoder_result) == 2:
+            # LoRA enabled: (orig_output, lora_output)
+            (tokens_output, pose_output), (tokens_output_lora, pose_output_lora) = decoder_result
+            pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
+            pose_output_lora = pose_output_lora[-1] if isinstance(pose_output_lora, list) else pose_output_lora
+            output.update({"mhr": pose_output, "mhr_lora": pose_output_lora})
+        else:
+            # LoRA disabled: original behavior
+            tokens_output, pose_output = decoder_result
+            pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
+            output.update({"mhr": pose_output})
+        
         return output, keypoint_prompt
 
     def _get_hand_box(self, pose_output, batch):

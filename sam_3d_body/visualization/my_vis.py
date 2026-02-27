@@ -68,8 +68,8 @@ class Visualiser(pl.LightningModule):
     def visualise_full(self, predictions, batch):
         batch["keypoints_3d"][..., [1, 2]] *= -1
         predictions["mhr"]["pred_keypoints_3d"][..., [1, 2]] *= -1
-        predictions["mhr_samples_keypoints_3d"][..., [1, 2]] *= -1
-        predictions["mhr_samples"][..., [1, 2]] *= -1
+        predictions["kp3d_samples"][..., [1, 2]] *= -1
+        predictions["verts_samples"][..., [1, 2]] *= -1
         predictions["mhr"]["pred_vertices"][..., [1, 2]] *= -1
 
         self.visualise_keypoints_3d(predictions, batch)
@@ -93,7 +93,7 @@ class Visualiser(pl.LightningModule):
         # Extract keypoints from batch and predictions
         gt_keypoints_3d = batch["keypoints_3d"]
         pred_keypoints_3d = predictions["mhr"]["pred_keypoints_3d"]  # (B, 70, 3)
-        pred_keypoints_3d_samples = predictions.get("mhr_samples_keypoints_3d", None)
+        pred_keypoints_3d_samples = predictions.get("kp3d_samples", None)
 
         # Handle different input shapes
         if gt_keypoints_3d.ndim == 4:  # (B, N, 70, 3)
@@ -328,7 +328,7 @@ class Visualiser(pl.LightningModule):
         # Extract data for first batch item
         gt_verts = batch["vertices"][0]  # (18439, 3)
         pred_verts = predictions["mhr"]["pred_vertices"][0]  # (18439, 3)
-        pred_verts_samples = predictions["mhr_samples"][0]  # (num_samples, 18439, 3)
+        pred_verts_samples = predictions["verts_samples"][0]  # (num_samples, 18439, 3)
 
         # Convert to numpy if tensor
         if isinstance(gt_verts, torch.Tensor):
@@ -416,7 +416,7 @@ class Visualiser(pl.LightningModule):
         # Extract data for first batch item
         gt_verts = batch["vertices"][0]  # (18439, 3)
         pred_verts = predictions["mhr"]["pred_vertices"][0]  # (18439, 3)
-        pred_verts_samples = predictions["mhr_samples"][0]  # (num_samples, 18439, 3)
+        pred_verts_samples = predictions["verts_samples"][0]  # (num_samples, 18439, 3)
 
         faces = self.faces
 
@@ -640,7 +640,7 @@ class Visualiser(pl.LightningModule):
             predictions: Model predictions dictionary (already converted to numpy)
             batch: Input batch dictionary (already converted to numpy)
         """
-        if "mhr_samples_keypoints_2d" not in predictions:
+        if "kp2d_samples" not in predictions:
             logger.warning(
                 "No sample keypoints found in predictions. Skipping 2D keypoint visualization on full image."
             )
@@ -698,7 +698,7 @@ class Visualiser(pl.LightningModule):
             gt_kp2d_full = gt_kp2d_denormalized
 
         # Extract sample keypoints (already in full image coords)
-        sample_kp2d_full = predictions["mhr_samples_keypoints_2d"][
+        sample_kp2d_full = predictions["kp2d_samples"][
             batch_idx
         ]  # [num_samples, 70, 2]
         num_samples = sample_kp2d_full.shape[0]
@@ -770,7 +770,7 @@ class Visualiser(pl.LightningModule):
 
 
         sample_kp2d_cropped_normalized = predictions[
-            "mhr_samples_joints_2d_cropped"
+            "j2d_samples_cropped"
         ][
             batch_idx
         ]  # [num_samples, N, 2]
@@ -841,7 +841,7 @@ class Visualiser(pl.LightningModule):
             predictions: Model predictions dictionary (already converted to numpy)
             batch: Input batch dictionary (already converted to numpy)
         """
-        if "mhr_samples_keypoints_2d" not in predictions:
+        if "kp2d_samples" not in predictions:
             logger.warning(
                 "No sample keypoints found in predictions. Skipping 2D keypoint visualization."
             )
@@ -865,7 +865,7 @@ class Visualiser(pl.LightningModule):
 
 
         sample_kp2d_cropped_normalized = predictions[
-            "mhr_samples_keypoints_2d_cropped"
+            "kp2d_samples_cropped"
         ][
             batch_idx
         ]  # [num_samples, N, 2]

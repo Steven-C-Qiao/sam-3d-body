@@ -2,7 +2,7 @@
 
 from ..modules import to_2tuple
 from .camera_head import PerspectiveHead
-from .mhr_head import MHRHead, MHRUncertaintyHead
+from .mhr_head import MHRHead, UncertaintyHead # MHRUncertaintyHead
 
 
 def build_head(cfg, head_type="mhr", enable_hand_model=False, default_scale_factor=1.0):
@@ -14,7 +14,7 @@ def build_head(cfg, head_type="mhr", enable_hand_model=False, default_scale_fact
             mlp_channel_div_factor=cfg.MODEL.MHR_HEAD.get("MLP_CHANNEL_DIV_FACTOR", 1),
             enable_hand_model=enable_hand_model,
         )
-    elif head_type == "uncertainty":
+    elif head_type == "uncertainty_head":
         return MHRUncertaintyHead(
             input_dim=cfg.MODEL.DECODER.DIM,
             mlp_depth=cfg.MODEL.MHR_HEAD.get("MLP_DEPTH", 1),
@@ -23,6 +23,15 @@ def build_head(cfg, head_type="mhr", enable_hand_model=False, default_scale_fact
             enable_hand_model=enable_hand_model,
             full_cov=cfg.MODEL.get("FULL_COV", True),
         )
+    elif head_type == "uncertainty":
+        return UncertaintyHead(
+            input_dim=cfg.MODEL.DECODER.DIM,
+            mlp_depth=cfg.MODEL.MHR_HEAD.get("MLP_DEPTH", 1),
+            mhr_model_path=cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH,
+            mlp_channel_div_factor=cfg.MODEL.MHR_HEAD.get("MLP_CHANNEL_DIV_FACTOR", 1),
+            full_cov=cfg.MODEL.get("FULL_COV", True),
+        )
+        
     elif head_type == "perspective":
         return PerspectiveHead(
             input_dim=cfg.MODEL.DECODER.DIM,
