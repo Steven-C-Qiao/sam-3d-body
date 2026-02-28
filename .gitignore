@@ -2,6 +2,7 @@ exp/
 checkpoints/
 *.png
 tinker/data
+sam_3d_body/configs/paths.py
 
 # Python bytecode
 __pycache__/

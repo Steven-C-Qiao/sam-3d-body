@@ -573,7 +573,7 @@ class Trainer(BaseLightningModule):
             from sam_3d_body.data.ssp3d_dataset import MultiSSP3DDataset
             logger.info(f"SSP-3D dataset with num_view={num_view}")
             return MultiSSP3DDataset(
-                "/scratches/kyuban/cq244/datasets/SSP-3D/ssp_3d", num_view=num_view, cfg=self.cfg
+                "/scratch/cq244/datasets/SSP-3D/ssp_3d", num_view=num_view, cfg=self.cfg
             )
         elif self.cfg.DATASET.VAL_DS == "4d-dress":
             from sam_3d_body.data.d4dress_dataset import MultiD4DressDataset

@@ -16,6 +16,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
 import sys
+sys.path.append(".")
 
 from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults

@@ -67,8 +67,8 @@ class DatasetHMR(Dataset):
             .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
-        # self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility.npz")["visibility"]
-        self.visibility = np.ones((self.data["imgname"].shape[0], 1))
+        self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility.npz")["visibility"]
+        # self.visibility = np.ones((self.data["imgname"].shape[0], 1))
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
         self.scale = self.data["scale"].astype(np.float32)
@@ -187,13 +187,13 @@ class DatasetHMR(Dataset):
             print(E)
             logger.info(f"@{imgname}@ from {self.dataset}")
             cv_img = np.zeros((720, 1280, 3), dtype=np.uint8)
-        # masks = cv2.imread(maskname, 0)
+        masks = cv2.imread(maskname, 0)
         if "closeup" in self.dataset:
             cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
             masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
 
         item["img_ori"] = cv_img
-        # item["mask_ori"] = masks
+        item["mask_ori"] = masks
 
         img = self.rgb_processing(cv_img)
 
@@ -203,16 +203,15 @@ class DatasetHMR(Dataset):
             scale=(sc * scale).astype(np.float32),
             bbox_format="xyxy",
             # keypoints_2d=mhr_keypoints_2d,
-            # mask=masks,
+            mask=masks,
         )
         data_list = [self.transform(data_info)]
         data = default_collate(data_list)
 
         for key in data:
             item[key] = data[key]
-        # item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
-        # item["mask"] = None
-        # item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
+        item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
+        item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
     
         item["person_valid"] = torch.ones((1, 1))
         

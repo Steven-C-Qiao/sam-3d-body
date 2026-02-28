@@ -189,7 +189,7 @@ def gen_pose_samples(
         var_3dofs = var[:, :78]
         var_1dofs = var[:, 78:]
 
-        L = _build_tril(
+        L = build_tril(
             rearrange(var_3dofs, " b (j c) -> (b j) c", c=6)
         )
         body_aa_3dofs = rearrange(body_aa_3dofs, " b (j c) -> (b j) c", c=3)
