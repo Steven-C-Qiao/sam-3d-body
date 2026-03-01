@@ -67,7 +67,7 @@ class DatasetHMR(Dataset):
             .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
-        self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility.npz")["visibility"]
+        self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility_308.npz")["visibility"]
         # self.visibility = np.ones((self.data["imgname"].shape[0], 1))
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
@@ -183,13 +183,17 @@ class DatasetHMR(Dataset):
     
         try:
             cv_img = read_img(imgname)
+            if "closeup" in self.dataset:
+                cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
         except Exception as E:
             print(E)
             logger.info(f"@{imgname}@ from {self.dataset}")
-            cv_img = np.zeros((720, 1280, 3), dtype=np.uint8)
+            cv_img = np.zeros((1280, 720, 3), dtype=np.uint8)
+            if "closeup" in self.dataset:
+                cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
+
         masks = cv2.imread(maskname, 0)
         if "closeup" in self.dataset:
-            cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
             masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
 
         item["img_ori"] = cv_img
@@ -221,7 +225,7 @@ class DatasetHMR(Dataset):
         item["model_params"] = self.model_params[index]
         item["face_expr_coeffs"] = self.face_expr_params[index]
         item["scale_params"] = self.model_params[index, -68:]
-        item["visibility"] = self.visibility[index]
+        item["visibility"] = self.visibility[index, :70]
 
         item["cam_int"] = self.cam_int[index]
         item["focal_length"] = torch.tensor(

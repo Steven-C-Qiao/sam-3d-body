@@ -46,47 +46,51 @@ class Loss(pl.LightningModule):
         B, N = batch["img"].shape[:2]
 
         pred_mhr = predictions["mhr"]
-        lora_output = predictions["lora_output"]
-        shape_uncertainty = lora_output["shape_uncertainty"]
-        scale_uncertainty = lora_output["scale_uncertainty"]
-        pose_uncertainty = lora_output["pose_uncertainty"]
+        uncertainty_output = predictions["uncertainty_output"]
+        shape_uncertainty = uncertainty_output["shape_uncertainty"]
+        scale_uncertainty = uncertainty_output["scale_uncertainty"]
+        pose_uncertainty = uncertainty_output["pose_uncertainty"]
 
-        if self.cfg.LOSS.JOINTS_3D_WEIGHT > 0:
-            pred_joints_3d = predictions["j3d_samples"]
-            gt_joints_3d = batch["joints_3d"]
-            visibility = batch["visibility"]
-            visibility = visibility.unsqueeze(1).expand(-1, pred_joints_3d.shape[1], -1)
-            gt_joints_3d = gt_joints_3d.unsqueeze(1).expand(-1, pred_joints_3d.shape[1], -1, -1)
+        # if self.cfg.LOSS.JOINTS_3D_WEIGHT > 0:
+        #     pred_joints_3d = predictions["j3d_samples"]
+        #     gt_joints_3d = batch["joints_3d"]
+        #     visibility = batch["visibility"]
+        #     visibility = visibility.unsqueeze(1).expand(-1, pred_joints_3d.shape[1], -1)
+        #     gt_joints_3d = gt_joints_3d.unsqueeze(1).expand(-1, pred_joints_3d.shape[1], -1, -1)
 
-            joints_3d_loss = self.mse_loss(pred_joints_3d, gt_joints_3d)
-            joints_3d_loss = joints_3d_loss.mean(dim=-1)
-            joints_3d_loss = joints_3d_loss * visibility
-            joints_3d_loss = joints_3d_loss.mean()
-            loss_dict["loss_joints_3d"] = (self.cfg.LOSS.JOINTS_3D_WEIGHT * joints_3d_loss)
+        #     joints_3d_loss = self.mse_loss(pred_joints_3d, gt_joints_3d)
+        #     joints_3d_loss = joints_3d_loss.mean(dim=-1)
+        #     joints_3d_loss = joints_3d_loss * visibility
+        #     joints_3d_loss = joints_3d_loss.mean()
+        #     loss_dict["loss_joints_3d"] = (self.cfg.LOSS.JOINTS_3D_WEIGHT * joints_3d_loss)
 
-        if self.cfg.LOSS.JOINTS_2D_WEIGHT > 0:
-            pred_joints_2d = predictions["j2d_samples_cropped"]
-            gt_joints_2d = batch["joints_2d"]
-            visibility = batch["visibility"]
-            visibility = visibility.unsqueeze(1).expand(-1, pred_joints_2d.shape[1], -1)
-            gt_joints_2d = gt_joints_2d.unsqueeze(1).expand(-1, pred_joints_2d.shape[1], -1, -1)
-            joints_2d_loss = self.kp2d_loss(pred_joints_2d, gt_joints_2d)
-            joints_2d_loss = joints_2d_loss.mean(dim=-1)
-            joints_2d_loss = joints_2d_loss * visibility
-            joints_2d_loss = joints_2d_loss.mean()
-            loss_dict["loss_joints_2d"] = (self.cfg.LOSS.JOINTS_2D_WEIGHT * joints_2d_loss)
+        # if self.cfg.LOSS.JOINTS_2D_WEIGHT > 0:
+        #     pred_joints_2d = predictions["j2d_samples_cropped"]
+        #     gt_joints_2d = batch["joints_2d"]
+        #     visibility = batch["visibility"]
+        #     visibility = visibility.unsqueeze(1).expand(-1, pred_joints_2d.shape[1], -1)
+        #     gt_joints_2d = gt_joints_2d.unsqueeze(1).expand(-1, pred_joints_2d.shape[1], -1, -1)
+        #     joints_2d_loss = self.kp2d_loss(pred_joints_2d, gt_joints_2d)
+        #     joints_2d_loss = joints_2d_loss.mean(dim=-1)
+        #     joints_2d_loss = joints_2d_loss * visibility
+        #     joints_2d_loss = joints_2d_loss.mean()
+        #     loss_dict["loss_joints_2d"] = (self.cfg.LOSS.JOINTS_2D_WEIGHT * joints_2d_loss)
 
 
         if self.cfg.LOSS.KP2D_WEIGHT > 0:
             pred_kp2d_samples = predictions["kp2d_samples_cropped"]
             num_samples = pred_kp2d_samples.shape[1]
+            
+            visibility = batch["visibility"]
+            visibility = visibility.unsqueeze(1).expand(-1, num_samples, -1)
 
             gt_kp2d = batch["keypoints_2d"]
             gt_kp2d = gt_kp2d.unsqueeze(1).expand(-1, num_samples, -1, -1)
 
             kp2d_loss = self.kp2d_loss(pred_kp2d_samples, gt_kp2d)
             kp2d_loss = kp2d_loss.mean(dim=-1)
-            kp2d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
+            kp2d_loss = kp2d_loss * visibility
+            # kp2d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
 
             loss_kp2d_samples = kp2d_loss.mean()
 
@@ -107,8 +111,9 @@ class Loss(pl.LightningModule):
 
             kp3d_loss = self.mse_loss(pred_kp3d_samples, gt_kp3d)
             kp3d_loss = kp3d_loss.mean(dim=-1)
+            kp3d_loss = kp3d_loss * visibility
+            # kp3d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
 
-            kp3d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
 
             loss_kp3d_samples = kp3d_loss.mean()
             loss_dict["loss_kp3d_samples"] = (

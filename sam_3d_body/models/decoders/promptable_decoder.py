@@ -102,23 +102,12 @@ class PromptableDecoder(nn.Module):
         self.frozen = frozen
         self._freeze_stages()
 
-        # Store LoRA config for later application
-        # We apply LoRA after initialization to avoid issues with PEFT wrapping
         self._use_lora = use_lora
         self._lora_r = lora_r
         self._lora_alpha = lora_alpha
         self._lora_dropout = lora_dropout
         self._lora_target_modules = lora_target_modules
-        
-        # Create separate LoRA layers if enabled (keeping original layers frozen)
-        self.lora_layers = None
-        if use_lora:
-            if not PEFT_AVAILABLE:
-                raise ImportError(
-                    "PEFT library is required for LoRA support. "
-                    "Please install it with: pip install peft"
-                )
-            self._create_lora_layers()
+        self._create_lora_layers()
 
     def forward(
         self,
@@ -156,7 +145,7 @@ class PromptableDecoder(nn.Module):
                     assert len(hand_augment.shape) == 3
                     hand_augment = hand_augment.repeat(len(hand_embeddings), 1, 1)
 
-        # Run original frozen decoder
+
         orig_output = self._forward_path(
             self.layers,
             token_embedding,
@@ -168,10 +157,9 @@ class PromptableDecoder(nn.Module):
             hand_augment,
             token_to_pose_output_fn,
             keypoint_token_update_fn,
+            token_to_uncertainty_output_fn,
         )
-
-        # Run LoRA path if enabled
-        if self._use_lora and self.lora_layers is not None:
+        if self._use_lora:
             lora_output = self._forward_path(
                 self.lora_layers,
                 token_embedding,
@@ -181,13 +169,15 @@ class PromptableDecoder(nn.Module):
                 token_mask,
                 hand_embeddings,
                 hand_augment,
-                token_to_uncertainty_output_fn,
+                token_to_pose_output_fn,
                 keypoint_token_update_fn,
+                token_to_uncertainty_output_fn,
                 lora_path=True,
             )
-            return orig_output, lora_output
-        else:
-            return orig_output
+            # Update the original uncertainty with LoRA
+            orig_output.update(lora_output)
+        return orig_output
+
 
     def _forward_path(
         self,
@@ -201,12 +191,16 @@ class PromptableDecoder(nn.Module):
         hand_augment: Optional[torch.Tensor],
         token_to_output_fn,
         keypoint_token_update_fn,
+        token_to_uncertainty_output_fn,
         lora_path: bool = False,
     ):
         """Helper method to run forward through a set of layers."""
         if self.do_interm_preds:
             assert token_to_output_fn is not None
             all_pose_outputs = []
+
+
+        ret = {}
 
         for layer_idx, layer in enumerate(layers):
             if hand_embeddings is None:
@@ -227,10 +221,7 @@ class PromptableDecoder(nn.Module):
                 )
                 image_embedding = image_embedding[:, : image_augment.shape[1]]
 
-            if lora_path:
-                pass
-
-            elif self.do_interm_preds and layer_idx < len(layers) - 1:
+            if self.do_interm_preds and layer_idx < len(layers) - 1:
                 curr_pose_output = token_to_output_fn(
                     self.norm_final(token_embedding),
                     prev_pose_output=(
@@ -248,9 +239,13 @@ class PromptableDecoder(nn.Module):
 
         out = self.norm_final(token_embedding)
 
+        uncertainty_output = token_to_uncertainty_output_fn(out)
+        
         if lora_path:
-            uncertainty_output = token_to_output_fn(out)
-            return uncertainty_output 
+            ret["uncertainty_output"] = uncertainty_output
+            return ret
+        
+        ret["out"] = out
 
         if self.do_interm_preds:
             curr_pose_output = token_to_output_fn(
@@ -261,9 +256,12 @@ class PromptableDecoder(nn.Module):
                 layer_idx=layer_idx,
             )
             all_pose_outputs.append(curr_pose_output)
-            return out, all_pose_outputs
-        else:
-            return out
+            # return out, all_pose_outputs
+            
+            ret["all_pose_outputs"] = all_pose_outputs
+            ret["uncertainty_output"] = uncertainty_output
+        return ret
+
 
     def _freeze_stages(self):
         """Freeze parameters."""
@@ -276,16 +274,8 @@ class PromptableDecoder(nn.Module):
 
     def _create_lora_layers(self):
         """Create separate LoRA-wrapped layers while keeping original layers frozen."""
-        if self._lora_target_modules is None:
-            # Default target modules for transformer decoder
-            # These will match Linear layers in attention and FFN modules
-            # PEFT matches by module name, so we need to match the actual names
-            # in the TransformerDecoderLayer structure
-            target_modules = ["q_proj", "k_proj", "v_proj", "proj"]
-        else:
-            target_modules = self._lora_target_modules
+        target_modules = self._lora_target_modules
 
-        # Create LoRA config
         lora_config = LoraConfig(
             r=self._lora_r,
             lora_alpha=self._lora_alpha,

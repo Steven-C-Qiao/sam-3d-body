@@ -1,6 +1,6 @@
 import os 
 from yacs.config import CfgNode 
-from paths import DATA_PATH as PATH
+from sam_3d_body.configs.paths import DATA_PATH as PATH
 
 INDICES_PATH = "/scratches/juban/cq244/sam-3d-body/tinker/mhr_kp_sample_128.npy"
 
@@ -11,7 +11,7 @@ _C.TRAIN.MODEL_TYPE = "full"  # Options: "full" (SAM3DBody) or "toy" (ToyModel)
 _C.TRAIN.USE_FP16 = True
 _C.TRAIN.FP16_TYPE = "high"
 _C.TRAIN.LR = 2e-5
-_C.TRAIN.NUM_EPOCHS = 3
+_C.TRAIN.NUM_EPOCHS = 5
 _C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 _C.TRAIN.FREEZE_BACKBONE = True
 
@@ -19,9 +19,9 @@ _C.TRAIN.FREEZE_BACKBONE = True
 _C.LOSS = CfgNode()
 _C.LOSS.SHAPE_PARAM_WEIGHT = 1.0
 _C.LOSS.SCALE_PARAM_WEIGHT = 1.0
-_C.LOSS.POSE_PARAM_WEIGHT = 1.0
-_C.LOSS.KP2D_WEIGHT = 0.0
-_C.LOSS.KP3D_WEIGHT = 0.0
+_C.LOSS.POSE_PARAM_WEIGHT = 0.0
+_C.LOSS.KP2D_WEIGHT = 1.0
+_C.LOSS.KP3D_WEIGHT = 1.0
 _C.LOSS.JOINTS_3D_WEIGHT = 0.0
 _C.LOSS.JOINTS_2D_WEIGHT = 0.0
 
@@ -39,10 +39,10 @@ _C.DATASET.SHUFFLE_TRAIN = True
 _C.DATASET.TRAIN_DS = 'all'
 _C.DATASET.VAL_DS = 'static-hdri-bmi_orbit-archviz-15'
 _C.DATASET.MESH_COLOR = 'pinkish'
-_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
+_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
 _C.DATASET.CROP_PERCENT = 0.8
 _C.DATASET.ALB = True
-_C.DATASET.ALB_PROB = 0.3
+_C.DATASET.ALB_PROB = 0.5
 _C.DATASET.proj_verts = False
 _C.DATASET.FOCAL_LENGTH = 5000
 
@@ -60,7 +60,7 @@ _C.MODEL.ENABLE_HAND = True
 _C.MODEL.DENSE_KEYPOINTS = False 
 _C.MODEL.SAMPLE_SHAPE = True
 _C.MODEL.SAMPLE_SCALE = True
-_C.MODEL.SAMPLE_POSE = True 
+_C.MODEL.SAMPLE_POSE = False 
 _C.MODEL.FULL_COV = True
 
 

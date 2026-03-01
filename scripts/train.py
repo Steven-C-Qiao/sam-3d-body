@@ -79,7 +79,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         "dirpath": model_save_dir,
         "filename": "val_loss_{epoch:03d}",
         "save_top_k": 1,
-        "every_n_epochs": 5,  # Save checkpoint every 5 epochs
+        "every_n_epochs": 1,  # Save checkpoint every 5 epochs
         "save_last": True,
         "verbose": True,
         "monitor": "val_total_loss",

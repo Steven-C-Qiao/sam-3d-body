@@ -56,6 +56,7 @@ class SAM3DBody(BaseModel):
         self.sample_scale = self.cfg.MODEL.SAMPLE_SCALE
         self.sample_pose = self.cfg.MODEL.SAMPLE_POSE
         self.full_cov = self.cfg.MODEL.FULL_COV
+        self.use_lora = self.cfg.MODEL.DECODER.USE_LORA
 
         # Create backbone feature extractor for human crops
         self.backbone = create_backbone(self.cfg.MODEL.BACKBONE.TYPE, self.cfg)
@@ -533,66 +534,53 @@ class SAM3DBody(BaseModel):
             image_augment,
             token_mask,
             token_to_pose_output_fn=token_to_pose_output_fn,
-            token_to_uncertainty_output_fn=token_to_uncertainty_output_fn,
             keypoint_token_update_fn=keypoint_token_update_fn_comb,
+            token_to_uncertainty_output_fn=token_to_uncertainty_output_fn,
         )
 
-        # Handle dual outputs when LoRA is enabled
-        use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
-        if use_lora:
-            assert isinstance(decoder_output, tuple) and len(decoder_output) == 2
-            # LoRA is enabled: decoder returns (orig_output, lora_output)
-            orig_output, lora_output = decoder_output
-            
-            # Process original output
-            # orig_output can be: tokens_output OR (tokens_output, all_pose_outputs) when do_interm_preds
-            if isinstance(orig_output, tuple) and len(orig_output) == 2:
-                tokens_output_orig, pose_output_orig = orig_output
-            else:
-                tokens_output_orig = orig_output
-                pose_output_orig = None
-            
-            # Process LoRA output
-            # if isinstance(lora_output, tuple) and len(lora_output) == 2:
-            #     tokens_output_lora, pose_output_lora = lora_output
-            # else:
-            #     tokens_output_lora = lora_output
-            #     pose_output_lora = None
-            
-            # Extract pose tokens
-            pose_token_orig = tokens_output_orig[:, 0]
-            # pose_token_lora = tokens_output_lora[:, 0]
-            
+        if self.use_lora:
+
+            tokens_output = decoder_output["out"]
+            pose_output = decoder_output["all_pose_outputs"]
+            uncertainty_output = decoder_output["uncertainty_output"]
+    
             # Return both outputs
             if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
-                return (
-                    (
-                        tokens_output_orig[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
-                        pose_output_orig,
-                    ),
-                    lora_output,
-                )
-            else:
-                # return (pose_token_orig, pose_output_orig), (pose_token_lora, pose_output_lora)
-                return(pose_token_orig, pose_output_orig), lora_output # which is the uncertainty 
-        else:
-            # LoRA is disabled: original behavior
-            if isinstance(decoder_output, tuple):
-                tokens_output, pose_output = decoder_output
-            else:
-                tokens_output = decoder_output
-                pose_output = None
-            
-            # Extract pose token (index 0) from final tokens
-            pose_token = tokens_output[:, 0]
+                tokens_output = tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2]
 
-            if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
-                return (
-                    tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
-                    pose_output,
-                )
-            else:
-                return pose_token, pose_output
+            ret = {
+                "all_pose_outputs": pose_output,
+                "uncertainty_output": uncertainty_output,
+                "tokens_output": tokens_output,
+            }
+            return ret 
+        #         return (
+        #             (
+        #                 tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+        #                 pose_output,
+        #             ),
+        #             uncertainty_output,
+        #         )
+        #     else:
+        #         return(tokens_output, pose_output), uncertainty_output # which is the uncertainty 
+        # else:
+        #     # LoRA is disabled: original behavior
+        #     if isinstance(decoder_output, tuple):
+        #         tokens_output, pose_output = decoder_output
+        #     else:
+        #         tokens_output = decoder_output
+        #         pose_output = None
+            
+        #     # Extract pose token (index 0) from final tokens
+        #     pose_token = tokens_output[:, 0]
+
+        #     if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
+        #         return (
+        #             tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
+        #             pose_output,
+        #         )
+        #     else:
+        #         return pose_token, pose_output
 
     @torch.no_grad()
     def _get_keypoint_prompt(self, batch, pred_keypoints_2d, force_dummy=False):
@@ -807,25 +795,16 @@ class SAM3DBody(BaseModel):
                 condition_info=condition_info[self.body_batch_idx],
                 batch=batch,
             )
-            
-            # Handle dual outputs when LoRA is enabled
-            use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
-            if use_lora and isinstance(decoder_result, tuple) and len(decoder_result) == 2:
-                # LoRA enabled: (orig_output, lora_output)
-                (tokens_output, pose_output), lora_output = decoder_result
-                pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
-            else:
-                # LoRA disabled: original behavior
-                tokens_output, pose_output = decoder_result
-                pose_output = pose_output[-1] if isinstance(pose_output, list) else pose_output
+            all_pose_outputs = decoder_result["all_pose_outputs"]
+            pose_output = all_pose_outputs[-1] if isinstance(all_pose_outputs, list) else all_pose_outputs
+            uncertainty_output = decoder_result["uncertainty_output"]
 
         output = {
             "mhr": pose_output,  # mhr prediction output
             "condition_info": condition_info,
             "image_embeddings": image_embeddings,
+            "uncertainty_output": uncertainty_output,
         }
-        if lora_output is not None:
-            output["lora_output"] = lora_output  # LoRA prediction output
         return output
     # fmt: on
 
@@ -856,7 +835,7 @@ class SAM3DBody(BaseModel):
 
             samples_dict = gen_samples(
                 output_mhr,
-                outputs["lora_output"],
+                outputs["uncertainty_output"],
                 num_samples,
                 sample_pose=self.sample_pose,
                 full_cov=self.full_cov,

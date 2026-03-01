@@ -249,7 +249,7 @@ def gen_pose_samples(
 
 def gen_samples(
     output,
-    uncertainty_dict,
+    uncertainty_dict=None,
     num_samples=5,
     sample_pose=True,
     full_cov=True,
@@ -304,8 +304,10 @@ def gen_samples(
         pose_samples = (
             body_pose_mean_133.unsqueeze(1).expand(-1, num_samples, -1).contiguous()
         )
+        dist_3dof = None
     else:
         pose_samples = None
+        dist_3dof = None
 
     return {
         "shape_samples": shape_samples, 

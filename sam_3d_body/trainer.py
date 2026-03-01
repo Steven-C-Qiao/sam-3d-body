@@ -50,7 +50,7 @@ class Trainer(BaseLightningModule):
         self.vis_save_dir = vis_save_dir
         self.stack_vertically = stack_vertically
 
-        # Select model based on config
+        self.use_lora = cfg.MODEL.DECODER.USE_LORA
         self.model_type = cfg.TRAIN.get("MODEL_TYPE", "full")
         if self.model_type == "toy":
             assert False
@@ -58,14 +58,9 @@ class Trainer(BaseLightningModule):
         elif self.model_type == "full":
             self.model = SAM3DBody(cfg)
         else:
-            raise ValueError(
-                f"Unknown MODEL_TYPE: {self.model_type}. Must be 'toy' or 'full'."
-            )
+            raise ValueError("Invalid model type")
 
         self.metrics = Metrics()
-
-        # self.val_ds = self.val_dataset()
-        # self.train_ds = self.train_dataset()
 
         # Optionally enable dense keypoints based on config; if disabled, the model
         # will only use the canonical 70 MHR keypoints.
@@ -99,9 +94,8 @@ class Trainer(BaseLightningModule):
                     param.requires_grad = False
             
             # Unfreeze LoRA parameters if LoRA is enabled
-            use_lora = self.cfg.MODEL.DECODER.get("USE_LORA", False)
             lora_param_count = 0
-            if use_lora and hasattr(self.model, "decoder") and hasattr(self.model.decoder, "lora_layers"):
+            if self.use_lora and hasattr(self.model, "decoder") and hasattr(self.model.decoder, "lora_layers"):
                 if self.model.decoder.lora_layers is not None:
                     for lora_layer in self.model.decoder.lora_layers:
                         # LoRA parameters are injected into the base model by PEFT
@@ -113,10 +107,6 @@ class Trainer(BaseLightningModule):
                     
             # Unfreeze uncertainty parameters
             for param in [
-                # self.model.head_pose.shape_uncertainty_proj,
-                # self.model.head_pose.scale_uncertainty_proj,
-                # self.model.head_pose.pose_3dof_uncertainty_proj,
-                # self.model.head_pose.pose_1dof_uncertainty_proj,
                 self.model.head_uncertainty,
             ]:
                 for p in param.parameters():
@@ -126,7 +116,8 @@ class Trainer(BaseLightningModule):
             trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             frozen_params = sum(p.numel() for p in self.model.parameters() if not p.requires_grad)
             decoder_params = sum(p.numel() for p in self.model.decoder.parameters())
-            decoder_lora_params = sum(p.numel() for p in self.model.decoder.lora_layers.parameters())
+            if self.use_lora:
+                decoder_lora_params = sum(p.numel() for p in self.model.decoder.lora_layers.parameters())
             total_params = trainable_params + frozen_params
             
             logger.info("=" * 60)
@@ -136,8 +127,8 @@ class Trainer(BaseLightningModule):
             logger.info(f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
             logger.info(f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.2f}%)")
             logger.info(f"Decoder parameters: {decoder_params:,} ({100 * decoder_params / total_params:.2f}%)")
-            logger.info(f"Decoder LoRA parameters: {decoder_lora_params:,} ({100 * decoder_lora_params / total_params:.2f}%)")
-            if use_lora:
+            if self.use_lora:
+                logger.info(f"LoRA decoder parameters: {decoder_lora_params:,} ({100 * decoder_lora_params / total_params:.2f}%)")
                 logger.info(f"LoRA trainable parameters: {lora_param_count:,}")
             logger.info("=" * 60)
 
@@ -656,7 +647,7 @@ class Trainer(BaseLightningModule):
             num_view=num_view, batch_size=1, dataset_name=dataset_name
         )
 
-        metrics = defaultdict(list)
+        all_metrics = defaultdict(list)
 
         for batch_idx, batch in enumerate(dataloader):
             if max_batches is not None and batch_idx >= max_batches:
@@ -687,8 +678,12 @@ class Trainer(BaseLightningModule):
 
             pred_shape = outputs["mhr"]["shape"]
             pred_scale = outputs["mhr"]["scale"]
-            shape_var = outputs["mhr"]["shape_uncertainty"]
-            scale_var = outputs["mhr"]["scale_uncertainty"]
+
+            # Uncertainties come from uncertainty head (separate from mhr output)
+            indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
+            shape_var = outputs["uncertainty_output"]["shape_uncertainty"]
+            scale_var = outputs["uncertainty_output"]["scale_uncertainty"]  # already for selected indices
+
 
             # shape_var: [batch, D], want [batch, D, D] with diag elements
             shape_var_diag = torch.diag_embed(shape_var)
@@ -707,7 +702,6 @@ class Trainer(BaseLightningModule):
             shape_var_unflattened = shape_var.unflatten(0, (bs, num_views))
             merged_shape_var = torch.diagonal(shape_sigma_star, dim1=-2, dim2=-1)
 
-            indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
             scale_mu_star, scale_sigma_star = self.merge_predictions_batch(
                 pred_scale[..., indices], scale_var_diag
             )
@@ -817,126 +811,18 @@ class Trainer(BaseLightningModule):
             )
             mean_neutral_verts, mean_neutral_joint_coords = mean_neutral_mhr_output
 
-            # ----- mpjpe -----
-            # per-view
-            per_view_mpjpe = torch.sqrt(
-                ((per_view_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(
-                    dim=-1
-                )
-            ).mean(dim=1)
-            # merged
-            merged_mpjpe = torch.sqrt(
-                ((merged_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(
-                    dim=-1
-                )
-            ).mean(dim=1)
-            # mean
-            mean_mpjpe = torch.sqrt(
-                ((mean_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(dim=-1)
-            ).mean(dim=1)
+            stuff_for_metrics = {
+                "per_view_neutral_joint_coords": per_view_neutral_joint_coords,
+                "merged_neutral_joint_coords": merged_neutral_joint_coords,
+                "mean_neutral_joint_coords": mean_neutral_joint_coords,
+                "gt_neutral_joint_coords": gt_neutral_joint_coords,
+                "per_view_neutral_verts": per_view_neutral_verts,
+                "merged_neutral_verts": merged_neutral_verts,
+                "mean_neutral_verts": mean_neutral_verts,
+                "gt_neutral_verts": gt_neutral_verts,
+            }
 
-            # ----- pve -----
-            # per-view
-            per_view_pve = torch.sqrt(
-                ((per_view_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
-            ).mean(dim=1)
-            # merged
-            merged_pve = torch.sqrt(
-                ((merged_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
-            ).mean(dim=1)
-            # mean
-            mean_pve = torch.sqrt(
-                ((mean_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
-            ).mean(dim=1)
-
-            # ----- pampjpe -----
-            from sam_3d_body.metrics.metrics_tracker import reconstruction_error
-            from sam_3d_body.metrics.metrics_tracker import (
-                scale_and_translation_transform_batch,
-            )
-
-            # per-view
-            per_view_pampjpe, _ = reconstruction_error(
-                per_view_neutral_joint_coords.cpu().detach().numpy(),
-                gt_neutral_joint_coords.cpu().detach().numpy(),
-                reduction="none",
-            )
-            per_view_pampjpe = per_view_pampjpe.mean(axis=-1)
-            # merged
-            merged_pampjpe, _ = reconstruction_error(
-                merged_neutral_joint_coords.cpu().detach().numpy(),
-                gt_neutral_joint_coords.cpu().detach().numpy(),
-                reduction="none",
-            )
-            merged_pampjpe = merged_pampjpe.mean(axis=-1)
-            # mean
-            mean_pampjpe, _ = reconstruction_error(
-                mean_neutral_joint_coords.cpu().detach().numpy(),
-                gt_neutral_joint_coords.cpu().detach().numpy(),
-                reduction="none",
-            )
-            mean_pampjpe = mean_pampjpe.mean(axis=-1)
-
-            # ----- pvetsc -----
-            pred_sc = scale_and_translation_transform_batch(
-                per_view_neutral_verts.cpu().detach().numpy(),
-                gt_neutral_verts.cpu().detach().numpy(),
-            )
-            merged_sc = scale_and_translation_transform_batch(
-                merged_neutral_verts.cpu().detach().numpy(),
-                gt_neutral_verts.cpu().detach().numpy(),
-            )
-            mean_sc = scale_and_translation_transform_batch(
-                mean_neutral_verts.cpu().detach().numpy(),
-                gt_neutral_verts.cpu().detach().numpy(),
-            )
-            per_view_pvetsc = np.linalg.norm(
-                pred_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-            ).mean(axis=1)
-            merged_pvetsc = np.linalg.norm(
-                merged_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-            ).mean(axis=1)
-            mean_pvetsc = np.linalg.norm(
-                mean_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-            ).mean(axis=1)
-
-            # print(per_view_mpjpe.shape, mean_mpjpe.shape, merged_mpjpe.shape)
-            # print(per_view_pve.shape, mean_pve.shape, merged_pve.shape)
-            # print(per_view_pampjpe.shape, mean_pampjpe.shape, merged_pampjpe.shape)
-            # print(per_view_pvetsc.shape, mean_pvetsc.shape, merged_pvetsc.shape)
-
-            print(
-                f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {mean_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}"
-            )
-            print(
-                f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {mean_pve.mean():.4f}, merged: {merged_pve.mean():.4f}"
-            )
-            print(
-                f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {mean_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}"
-            )
-            print(
-                f"pvetsc: view avg: {per_view_pvetsc.mean():.4f}, view min: {per_view_pvetsc.min():.4f}, mean: {mean_pvetsc.mean():.4f}, merged: {merged_pvetsc.mean():.4f}"
-            )
-
-            metrics["per_view_mpjpe"].append(per_view_mpjpe.mean().item())
-            metrics["best_per_view_mpjpe"].append(per_view_mpjpe.min().item())
-            metrics["mean_mpjpe"].append(mean_mpjpe.mean().item())
-            metrics["merged_mpjpe"].append(merged_mpjpe.mean().item())
-
-            metrics["per_view_pve"].append(per_view_pve.mean().item())
-            metrics["best_per_view_pve"].append(per_view_pve.min().item())
-            metrics["mean_pve"].append(mean_pve.mean().item())
-            metrics["merged_pve"].append(merged_pve.mean().item())
-
-            metrics["per_view_pampjpe"].append(per_view_pampjpe.mean().item())
-            metrics["best_per_view_pampjpe"].append(per_view_pampjpe.min().item())
-            metrics["mean_pampjpe"].append(mean_pampjpe.mean().item())
-            metrics["merged_pampjpe"].append(merged_pampjpe.mean().item())
-
-            metrics["per_view_pvetsc"].append(per_view_pvetsc.mean().item())
-            metrics["best_per_view_pvetsc"].append(per_view_pvetsc.min().item())
-            metrics["mean_pvetsc"].append(mean_pvetsc.mean().item())
-            metrics["merged_pvetsc"].append(merged_pvetsc.mean().item())
+            self.multiframe_metrics(all_metrics, stuff_for_metrics)
 
             # Initialize gallery: list of lists to store rendered images [bs][num_views]
             gallery = [[None for _ in range(num_views)] for _ in range(bs)]
@@ -1431,189 +1317,130 @@ class Trainer(BaseLightningModule):
 
         return mu_star, sigma_star
 
-    def visualize_keypoints_2d(
-        self,
-        batch: Dict,
-        outputs: Dict,
-        batch_idx: int = 0,
-        save_path: str = "temp_vis.png",
-    ):
-        """
-        Visualize ground truth and predicted 2D keypoints on the cropped image.
 
-        Args:
-            batch: Input batch dictionary
-            outputs: Model outputs dictionary
-            batch_idx: Batch index to visualize (default: 0)
-            save_path: Path to save the visualization
-        """
-        import matplotlib.pyplot as plt
-
-        # Extract keypoints
-        gt_kp2d = (
-            batch["keypoints_2d"][batch_idx, :, :].cpu().detach().numpy()
-        )  # [N, 2]
-        pred_kp2d_cropped_normalised_coords = (
-            outputs["mhr"]["pred_keypoints_2d_cropped"][batch_idx]
-            .cpu()
-            .detach()
-            .numpy()
-        )  # [70, 2]
-        pred_kp2d_cropped_coords = (
-            pred_kp2d_cropped_normalised_coords + 0.5
-        ) * 256  # [70, 2]
-
-        # Get cropped image
-        img = batch["img"][batch_idx, 0].clone().cpu().detach().numpy()  # C, H, W
-        img = img.transpose(1, 2, 0)  # H, W, C
-
-        # Plot
-        plt.figure(figsize=(10, 10))
-        plt.imshow(img)
-        plt.scatter(
-            gt_kp2d[:, 0], gt_kp2d[:, 1], color="blue", s=10, marker="x", label="GT"
-        )
-        plt.scatter(
-            pred_kp2d_cropped_coords[:, 0],
-            pred_kp2d_cropped_coords[:, 1],
-            color="red",
-            s=10,
-            marker="o",
-            label="Pred Cropped Coords",
-        )
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close()
-
-    def visualize_keypoints_2d_samples(
-        self,
-        batch: Dict,
-        outputs: Dict,
-        batch_idx: int = 0,
-        save_path: str = "temp_vis_samples.png",
-    ):
-        """
-        Visualize ground truth, predicted mean, and sampled 2D keypoints on the cropped image.
-
-        Args:
-            batch: Input batch dictionary
-            outputs: Model outputs dictionary
-            batch_idx: Batch index to visualize (default: 0)
-            save_path: Path to save the visualization
-        """
-        import matplotlib.pyplot as plt
-
-        if "kp2d_samples" not in outputs:
-            logger.warning(
-                "No sample keypoints found in outputs. Skipping visualization."
+    def multiframe_metrics(self, all_metrics, stuff_for_metrics):
+        per_view_neutral_joint_coords = stuff_for_metrics["per_view_neutral_joint_coords"]
+        merged_neutral_joint_coords = stuff_for_metrics["merged_neutral_joint_coords"]
+        mean_neutral_joint_coords = stuff_for_metrics["mean_neutral_joint_coords"]
+        gt_neutral_joint_coords = stuff_for_metrics["gt_neutral_joint_coords"]
+        per_view_neutral_verts = stuff_for_metrics["per_view_neutral_verts"]
+        merged_neutral_verts = stuff_for_metrics["merged_neutral_verts"]
+        mean_neutral_verts = stuff_for_metrics["mean_neutral_verts"]
+        gt_neutral_verts = stuff_for_metrics["gt_neutral_verts"]
+        # ----- mpjpe -----
+        # per-view
+        per_view_mpjpe = torch.sqrt(
+            ((per_view_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(
+                dim=-1
             )
-            return
-
-        # Extract keypoints
-        gt_kp2d = (
-            batch["keypoints_2d"][batch_idx, :, :].cpu().detach().numpy()
-        )  # [N, 2]
-        pred_kp2d_cropped_normalised_coords = (
-            outputs["mhr"]["pred_keypoints_2d_cropped"][batch_idx]
-            .cpu()
-            .detach()
-            .numpy()
-        )  # [70, 2]
-        pred_kp2d_cropped_coords = (
-            pred_kp2d_cropped_normalised_coords + 0.5
-        ) * 256  # [70, 2]
-
-        # Extract sample keypoints (in full image coords)
-        sample_kp2d_full = (
-            outputs["kp2d_samples"][batch_idx].cpu().detach().numpy()
-        )  # [num_samples, 70, 2]
-
-        # Convert samples to cropped coordinates
-        num_samples = sample_kp2d_full.shape[0]
-        sample_kp2d_cropped_coords = []
-
-        # Ensure body_batch_idx is set (should be set during forward pass)
-        if (
-            not hasattr(self.model, "body_batch_idx")
-            or len(self.model.body_batch_idx) == 0
-        ):
-            self.model.body_batch_idx = [batch_idx]
-
-        for i in range(num_samples):
-            # Convert full image coords to cropped coords using _full_to_crop
-            sample_kp2d_tensor = torch.from_numpy(sample_kp2d_full[i : i + 1]).to(
-                batch["img"].device
+        ).mean(dim=1)
+        # merged
+        merged_mpjpe = torch.sqrt(
+            ((merged_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(
+                dim=-1
             )
-            sample_kp2d_cropped_normalized = (
-                self.model._full_to_crop(
-                    batch,
-                    sample_kp2d_tensor,
-                    (
-                        torch.tensor(
-                            [self.model.body_batch_idx[batch_idx]],
-                            device=batch["img"].device,
-                        )
-                        if len(self.model.body_batch_idx) > batch_idx
-                        else None
-                    ),
-                )[0]
-                .cpu()
-                .detach()
-                .numpy()
-            )  # [70, 2] in normalized cropped coords [-0.5, 0.5]
+        ).mean(dim=1)
+        # mean
+        mean_mpjpe = torch.sqrt(
+            ((mean_neutral_joint_coords - gt_neutral_joint_coords) ** 2).sum(dim=-1)
+        ).mean(dim=1)
 
-            # Convert to pixel coordinates
-            sample_kp2d_cropped = (
-                sample_kp2d_cropped_normalized + 0.5
-            ) * 256  # [70, 2]
-            sample_kp2d_cropped_coords.append(sample_kp2d_cropped)
+        # ----- pve -----
+        # per-view
+        per_view_pve = torch.sqrt(
+            ((per_view_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
+        ).mean(dim=1)
+        # merged
+        merged_pve = torch.sqrt(
+            ((merged_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
+        ).mean(dim=1)
+        # mean
+        mean_pve = torch.sqrt(
+            ((mean_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)
+        ).mean(dim=1)
 
-        sample_kp2d_cropped_coords = np.array(
-            sample_kp2d_cropped_coords
-        )  # [num_samples, 70, 2]
-
-        # Get cropped image
-        img = batch["img"][batch_idx, 0].clone().cpu().detach().numpy()  # C, H, W
-        img = img.transpose(1, 2, 0)  # H, W, C
-
-        # Plot samples visualization
-        plt.figure(figsize=(10, 10))
-        plt.imshow(img)
-        plt.scatter(
-            gt_kp2d[:, 0],
-            gt_kp2d[:, 1],
-            color="blue",
-            s=15,
-            marker="x",
-            label="GT",
-            linewidths=2,
-        )
-        plt.scatter(
-            pred_kp2d_cropped_coords[:, 0],
-            pred_kp2d_cropped_coords[:, 1],
-            color="red",
-            s=15,
-            marker="o",
-            label="Pred Mean",
-            linewidths=2,
-            edgecolors="darkred",
+        # ----- pampjpe -----
+        from sam_3d_body.metrics.metrics_tracker import reconstruction_error
+        from sam_3d_body.metrics.metrics_tracker import (
+            scale_and_translation_transform_batch,
         )
 
-        # Plot each sample with different colors
-        colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
-        for i in range(num_samples):
-            plt.scatter(
-                sample_kp2d_cropped_coords[i, :, 0],
-                sample_kp2d_cropped_coords[i, :, 1],
-                color=colors[i],
-                s=8,
-                marker=".",
-                alpha=0.6,
-                label=f"Sample {i+1}" if i < 5 else None,
-            )  # Only label first 5 to avoid clutter
+        # per-view
+        per_view_pampjpe, _ = reconstruction_error(
+            per_view_neutral_joint_coords.cpu().detach().numpy(),
+            gt_neutral_joint_coords.cpu().detach().numpy(),
+            reduction="none",
+        )
+        per_view_pampjpe = per_view_pampjpe.mean(axis=-1)
+        # merged
+        merged_pampjpe, _ = reconstruction_error(
+            merged_neutral_joint_coords.cpu().detach().numpy(),
+            gt_neutral_joint_coords.cpu().detach().numpy(),
+            reduction="none",
+        )
+        merged_pampjpe = merged_pampjpe.mean(axis=-1)
+        # mean
+        mean_pampjpe, _ = reconstruction_error(
+            mean_neutral_joint_coords.cpu().detach().numpy(),
+            gt_neutral_joint_coords.cpu().detach().numpy(),
+            reduction="none",
+        )
+        mean_pampjpe = mean_pampjpe.mean(axis=-1)
 
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close()
+        # ----- pvetsc -----
+        pred_sc = scale_and_translation_transform_batch(
+            per_view_neutral_verts.cpu().detach().numpy(),
+            gt_neutral_verts.cpu().detach().numpy(),
+        )
+        merged_sc = scale_and_translation_transform_batch(
+            merged_neutral_verts.cpu().detach().numpy(),
+            gt_neutral_verts.cpu().detach().numpy(),
+        )
+        mean_sc = scale_and_translation_transform_batch(
+            mean_neutral_verts.cpu().detach().numpy(),
+            gt_neutral_verts.cpu().detach().numpy(),
+        )
+        per_view_pvetsc = np.linalg.norm(
+            pred_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+        ).mean(axis=1)
+        merged_pvetsc = np.linalg.norm(
+            merged_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+        ).mean(axis=1)
+        mean_pvetsc = np.linalg.norm(
+            mean_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+        ).mean(axis=1)
+
+        print(
+            f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {mean_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}"
+        )
+        print(
+            f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {mean_pve.mean():.4f}, merged: {merged_pve.mean():.4f}"
+        )
+        print(
+            f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {mean_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}"
+        )
+        print(
+            f"pvetsc: view avg: {per_view_pvetsc.mean():.4f}, view min: {per_view_pvetsc.min():.4f}, mean: {mean_pvetsc.mean():.4f}, merged: {merged_pvetsc.mean():.4f}"
+        )
+
+        all_metrics["per_view_mpjpe"].append(per_view_mpjpe.mean().item())
+        all_metrics["best_per_view_mpjpe"].append(per_view_mpjpe.min().item())
+        all_metrics["mean_mpjpe"].append(mean_mpjpe.mean().item())
+        all_metrics["merged_mpjpe"].append(merged_mpjpe.mean().item())
+
+        all_metrics["per_view_pve"].append(per_view_pve.mean().item())
+        all_metrics["best_per_view_pve"].append(per_view_pve.min().item())
+        all_metrics["mean_pve"].append(mean_pve.mean().item())
+        all_metrics["merged_pve"].append(merged_pve.mean().item())
+
+        all_metrics["per_view_pampjpe"].append(per_view_pampjpe.mean().item())
+        all_metrics["best_per_view_pampjpe"].append(per_view_pampjpe.min().item())
+        all_metrics["mean_pampjpe"].append(mean_pampjpe.mean().item())
+        all_metrics["merged_pampjpe"].append(merged_pampjpe.mean().item())
+
+        all_metrics["per_view_pvetsc"].append(per_view_pvetsc.mean().item())
+        all_metrics["best_per_view_pvetsc"].append(per_view_pvetsc.min().item())
+        all_metrics["mean_pvetsc"].append(mean_pvetsc.mean().item())
+        all_metrics["merged_pvetsc"].append(merged_pvetsc.mean().item())
+
+        return all_metrics 
