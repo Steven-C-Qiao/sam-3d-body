@@ -8,7 +8,6 @@ from loguru import logger
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
 if "PYOPENGL_PLATFORM" not in os.environ:
     os.environ["PYOPENGL_PLATFORM"] = "egl"
 import pyrender
@@ -23,7 +22,7 @@ class Visualiser(pl.LightningModule):
         self.cfg = cfg
         self._suffix = ""
         self.faces = faces  # Store faces for mesh rendering
-        
+
     def set_global_rank(self, global_rank):
         self.rank = global_rank
 
@@ -670,7 +669,6 @@ class Visualiser(pl.LightningModule):
         affine_trans = batch["affine_trans"][batch_idx, 0]  # [2, 3] or [3, 3]
         img_size = batch["img_size"][batch_idx, 0]  # [2] (width, height)
 
-
         # Denormalize using img_size: (normalized + 0.5) * img_size
         # This gives cropped pixel coordinates
         gt_kp2d_denormalized = (gt_kp2d_normalized + 0.5) * img_size.reshape(
@@ -757,21 +755,24 @@ class Visualiser(pl.LightningModule):
         batch_idx = 0
         img_size = batch["img_size"][batch_idx, 0][0]
 
-        gt_kp2d_normalized = batch["joints_2d"][
-            batch_idx, :, :
-        ]  # [N, 2] in normalized coords [-0.5, 0.5]
+        gt_kp2d_normalized = batch["keypoints_2d"][ # joints_2d
+            batch_idx, :70, :
+        ]
         gt_kp2d = (gt_kp2d_normalized + 0.5) * img_size  # [N, 2]
 
-        # Predicted keypoints in cropped normalized coords [-0.5, 0.5]
+        # Visibility mask for the first 70 keypoints (1 = visible, 0 = invisible)
+        visibility = batch["visibility"][batch_idx]  # [N]
+        visible_mask = visibility 
+        invisible_mask = ~visible_mask
+
         pred_kp2d_cropped_normalised = predictions["mhr"]["pred_keypoints_2d_cropped"][
             batch_idx
         ]  # [N, 2]
-        pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * img_size  # [N, 2]
+        pred_kp2d_cropped_coords = (
+            pred_kp2d_cropped_normalised + 0.5
+        ) * img_size  # [N, 2]
 
-
-        sample_kp2d_cropped_normalized = predictions[
-            "j2d_samples_cropped"
-        ][
+        sample_kp2d_cropped_normalized = predictions["kp2d_samples_cropped"][ # j2d_samples_cropped
             batch_idx
         ]  # [num_samples, N, 2]
         num_samples = sample_kp2d_cropped_normalized.shape[0]
@@ -783,45 +784,82 @@ class Visualiser(pl.LightningModule):
         # Get cropped image
         img = batch["img"][batch_idx, 0]  # [3, 256, 256] or [256, 256, 3]
         img = ((img.transpose(1, 2, 0)) * 255).astype(np.uint8)
-        
+
         plt.figure(figsize=(10, 10))
         plt.imshow(img)
 
-        # Plot GT keypoints
-        plt.scatter(
-            gt_kp2d[:, 0],
-            gt_kp2d[:, 1],
-            color="lime",
-            s=10,
-            marker="x",
-            label="GT",
-            linewidths=1,
-        )
+        # Plot GT keypoints: visible vs invisible use similar but distinct symbols
+        if visible_mask.any():
+            plt.scatter(
+                gt_kp2d[visible_mask, 0],
+                gt_kp2d[visible_mask, 1],
+                color="lime",
+                s=10,
+                marker="x",
+                label="GT (visible)",
+                linewidths=1,
+            )
+        if invisible_mask.any():
+            plt.scatter(
+                gt_kp2d[invisible_mask, 0],
+                gt_kp2d[invisible_mask, 1],
+                facecolors="none",
+                edgecolors="lime",
+                s=30,
+                marker="o",
+                label="GT (invisible)",
+                linewidths=1,
+            )
 
-        # Plot predicted mean keypoints
-        plt.scatter(
-            pred_kp2d_cropped_coords[:, 0],
-            pred_kp2d_cropped_coords[:, 1],
-            color="red",
-            s=10,
-            marker="x",
-            label="Pred Mean",
-            linewidths=1,
-        )
+        # Plot predicted mean keypoints: use GT visibility mask for consistency
+        if visible_mask.any():
+            plt.scatter(
+                pred_kp2d_cropped_coords[visible_mask, 0],
+                pred_kp2d_cropped_coords[visible_mask, 1],
+                color="red",
+                s=10,
+                marker="x",
+                label="Pred Mean (visible)",
+                linewidths=1,
+            )
+        if invisible_mask.any():
+            plt.scatter(
+                pred_kp2d_cropped_coords[invisible_mask, 0],
+                pred_kp2d_cropped_coords[invisible_mask, 1],
+                facecolors="none",
+                edgecolors="red",
+                s=30,
+                marker="o",
+                label="Pred Mean (invisible)",
+                linewidths=1,
+            )
 
-        # Plot sample keypoints if available
-        if sample_kp2d_cropped_coords is not None:
-            colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
-            for i in range(num_samples):
-                plt.scatter(
-                    sample_kp2d_cropped_coords[i, :, 0],
-                    sample_kp2d_cropped_coords[i, :, 1],
-                    color=colors[i],
-                    s=8,
-                    marker=".",
-                    alpha=0.6,
-                    label=f"Sample {i+1}" if i < 5 else None,
-                )  # Only label first 5
+        # # Plot sample keypoints if available
+        # if sample_kp2d_cropped_coords is not None:
+        #     colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
+        #     for i in range(num_samples):
+        #         # Visible sample keypoints
+        #         if visible_mask.any():
+        #             plt.scatter(
+        #                 sample_kp2d_cropped_coords[i, visible_mask, 0],
+        #                 sample_kp2d_cropped_coords[i, visible_mask, 1],
+        #                 color=colors[i],
+        #                 s=8,
+        #                 marker=".",
+        #                 alpha=0.6,
+        #                 label=f"Sample {i+1}" if i < 5 else None,
+        #             )  # Only label first 5
+        #         # Invisible sample keypoints: similar but different symbol (hollow circles)
+        #         if invisible_mask.any():
+        #             plt.scatter(
+        #                 sample_kp2d_cropped_coords[i, invisible_mask, 0],
+        #                 sample_kp2d_cropped_coords[i, invisible_mask, 1],
+        #                 facecolors="none",
+        #                 edgecolors=colors[i],
+        #                 s=20,
+        #                 marker="o",
+        #                 alpha=0.6,
+        #             )
 
         plt.legend()
         plt.title(f"2D Keypoints Visualization (Batch {batch_idx})")
@@ -861,12 +899,11 @@ class Visualiser(pl.LightningModule):
         pred_kp2d_cropped_normalised = predictions["mhr"]["pred_keypoints_2d_cropped"][
             batch_idx
         ]  # [N, 2]
-        pred_kp2d_cropped_coords = (pred_kp2d_cropped_normalised + 0.5) * img_size  # [N, 2]
+        pred_kp2d_cropped_coords = (
+            pred_kp2d_cropped_normalised + 0.5
+        ) * img_size  # [N, 2]
 
-
-        sample_kp2d_cropped_normalized = predictions[
-            "kp2d_samples_cropped"
-        ][
+        sample_kp2d_cropped_normalized = predictions["kp2d_samples_cropped"][
             batch_idx
         ]  # [num_samples, N, 2]
         num_samples = sample_kp2d_cropped_normalized.shape[0]
@@ -878,7 +915,7 @@ class Visualiser(pl.LightningModule):
         # Get cropped image
         img = batch["img"][batch_idx, 0]  # [3, 256, 256] or [256, 256, 3]
         img = ((img.transpose(1, 2, 0)) * 255).astype(np.uint8)
-        
+
         plt.figure(figsize=(10, 10))
         plt.imshow(img)
 

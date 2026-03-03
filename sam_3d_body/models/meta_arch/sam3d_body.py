@@ -56,7 +56,7 @@ class SAM3DBody(BaseModel):
         self.sample_scale = self.cfg.MODEL.SAMPLE_SCALE
         self.sample_pose = self.cfg.MODEL.SAMPLE_POSE
         self.full_cov = self.cfg.MODEL.FULL_COV
-        self.use_lora = self.cfg.MODEL.DECODER.USE_LORA
+        self.use_lora = self.cfg.MODEL.USE_LORA
 
         # Create backbone feature extractor for human crops
         self.backbone = create_backbone(self.cfg.MODEL.BACKBONE.TYPE, self.cfg)
@@ -538,22 +538,25 @@ class SAM3DBody(BaseModel):
             token_to_uncertainty_output_fn=token_to_uncertainty_output_fn,
         )
 
-        if self.use_lora:
+        tokens_output = decoder_output["out"]
+        pose_output = decoder_output["all_pose_outputs"]
+        uncertainty_output = decoder_output["uncertainty_output"]
 
-            tokens_output = decoder_output["out"]
-            pose_output = decoder_output["all_pose_outputs"]
-            uncertainty_output = decoder_output["uncertainty_output"]
-    
-            # Return both outputs
-            if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
-                tokens_output = tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2]
+        if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
+            tokens_output = tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2]
 
-            ret = {
-                "all_pose_outputs": pose_output,
-                "uncertainty_output": uncertainty_output,
-                "tokens_output": tokens_output,
-            }
-            return ret 
+        ret = {
+            "all_pose_outputs": pose_output,
+            "uncertainty_output": uncertainty_output,
+            "tokens_output": tokens_output,
+        }
+        return ret 
+
+
+
+
+
+
         #         return (
         #             (
         #                 tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
@@ -842,9 +845,15 @@ class SAM3DBody(BaseModel):
                 scale_bias=self.head_pose.scale_mean.float(),
                 scale_comps=self.head_pose.scale_comps.float(),
             )
-            shape_samples = samples_dict["shape_samples"].view(-1, samples_dict["shape_samples"].shape[-1])
-            scale_samples = samples_dict["scale_samples"].view(-1, samples_dict["scale_samples"].shape[-1])
-            pose_samples = samples_dict["pose_samples"].view(-1, samples_dict["pose_samples"].shape[-1])
+            shape_samples = samples_dict["shape_samples"].view(
+                -1, samples_dict["shape_samples"].shape[-1]
+            )
+            scale_samples = samples_dict["scale_samples"].view(
+                -1, samples_dict["scale_samples"].shape[-1]
+            )
+            pose_samples = samples_dict["pose_samples"].view(
+                -1, samples_dict["pose_samples"].shape[-1]
+            )
             dist_3dof = samples_dict["dist_3dof"]
             outputs["dist_3dof"] = dist_3dof
 
@@ -927,12 +936,16 @@ class SAM3DBody(BaseModel):
                 dim=-1,
             )  # [B * num_samples, N, 3]
 
-            affine = self._flatten_person(batch["affine_trans"])[
-                self.body_batch_idx
-            ].repeat_interleave(num_samples, dim=0).float()
-            img_size = self._flatten_person(batch["img_size"])[
-                self.body_batch_idx
-            ].repeat_interleave(num_samples, dim=0).unsqueeze(1)
+            affine = (
+                self._flatten_person(batch["affine_trans"])[self.body_batch_idx]
+                .repeat_interleave(num_samples, dim=0)
+                .float()
+            )
+            img_size = (
+                self._flatten_person(batch["img_size"])[self.body_batch_idx]
+                .repeat_interleave(num_samples, dim=0)
+                .unsqueeze(1)
+            )
 
             kp2d_samples_crop = kp2d_samples_h @ affine.mT
             # kp2d_samples_crop = kp2d_samples_crop[..., :2]

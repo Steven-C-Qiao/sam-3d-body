@@ -136,7 +136,7 @@ class MultiSSP3DDataset(Dataset):
     def __init__(self, ssp3d_dir_path, num_view=4, cfg=None):
         super(MultiSSP3DDataset, self).__init__()
 
-        self.dataset = SSP3DDataset(ssp3d_dir_path)
+        self.dataset = SSP3DDataset(ssp3d_dir_path, cfg)
         self.num_view = num_view
 
         self.serno = np.unique(self.dataset.body_shapes, axis=0)

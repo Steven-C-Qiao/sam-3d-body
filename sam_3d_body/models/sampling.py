@@ -31,6 +31,7 @@ def aa_to_euler(aa, euler_convention="XYZ"):
     euler = matrix_to_euler_angles(rotmat, euler_convention)
     return euler
 
+
 def _sample(x, var, num_samples=4):
     """
     Args:
@@ -86,18 +87,19 @@ def _sample_full_covariance(x, cholesky_flat, num_samples=4):
     B, D = x.shape
     L = build_tril(cholesky_flat)  # [B, 3, 3]
 
-    eps = torch.randn(
-        B, num_samples, D, device=x.device, dtype=x.dtype
-    )
+    eps = torch.randn(B, num_samples, D, device=x.device, dtype=x.dtype)
     z = x.unsqueeze(1) + torch.matmul(eps, L.transpose(-1, -2))  # [B, N, 3]
 
     return z
+
 
 def sample_shape(shape_mean, shape_var, num_samples=4):
     return _sample(shape_mean, shape_var, num_samples)
 
 
-def sample_scale(scale_mean, scale_var, num_samples=4, scale_bias=None, scale_comps=None):
+def sample_scale(
+    scale_mean, scale_var, num_samples=4, scale_bias=None, scale_comps=None
+):
     indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
     assert scale_mean.shape[-1] == 28, f"scale_mean.shape: {scale_mean.shape}"
     assert len(scale_mean.shape) == 2, f"scale_mean.shape: {scale_mean.shape}"
@@ -120,15 +122,21 @@ def sample_scale(scale_mean, scale_var, num_samples=4, scale_bias=None, scale_co
 
 
 def gen_pose_samples(
-    body_pose_cont, var, body_pose_mean, num_samples=4, sample_function=_sample_full_covariance, scale_bias=None, scale_comps=None
+    body_pose_cont,
+    var,
+    body_pose_mean,
+    num_samples=4,
+    sample_function=_sample_full_covariance,
+    scale_bias=None,
+    scale_comps=None,
 ):
     """
-        body_pose_cont: [B, 133]: 3DoF in 6D +  1DoF in sincos + 1DoF transl    
-            3DoF: 6D -> rotation matrix -> axis-angle -> sample -> rotation matrix -> euler
-            1DoF: sincos -> angle -> sample
+    body_pose_cont: [B, 133]: 3DoF in 6D +  1DoF in sincos + 1DoF transl
+        3DoF: 6D -> rotation matrix -> axis-angle -> sample -> rotation matrix -> euler
+        1DoF: sincos -> angle -> sample
 
-        Ret:
-            fed into head_pose.mhr_forward
+    Ret:
+        fed into head_pose.mhr_forward
     """
     # fmt: off
     all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
@@ -162,23 +170,24 @@ def gen_pose_samples(
 
     # ------ 3dofs ------
     # we only predict axis-angle variance for 3dof joints that are not hands,
-    # identify those indices here 
+    # identify those indices here
     body_cont_3dofs = body_cont_3dofs.unflatten(-1, (-1, 6))
     body_rotmat_3dofs = batch9Dfrom6D(body_cont_3dofs).unflatten(-1, (3, 3))
 
-    body_aa_3dofs = matrix_to_axis_angle(body_rotmat_3dofs)[:, indices_3dof, ...].flatten(-2, -1)
+    body_aa_3dofs = matrix_to_axis_angle(body_rotmat_3dofs)[
+        :, indices_3dof, ...
+    ].flatten(-2, -1)
 
-
-    if False: #sample_function == _sample_full_covariance:
-        var_3dofs = var[:, :6*13]
-        var_1dofs = var[:, 6*13:]
+    if False:  # sample_function == _sample_full_covariance:
+        var_3dofs = var[:, : 6 * 13]
+        var_1dofs = var[:, 6 * 13 :]
 
         aa_3dof_samples = sample_function(
             rearrange(body_aa_3dofs, " b (j c) -> (b j) c", c=3),
             rearrange(var_3dofs, " b (j c) -> (b j) c", c=6),
             num_samples,
         )
-        
+
         aa_3dof_samples = rearrange(
             aa_3dof_samples, "(b j) n c -> b n j c", b=body_aa_3dofs.shape[0]
         )
@@ -189,15 +198,10 @@ def gen_pose_samples(
         var_3dofs = var[:, :78]
         var_1dofs = var[:, 78:]
 
-        L = build_tril(
-            rearrange(var_3dofs, " b (j c) -> (b j) c", c=6)
-        )
+        L = build_tril(rearrange(var_3dofs, " b (j c) -> (b j) c", c=6))
         body_aa_3dofs = rearrange(body_aa_3dofs, " b (j c) -> (b j) c", c=3)
 
-        dist = MultivariateNormal(
-            loc=body_aa_3dofs, 
-            scale_tril=L
-        )
+        dist = MultivariateNormal(loc=body_aa_3dofs, scale_tril=L)
         aa_3dof_samples = dist.sample(sample_shape=torch.Size([num_samples]))
         aa_3dof_samples = rearrange(
             aa_3dof_samples, "n (b j) c -> b n j c", b=var_3dofs.shape[0]
@@ -206,9 +210,7 @@ def gen_pose_samples(
         euler_3dof_samples = euler_3dof_samples.flatten(-2, -1)
 
     else:
-        assert var.shape[-1] == (
-            num_3dof_angles + num_1dof_angles 
-        )
+        assert var.shape[-1] == (num_3dof_angles + num_1dof_angles)
         var_3dofs = var[:, :num_3dof_angles]
         var_1dofs = var[:, num_3dof_angles:]
 
@@ -218,7 +220,6 @@ def gen_pose_samples(
 
         euler_3dof_samples = aa_to_euler(aa_3dof_samples, "XYZ")
         euler_3dof_samples = euler_3dof_samples.flatten(-2, -1)
-
 
     # ------ 1dofs ------
     body_cont_1dofs = body_cont_1dofs.unflatten(-1, (-1, 2))  # (sincos)
@@ -231,14 +232,14 @@ def gen_pose_samples(
     body_trans_sample = body_cont_trans.unsqueeze(1).repeat(1, num_samples, 1)
 
     # ------ assemble ------
-    body_pose_params_samples = (
-        body_pose_mean
-        .unsqueeze(1)
-        .repeat(1, num_samples, 1)
-    )
+    body_pose_params_samples = body_pose_mean.unsqueeze(1).repeat(1, num_samples, 1)
 
-    body_pose_params_samples[..., all_param_3dof_rot_idxs_except_hands.flatten()] = euler_3dof_samples
-    body_pose_params_samples[..., all_param_1dof_rot_idxs_except_hands] = body_params_1dofs_sample
+    body_pose_params_samples[..., all_param_3dof_rot_idxs_except_hands.flatten()] = (
+        euler_3dof_samples
+    )
+    body_pose_params_samples[..., all_param_1dof_rot_idxs_except_hands] = (
+        body_params_1dofs_sample
+    )
     body_pose_params_samples[..., all_param_1dof_trans_idxs] = body_trans_sample
 
     body_pose_params_samples[..., mhr_param_hand_mask] = 0
@@ -281,13 +282,23 @@ def gen_samples(
     pose_var = uncertainty_dict["pose_uncertainty"]
 
     shape_samples = sample_shape(shape_mean, shape_var, num_samples)
-    scale_samples = sample_scale(scale_mean, scale_var, num_samples, scale_bias=scale_bias, scale_comps=scale_comps)
+    scale_samples = sample_scale(
+        scale_mean,
+        scale_var,
+        num_samples,
+        scale_bias=scale_bias,
+        scale_comps=scale_comps,
+    )
     if pose_mean is not None and pose_var is not None and sample_pose:
         body_pose_mean_mhr_params = compact_cont_to_model_params_body(pose_mean)
         if full_cov:
             sample_function = _sample_full_covariance
             pose_samples, dist_3dof = gen_pose_samples(
-                pose_mean, pose_var, body_pose_mean_mhr_params, num_samples, sample_function=sample_function
+                pose_mean,
+                pose_var,
+                body_pose_mean_mhr_params,
+                num_samples,
+                sample_function=sample_function,
             )
         else:
             sample_function = _sample
@@ -310,8 +321,8 @@ def gen_samples(
         dist_3dof = None
 
     return {
-        "shape_samples": shape_samples, 
-        "scale_samples": scale_samples, 
-        "pose_samples": pose_samples, 
+        "shape_samples": shape_samples,
+        "scale_samples": scale_samples,
+        "pose_samples": pose_samples,
         "dist_3dof": dist_3dof,
     }

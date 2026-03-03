@@ -67,7 +67,9 @@ class DatasetHMR(Dataset):
             .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
-        self.visibility = np.load(DATASET_FILES[is_train][dataset][:-4] + "_visibility_308.npz")["visibility"]
+        self.visibility = np.load(
+            DATASET_FILES[is_train][dataset][:-4] + "_visibility_308.npz"
+        )["visibility_308"]
         # self.visibility = np.ones((self.data["imgname"].shape[0], 1))
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
@@ -180,7 +182,7 @@ class DatasetHMR(Dataset):
         imgname = os.path.join(self.img_dir, self.imgname[index])
         maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + "_env.png")
         item["imgname"] = imgname
-    
+
         try:
             cv_img = read_img(imgname)
             if "closeup" in self.dataset:
@@ -216,9 +218,9 @@ class DatasetHMR(Dataset):
             item[key] = data[key]
         item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
         item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
-    
+
         item["person_valid"] = torch.ones((1, 1))
-        
+
         item["scale"] = (sc * scale).astype(np.float32)
         item["center"] = center.astype(np.float32)
         item["shape_params"] = self.shape_params[index]
@@ -290,7 +292,9 @@ class MultiViewEvaluationDataset(Dataset):
             )
         self.serno = self.data["serno"]
 
-        self.pose_cam = self.data["pose_cam"][:, : NUM_JOINTS_SMPLX * 3].astype(np.float32)
+        self.pose_cam = self.data["pose_cam"][:, : NUM_JOINTS_SMPLX * 3].astype(
+            np.float32
+        )
         self.betas = self.data["shape"].astype(np.float32)
 
         # Load keypoints

@@ -57,14 +57,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     if not os.path.exists(vis_save_dir):
         os.makedirs(vis_save_dir)
 
-    config_src = "sam_3d_body/configs/config.py"
-    config_dst = Path(exp_dir) / "config.py"
-    if not config_dst.exists():
-        shutil.copy2(config_src, config_dst)
-        logger.info(f"Copied config to {config_dst}")
 
-    # Additionally, save the effective config to YAML so it can be reloaded and
-    # merged with the defaults when loading from a checkpoint.
     config_yaml_out = Path(exp_dir) / "config.yaml"
     with open(config_yaml_out, "w") as f:
         f.write(cfg.dump())

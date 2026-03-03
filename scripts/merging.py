@@ -35,6 +35,13 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
 
     cfg = get_config_defaults()
 
+    if load_path is not None:
+        config_yaml_path = Path(exp_dir) / "config.yaml"
+        if config_yaml_path.exists():
+            logger.info(f"Loading config overrides from {config_yaml_path}")
+            cfg.merge_from_file(str(config_yaml_path))
+
+
     if dev:
         cfg.TRAIN.NUM_EPOCHS = 1
         cfg.DATASET.BATCH_SIZE = 2
@@ -76,32 +83,33 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
     if load_path is not None:
         logger.info(f"Loading checkpoint: {load_path}")
         ckpt = torch.load(load_path, weights_only=False, map_location="cpu")
-        model_state_dict = ckpt["state_dict"]
-
-        for key, value in model_state_dict.items():
+        raw_state_dict = ckpt["state_dict"]
+        model_state_dict = {}
+        for key, value in raw_state_dict.items():
             if key.startswith("model."):
-                param_name = key[6:]
-                model_state_dict[param_name] = value
-        
-            missing_keys, unexpected_keys = trainer.model.load_state_dict(
-                model_state_dict, strict=False
+                model_state_dict[key[6:]] = value
+            else:
+                model_state_dict[key] = value
+
+        missing_keys, unexpected_keys = trainer.model.load_state_dict(
+            model_state_dict, strict=False
+        )
+        loaded_keys = list(model_state_dict.keys())
+        logger.info(f"Loaded {len(model_state_dict)} parameters from checkpoint")
+        print("Loaded parameter keys:")
+        # for k in loaded_keys:
+        #     print(k)
+        if missing_keys:
+            logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys")
+        if unexpected_keys:
+            logger.warning(
+                f"Unexpected keys (ignored): {len(unexpected_keys)} keys"
             )
-            loaded_keys = list(model_state_dict.keys())
-            logger.info(f"Loaded {len(model_state_dict)} parameters from checkpoint")
-            print("Loaded parameter keys:")
-            for k in loaded_keys:
-                print(k)
-            if missing_keys:
-                logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys")
-            if unexpected_keys:
-                logger.warning(
-                    f"Unexpected keys (ignored): {len(unexpected_keys)} keys"
-                )
         else:
             logger.warning("No model parameters found in checkpoint state_dict!")
             assert False
 
-    results = trainer.run_multiview_prediction(num_view=4, max_batches=5, dataset_name=dataset_name)
+    results = trainer.run_multiview_prediction(num_view=4, max_batches=20, dataset_name=dataset_name)
 
 
 if __name__ == "__main__":

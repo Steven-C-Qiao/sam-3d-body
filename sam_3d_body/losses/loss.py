@@ -9,7 +9,11 @@ import pytorch_lightning as pl
 from einops import rearrange
 from torch.distributions import MultivariateNormal
 from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
-from sam_3d_body.models.modules.mhr_utils import mhr_param_hand_mask, mhr_cont_hand_idxs, mhr_param_hand_idxs
+from sam_3d_body.models.modules.mhr_utils import (
+    mhr_param_hand_mask,
+    mhr_cont_hand_idxs,
+    mhr_param_hand_idxs,
+)
 from sam_3d_body.models.sampling import build_tril
 
 
@@ -76,11 +80,10 @@ class Loss(pl.LightningModule):
         #     joints_2d_loss = joints_2d_loss.mean()
         #     loss_dict["loss_joints_2d"] = (self.cfg.LOSS.JOINTS_2D_WEIGHT * joints_2d_loss)
 
-
         if self.cfg.LOSS.KP2D_WEIGHT > 0:
             pred_kp2d_samples = predictions["kp2d_samples_cropped"]
             num_samples = pred_kp2d_samples.shape[1]
-            
+
             visibility = batch["visibility"]
             visibility = visibility.unsqueeze(1).expand(-1, num_samples, -1)
 
@@ -113,7 +116,6 @@ class Loss(pl.LightningModule):
             kp3d_loss = kp3d_loss.mean(dim=-1)
             kp3d_loss = kp3d_loss * visibility
             # kp3d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
-
 
             loss_kp3d_samples = kp3d_loss.mean()
             loss_dict["loss_kp3d_samples"] = (
@@ -162,9 +164,9 @@ class Loss(pl.LightningModule):
             gt_pose[..., mhr_param_hand_mask] = 0
             gt_pose[..., -3:] = 0
 
-            gt_3dof_euler = gt_pose[:, all_param_3dof_rot_idxs_except_hands.flatten()].unflatten(
-                -1, (-1, 3)
-            ) 
+            gt_3dof_euler = gt_pose[
+                :, all_param_3dof_rot_idxs_except_hands.flatten()
+            ].unflatten(-1, (-1, 3))
 
             gt_3dof_rotmat = roma.euler_to_rotmat("XYZ", gt_3dof_euler)  # B 23 3 3
             gt_3dof_aa = matrix_to_axis_angle(gt_3dof_rotmat)  # B 23 3
@@ -178,38 +180,36 @@ class Loss(pl.LightningModule):
             ].unflatten(
                 -1, (-1, 3)
             )  # B 23 3
-            
+
             pred_3dof_rotmat = roma.euler_to_rotmat("XYZ", pred_3dof_euler)  # B 23 3 3
 
             pred_3dof_aa = matrix_to_axis_angle(pred_3dof_rotmat)  # B 23 3
 
-            pred_1dof_angles = pred_pose_euler[..., all_param_1dof_rot_idxs_except_hands]  # B 58
-            
+            pred_1dof_angles = pred_pose_euler[
+                ..., all_param_1dof_rot_idxs_except_hands
+            ]  # B 58
 
             pred_var = pose_uncertainty
             if self.cfg.MODEL.FULL_COV == True:
-                var_1dofs = pred_var[:, 6*13:]
+                var_1dofs = pred_var[:, 6 * 13 :]
 
                 dist_3dof = predictions["dist_3dof"]
 
-                loss_3dof = - dist_3dof.log_prob(gt_3dof_aa)
+                loss_3dof = -dist_3dof.log_prob(gt_3dof_aa)
 
                 loss_1dof = self.gaussian_nll_loss(
                     pred_1dof_angles, gt_1dof_angles, var_1dofs
-                )   
-
+                )
 
             else:
                 assert pred_var.shape[-1] == (num_3dof_angles + num_1dof_angles)
                 var_3dofs = pred_var[:, :num_3dof_angles].unflatten(-1, (-1, 3))
                 var_1dofs = pred_var[:, num_3dof_angles:]
 
-                loss_3dof = self.gaussian_nll_loss(
-                    pred_3dof_aa, gt_3dof_aa, var_3dofs
-                )
+                loss_3dof = self.gaussian_nll_loss(pred_3dof_aa, gt_3dof_aa, var_3dofs)
                 loss_1dof = self.gaussian_nll_loss(
                     pred_1dof_angles, gt_1dof_angles, var_1dofs
-                )   
+                )
 
             loss_dict["loss_pose_3dof"] = (
                 self.cfg.LOSS.POSE_PARAM_WEIGHT * loss_3dof.mean()
@@ -273,8 +273,8 @@ class Loss(pl.LightningModule):
             v for k, v in loss_dict.items() if k != "total_loss"
         )
 
-        if torch.isnan(loss_dict['total_loss']):
-            loss_dict['total_loss'] = torch.zeros_like(loss_dict['total_loss'])
+        if torch.isnan(loss_dict["total_loss"]):
+            loss_dict["total_loss"] = torch.zeros_like(loss_dict["total_loss"])
 
         # for k, v in loss_dict.items():
         #     print(f"{k}: {v.item():.3f}", end=" ")

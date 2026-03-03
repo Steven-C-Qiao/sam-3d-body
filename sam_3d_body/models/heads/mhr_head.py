@@ -379,6 +379,7 @@ class MHRHead(nn.Module):
 
         return output
 
+
 class UncertaintyHead(nn.Module):
     def __init__(
         self,
@@ -398,11 +399,11 @@ class UncertaintyHead(nn.Module):
 
         self.full_cov = full_cov
         if self.full_cov:
-            self.aa_3dof_dim = 6 * (23 - 10) # All - hands 3dof rotations * 6
+            self.aa_3dof_dim = 6 * (23 - 10)  # All - hands 3dof rotations * 6
         else:
-            self.aa_3dof_dim = 3 * 23 # All 3dof rotations * 3
-        
-        self.aa_1dof_dim = 58 - (58 - 34) # All 1dof rotations except hands 
+            self.aa_3dof_dim = 3 * 23  # All 3dof rotations * 3
+
+        self.aa_1dof_dim = 58 - (58 - 34)  # All 1dof rotations except hands
 
         self.shape_uncertainty_proj = FFN(
             embed_dims=input_dim,
@@ -528,8 +529,8 @@ class UncertaintyHead(nn.Module):
 #             self.aa_3dof_dim = 6 * (23 - 10) # All - hands 3dof rotations * 6
 #         else:
 #             self.aa_3dof_dim = 3 * 23 # All 3dof rotations * 3
-        
-#         self.aa_1dof_dim = 58 - (58 - 34) # All 1dof rotations except hands 
+
+#         self.aa_1dof_dim = 58 - (58 - 34) # All 1dof rotations except hands
 
 #         self.shape_uncertainty_proj = FFN(
 #             embed_dims=input_dim,
@@ -590,17 +591,17 @@ class UncertaintyHead(nn.Module):
 #         """
 #             These are manually selected from the actual scale components
 #             Coarse definitions as follows determined by visual inspection:
-#             0, 1, 2: eyeball 
+#             0, 1, 2: eyeball
 #             3: torso length
 #             4: neck length
 #             5: sholder width
 #             6: lower arm length
 #             7: lower arm and hand scale ?
-#             8: right hand scale 
-#             9: left hand scale 
+#             8: right hand scale
+#             9: left hand scale
 #             10: pelvis width
 #             11: leg length
-#             12: pelvis forwardness offset 
+#             12: pelvis forwardness offset
 #             13: lower calf length ?
 #             14: also lower calf length ?
 #             15: leg inward bend (not used)
@@ -623,7 +624,7 @@ class UncertaintyHead(nn.Module):
 #         init_estimate: Optional[torch.Tensor] = None,
 #         do_pcblend=True,
 #         full_cov=True,
-#         x_var: Optional[torch.Tensor] = None, # the uncertainty token    
+#         x_var: Optional[torch.Tensor] = None, # the uncertainty token
 #     ):
 #         """
 #         Args:
