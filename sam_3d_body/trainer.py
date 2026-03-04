@@ -223,8 +223,8 @@ class Trainer(BaseLightningModule):
             vis_step > 4000 and vis_step % 5000 == 0
         )
         global_rank = getattr(self, "global_rank", 0)
-        # if should_visualize and global_rank == 0:
-        if global_rank == 0:
+        if should_visualize and global_rank == 0:
+        # if global_rank == 0:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
             image = image.cpu().detach().numpy()  # [3, H, W]
@@ -242,16 +242,19 @@ class Trainer(BaseLightningModule):
                 stack_vertically=self.stack_vertically,
                 affine=affine,
                 img_size=img_size,
+                overlay_gt=True,
+                plot_side=True,
+                batch=batch,
             )
-            rend_img_samples = my_visualize_samples(
-                image,
-                outputs,
-                self.faces,
-                stack_vertically=self.stack_vertically,
-            )
+            # rend_img_samples = my_visualize_samples(
+            #     image,
+            #     outputs,
+            #     self.faces,
+            #     stack_vertically=self.stack_vertically,
+            # )
 
             rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
-            rend_img_samples_bgr = cv2.cvtColor(rend_img_samples, cv2.COLOR_RGB2BGR)
+            # rend_img_samples_bgr = cv2.cvtColor(rend_img_samples, cv2.COLOR_RGB2BGR)
             rend_img_samples_crops_bgr = cv2.cvtColor(
                 rend_img_samples_crops, cv2.COLOR_RGB2BGR
             )
@@ -259,10 +262,10 @@ class Trainer(BaseLightningModule):
                 os.path.join(self.vis_save_dir, f"{vis_step:06d}_img.png"),
                 rend_img_bgr,
             )
-            cv2.imwrite(
-                os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples.png"),
-                rend_img_samples_bgr,
-            )
+            # cv2.imwrite(
+            #     os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples.png"),
+            #     rend_img_samples_bgr,
+            # )
             cv2.imwrite(
                 os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples_crops.png"),
                 rend_img_samples_crops_bgr,

@@ -180,17 +180,17 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
     
     # Get samples if available
     vertex_colors = None
-    if 'mhr_samples' in outputs:
-        mhr_samples = outputs['mhr_samples']
-        if isinstance(mhr_samples, torch.Tensor):
-            mhr_samples = mhr_samples.cpu().detach().numpy()
+    if 'verts_samples' in outputs:
+        verts_samples = outputs['verts_samples']
+        if isinstance(verts_samples, torch.Tensor):
+            verts_samples = verts_samples.cpu().detach().numpy()
         
         # Calculate average distance of each vertex from mean across all samples
         # mhr_samples shape: (batch, num_samples, num_vertices, 3)
-        num_samples = mhr_samples.shape[1]
+        num_samples = verts_samples.shape[1]
         distances = []
         for i in range(num_samples):
-            sample_vertices = mhr_samples[0, i]  # (num_vertices, 3)
+            sample_vertices = verts_samples[0, i]  # (num_vertices, 3)
             vertex_distances = np.linalg.norm(sample_vertices - mean_pred_vertices, axis=1)
             distances.append(vertex_distances)
         
@@ -212,19 +212,19 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
         vertex_colors = np.ones((vertex_colors_rgb.shape[0], 4))
         vertex_colors[:, :3] = vertex_colors_rgb
 
-    all_pred_vertices = (person_output["pred_vertices"][0] + person_output["pred_cam_t"][0])
+    all_pred_vertices = person_output["pred_vertices"][0] # + person_output["pred_cam_t"][0])
     all_faces = faces
     
     # Pull out a fake translation; take the closest two
-    fake_pred_cam_t = (np.max(all_pred_vertices[-2*18439:], axis=0) + np.min(all_pred_vertices[-2*18439:], axis=0)) / 2
-    all_pred_vertices = all_pred_vertices - fake_pred_cam_t
+    # fake_pred_cam_t = (np.max(all_pred_vertices[-2*18439:], axis=0) + np.min(all_pred_vertices[-2*18439:], axis=0)) / 2
+    # all_pred_vertices = all_pred_vertices - fake_pred_cam_t
 
     # Render front view
     renderer = Renderer(focal_length=person_output["focal_length"][0], faces=all_faces)
     img_mesh = (
         renderer(
             all_pred_vertices,
-            fake_pred_cam_t,
+            person_output["pred_cam_t"][0],
             img_mesh,
             mesh_base_color=LIGHT_BLUE,
             scene_bg_color=(1, 1, 1),
@@ -238,7 +238,7 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
     img_mesh_side = (
         renderer(
             all_pred_vertices,
-            fake_pred_cam_t,
+            person_output["pred_cam_t"][0],
             white_img,
             mesh_base_color=LIGHT_BLUE,
             scene_bg_color=(1, 1, 1),
@@ -260,65 +260,26 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
 
 
 def my_visualize_samples(
-    img_cv2, outputs, faces, stack_vertically=True, affine=None, img_size=None
+    img_cv2, 
+    outputs, 
+    faces, 
+    stack_vertically=True, 
+    affine=None, 
+    img_size=None,
+    overlay_gt=True,
+    plot_side=True,
+    batch=None,
 ):
+    affine = affine.cpu().detach().numpy() if affine is not None else None
+    img_size = img_size.cpu().detach().numpy() if img_size is not None else None
 
     img_mesh = img_cv2.copy()
 
-    # Prepare affine warp (from full image -> crop) if provided
-    warp_matrix = None
-    output_size = None
-    if affine is not None:
-        try:
-            import torch
-
-            if isinstance(affine, torch.Tensor):
-                affine_np = affine.detach().cpu().numpy()
-            else:
-                affine_np = np.asarray(affine)
-        except ImportError:
-            affine_np = np.asarray(affine)
-
-        # Remove batch dimension if present
-        if affine_np.ndim == 3:
-            affine_np = affine_np[0]
-
-        # Support common shapes: (2, 3), (3, 3), or (3, 2)
-        if affine_np.shape == (2, 3):
-            M = affine_np
-        elif affine_np.shape == (3, 3):
-            M = affine_np[:2, :]
-        elif affine_np.shape == (3, 2):
-            M = affine_np.T
-        else:
-            M = None
-
-        if img_size is not None:
-            try:
-                if isinstance(img_size, torch.Tensor):
-                    img_size_np = img_size.detach().cpu().numpy()
-                else:
-                    img_size_np = np.asarray(img_size)
-            except Exception:
-                img_size_np = np.asarray(img_size)
-
-            # img_size is typically [2] = (width, height) or a scalar (e.g. 256)
-            if img_size_np.ndim == 0:
-                crop_size = int(img_size_np)
-            else:
-                # Use the first element; crops are usually square (e.g. 256x256)
-                crop_size = int(img_size_np.reshape(-1)[0])
-
-            output_size = (crop_size, crop_size)
-
-        if M is not None and output_size is not None:
-            warp_matrix = M
-
     # If we have a warp, also precompute the cropped base image
     base_img = img_cv2.copy()
-    if warp_matrix is not None:
+    if affine is not None:
         base_img_uint8 = base_img.astype(np.uint8)
-        base_img = cv2.warpAffine(base_img_uint8, warp_matrix, output_size)
+        base_img = cv2.warpAffine(base_img_uint8, affine, img_size)
 
     mhr_samples = outputs["verts_samples"].cpu().detach().numpy()
 
@@ -326,31 +287,25 @@ def my_visualize_samples(
     for key in outputs:
         try:
             outputs[key] = outputs[key].cpu().detach().numpy()
-        except Exception:
-            pass
-    person_output = outputs
+        except:
+            pass 
 
     img_mesh_list = []
+    img_side_list = []
+
+    all_faces = faces
+    renderer = Renderer(
+        focal_length=outputs["focal_length"][0], faces=all_faces
+    )
     for i in range(mhr_samples.shape[1]):
         img_mesh = img_cv2.copy()
-        all_pred_vertices = mhr_samples[0, i] + person_output["pred_cam_t"][0]
-        all_faces = faces
-
-        # Pull out a fake translation; take the closest two
-        fake_pred_cam_t = (
-            np.max(all_pred_vertices[-2 * 18439 :], axis=0)
-            + np.min(all_pred_vertices[-2 * 18439 :], axis=0)
-        ) / 2
-        all_pred_vertices = all_pred_vertices - fake_pred_cam_t
+        all_pred_vertices = mhr_samples[0, i]
 
         # Render front view
-        renderer = Renderer(
-            focal_length=person_output["focal_length"][0], faces=all_faces
-        )
         img_mesh = (
             renderer(
                 all_pred_vertices,
-                fake_pred_cam_t,
+                outputs["pred_cam_t"][0],
                 img_mesh,
                 mesh_base_color=LIGHT_BLUE,
                 scene_bg_color=(1, 1, 1),
@@ -358,18 +313,80 @@ def my_visualize_samples(
             * 255
         )
 
-        # If an affine is provided, convert rendered full image to cropped space
-        if warp_matrix is not None:
-            img_mesh_uint8 = img_mesh.astype(np.uint8)
-            img_mesh = cv2.warpAffine(img_mesh_uint8, warp_matrix, output_size)
+        if overlay_gt:
+            gt_verts = batch['gt_verts_w_transl'][0].cpu().detach().numpy()
+            gt_cam_t = batch["cam_ext"][0][:3, -1].cpu().detach().numpy()
+            gt_rgba = renderer(
+                gt_verts, gt_cam_t,
+                np.ones_like(img_mesh) * 255,
+                mesh_base_color=(1.0, 0.8, 0.5),
+                scene_bg_color=(1, 1, 1),
+                return_rgba=True,
+            )
+            alpha = (gt_rgba[..., 3:4].astype(np.float32) * 0.5)
+            # import ipdb; ipdb.set_trace()
+            pred_rgb = img_mesh.astype(np.float32) / 255.0
+            gt_rgb = gt_rgba[..., :3].astype(np.float32)
+            blended_pred = alpha * gt_rgb + (1.0 - alpha) * pred_rgb
+            img_mesh = (blended_pred * 255.0).clip(0, 255).astype(np.uint8)
+
+        if affine is not None:
+            img_mesh = cv2.warpAffine(img_mesh, affine, img_size)
 
         img_mesh_list.append(img_mesh)
 
-    if stack_vertically:
-        img_mesh_list = np.concatenate(img_mesh_list, axis=0)
-        cur_img = np.concatenate([base_img, img_mesh_list], axis=0)
+        if plot_side:
+            pred_side = (
+                renderer(
+                    all_pred_vertices - all_pred_vertices.mean(axis=0, keepdims=True),
+                    np.array([0.0, -0.25, 6.0]),
+                    np.ones_like(img_mesh) * 255,
+                    mesh_base_color=LIGHT_BLUE,
+                    side_view=True,
+                    rot_angle=90,
+                )
+            )
+            gt_side = (
+                renderer(
+                    gt_verts - gt_verts.mean(axis=0, keepdims=True),
+                    np.array([0.0, -0.25, 6.0]),
+                    np.ones_like(img_mesh) * 255,
+                    mesh_base_color=(1.0, 0.8, 0.5),
+                    side_view=True,
+                    rot_angle=90,
+                    return_rgba=True,
+                )
+            )
+            alpha = gt_side[..., 3:4] * 0.5
+            gt_side_rgb = gt_side[..., :3]
+            blended_sideview = alpha * gt_side_rgb + (1.0 - alpha) * pred_side
+            img_side = (blended_sideview * 255.0).clip(0, 255).astype(np.uint8)
+            img_side_list.append(img_side)
+
+    axis = 0 if stack_vertically else 1
+    img_mesh_list = np.concatenate(img_mesh_list, axis=axis)
+    img_side_list = np.concatenate(img_side_list, axis=axis)
+
+    if overlay_gt:
+        gt_base_img = (
+            renderer(
+                gt_verts,
+                gt_cam_t,
+                img_cv2.copy(),
+                mesh_base_color=(1.0, 0.8, 0.5),
+                scene_bg_color=(1, 1, 1),
+            )
+            * 255
+        ).astype(np.uint8)
+        if affine is not None:
+            gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)
     else:
-        img_mesh_list = np.concatenate(img_mesh_list, axis=1)
-        cur_img = np.concatenate([base_img, img_mesh_list], axis=1)
+        gt_base_img = base_img
+
+    cur_img = np.concatenate([gt_base_img, img_mesh_list], axis=axis)
+    cur_img = np.concatenate([
+        cur_img, 
+        np.concatenate([gt_base_img, img_side_list], axis=axis), 
+    ], axis=1 - axis)
 
     return cur_img

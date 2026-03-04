@@ -73,13 +73,11 @@ class Visualiser(pl.LightningModule):
 
         self.visualise_keypoints_3d(predictions, batch)
 
-        self.visualise_2d_keypoints_full(predictions, batch)
-
+        # self.visualise_2d_keypoints_full(predictions, batch)
         self.visualise_2d_keypoints_cropped(predictions, batch)
 
-        self.visualise_mesh(predictions, batch)
-
-        self.visualise_mesh_pyplot(predictions, batch)
+        # self.visualise_mesh(predictions, batch)
+        # self.visualise_mesh_pyplot(predictions, batch)
 
     def visualise_keypoints_3d(self, predictions, batch):
         """
@@ -834,32 +832,32 @@ class Visualiser(pl.LightningModule):
                 linewidths=1,
             )
 
-        # # Plot sample keypoints if available
-        # if sample_kp2d_cropped_coords is not None:
-        #     colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
-        #     for i in range(num_samples):
-        #         # Visible sample keypoints
-        #         if visible_mask.any():
-        #             plt.scatter(
-        #                 sample_kp2d_cropped_coords[i, visible_mask, 0],
-        #                 sample_kp2d_cropped_coords[i, visible_mask, 1],
-        #                 color=colors[i],
-        #                 s=8,
-        #                 marker=".",
-        #                 alpha=0.6,
-        #                 label=f"Sample {i+1}" if i < 5 else None,
-        #             )  # Only label first 5
-        #         # Invisible sample keypoints: similar but different symbol (hollow circles)
-        #         if invisible_mask.any():
-        #             plt.scatter(
-        #                 sample_kp2d_cropped_coords[i, invisible_mask, 0],
-        #                 sample_kp2d_cropped_coords[i, invisible_mask, 1],
-        #                 facecolors="none",
-        #                 edgecolors=colors[i],
-        #                 s=20,
-        #                 marker="o",
-        #                 alpha=0.6,
-        #             )
+        # Plot sample keypoints if available
+        if sample_kp2d_cropped_coords is not None:
+            colors = plt.cm.viridis(np.linspace(0, 1, num_samples))
+            for i in range(num_samples):
+                # Visible sample keypoints
+                if visible_mask.any():
+                    plt.scatter(
+                        sample_kp2d_cropped_coords[i, visible_mask, 0],
+                        sample_kp2d_cropped_coords[i, visible_mask, 1],
+                        color=colors[i],
+                        s=8,
+                        marker=".",
+                        alpha=0.6,
+                        label=f"Sample {i+1}" if i < 5 else None,
+                    )  # Only label first 5
+                # Invisible sample keypoints: similar but different symbol (hollow circles)
+                if invisible_mask.any():
+                    plt.scatter(
+                        sample_kp2d_cropped_coords[i, invisible_mask, 0],
+                        sample_kp2d_cropped_coords[i, invisible_mask, 1],
+                        facecolors="none",
+                        edgecolors=colors[i],
+                        s=20,
+                        marker="o",
+                        alpha=0.6,
+                    )
 
         plt.legend()
         plt.title(f"2D Keypoints Visualization (Batch {batch_idx})")
