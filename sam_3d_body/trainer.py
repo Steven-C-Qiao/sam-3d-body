@@ -114,6 +114,7 @@ class Trainer(BaseLightningModule):
             # Unfreeze uncertainty parameters
             for param in [
                 self.model.head_uncertainty,
+                self.model.nf_head,
             ]:
                 for p in param.parameters():
                     p.requires_grad = True

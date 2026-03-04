@@ -836,7 +836,6 @@ class SAM3DBody(BaseModel):
             # dist_3dof = samples_dict["dist_3dof"]
             # outputs["dist_3dof"] = dist_3dof
 
-
             mhr_output = self.head_pose.mhr_forward(
                 scale_params=torch.zeros_like(scale_samples),
                 shape_params=shape_samples,

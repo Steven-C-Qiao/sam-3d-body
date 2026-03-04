@@ -22,7 +22,7 @@ from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=41, dev=False):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
