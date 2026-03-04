@@ -15,7 +15,8 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from .models.meta_arch.sam3d_body import SAM3DBody
 from .models.meta_arch.base_lightning_module import BaseLightningModule
-from .losses.loss import Loss
+# from .losses.loss import Loss
+from .losses.nf_loss import Loss
 from .data.bedlam_dataset import DatasetHMR as BEDLAMDataset
 from .data.bedlam_dataset import MultiViewEvaluationDataset
 from .metrics.metrics_tracker import Metrics
@@ -51,7 +52,7 @@ class Trainer(BaseLightningModule):
         self.vis_save_dir = vis_save_dir
         self.stack_vertically = stack_vertically
 
-        self.use_lora = cfg.MODEL.USE_LORA
+        self.use_lora = cfg.MODEL.DECODER.USE_LORA
         self.model_type = cfg.TRAIN.get("MODEL_TYPE", "full")
         if self.model_type == "toy":
             assert False

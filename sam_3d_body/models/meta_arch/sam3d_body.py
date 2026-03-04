@@ -56,7 +56,7 @@ class SAM3DBody(BaseModel):
         self.sample_scale = self.cfg.MODEL.SAMPLE_SCALE
         self.sample_pose = self.cfg.MODEL.SAMPLE_POSE
         self.full_cov = self.cfg.MODEL.FULL_COV
-        self.use_lora = self.cfg.MODEL.USE_LORA
+        self.use_lora = self.cfg.MODEL.DECODER.USE_LORA
 
         # Create backbone feature extractor for human crops
         self.backbone = create_backbone(self.cfg.MODEL.BACKBONE.TYPE, self.cfg)
@@ -71,6 +71,7 @@ class SAM3DBody(BaseModel):
         )
 
         self.head_uncertainty = build_head(self.cfg, "uncertainty")
+        self.nf_head = build_head(self.cfg, "nf")
 
         # Initialize pose token with learnable params
         # Note: bias/initial value should be zero-pose in cont, not all-zeros
@@ -508,10 +509,14 @@ class SAM3DBody(BaseModel):
 
             return pose_output
 
-        def token_to_uncertainty_output_fn(tokens):
+        def token_to_uncertainty_output_fn(tokens, mean_pred=None):
             token = tokens[:, 0]
             uncertainty_output = self.head_uncertainty(token)
-            return uncertainty_output
+            if mean_pred is not None:
+                nf_output = self.nf_head(token, mean_pred)
+                return nf_output
+            else:
+                return uncertainty_output
 
 
         kp_token_update_fn = self.keypoint_token_update_fn
@@ -551,39 +556,6 @@ class SAM3DBody(BaseModel):
             "tokens_output": tokens_output,
         }
         return ret 
-
-
-
-
-
-
-        #         return (
-        #             (
-        #                 tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
-        #                 pose_output,
-        #             ),
-        #             uncertainty_output,
-        #         )
-        #     else:
-        #         return(tokens_output, pose_output), uncertainty_output # which is the uncertainty 
-        # else:
-        #     # LoRA is disabled: original behavior
-        #     if isinstance(decoder_output, tuple):
-        #         tokens_output, pose_output = decoder_output
-        #     else:
-        #         tokens_output = decoder_output
-        #         pose_output = None
-            
-        #     # Extract pose token (index 0) from final tokens
-        #     pose_token = tokens_output[:, 0]
-
-        #     if self.cfg.MODEL.DECODER.get("DO_HAND_DETECT_TOKENS", False):
-        #         return (
-        #             tokens_output[:, hand_det_emb_start_idx : hand_det_emb_start_idx + 2],
-        #             pose_output,
-        #         )
-        #     else:
-        #         return pose_token, pose_output
 
     @torch.no_grad()
     def _get_keypoint_prompt(self, batch, pred_keypoints_2d, force_dummy=False):
@@ -825,6 +797,9 @@ class SAM3DBody(BaseModel):
 
         outputs = self.forward_pose_branch(batch)
 
+        use_nf = "shape_samples" in outputs["uncertainty_output"]
+        
+
         if num_samples > 0:
             output_mhr = outputs["mhr"]
 
@@ -836,15 +811,19 @@ class SAM3DBody(BaseModel):
             )
             global_trans = torch.zeros_like(global_rot_euler_mean)
 
-            samples_dict = gen_samples(
-                output_mhr,
-                outputs["uncertainty_output"],
-                num_samples,
-                sample_pose=self.sample_pose,
-                full_cov=self.full_cov,
-                scale_bias=self.head_pose.scale_mean.float(),
-                scale_comps=self.head_pose.scale_comps.float(),
-            )
+            if use_nf:
+                samples_dict = outputs["uncertainty_output"]
+                num_samples = samples_dict["samples"].shape[1]
+            else:
+                samples_dict = gen_samples(
+                    output_mhr,
+                    outputs["uncertainty_output"],
+                    num_samples,
+                    sample_pose=self.sample_pose,
+                    full_cov=self.full_cov,
+                    scale_bias=self.head_pose.scale_mean.float(),
+                    scale_comps=self.head_pose.scale_comps.float(),
+                )
             shape_samples = samples_dict["shape_samples"].view(
                 -1, samples_dict["shape_samples"].shape[-1]
             )
@@ -854,8 +833,9 @@ class SAM3DBody(BaseModel):
             pose_samples = samples_dict["pose_samples"].view(
                 -1, samples_dict["pose_samples"].shape[-1]
             )
-            dist_3dof = samples_dict["dist_3dof"]
-            outputs["dist_3dof"] = dist_3dof
+            # dist_3dof = samples_dict["dist_3dof"]
+            # outputs["dist_3dof"] = dist_3dof
+
 
             mhr_output = self.head_pose.mhr_forward(
                 scale_params=torch.zeros_like(scale_samples),
