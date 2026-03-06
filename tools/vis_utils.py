@@ -5,7 +5,12 @@ from sam_3d_body.visualization.renderer import Renderer
 from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
 
+# Base pastel mesh color (kept for backward compatibility)
 LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
+
+# High-contrast pair for GT vs predictions (matplotlib/tab10-like)
+BLUE = (0.12156863, 0.46666667, 0.70588235)   # strong blue
+ORANGE = (1.0,        0.49803922, 0.05490196) # strong orange
 
 visualizer = SkeletonVisualizer(line_width=2, radius=5)
 visualizer.set_pose_meta(mhr70_pose_info)
@@ -290,6 +295,34 @@ def my_visualize_samples(
         except:
             pass 
 
+    # Compute per-vertex colors for the mean prediction (as in my_visualize)
+    vertex_colors_mean = None
+    try:
+        mean_pred_vertices_np = outputs["pred_vertices"][0]  # (N_verts, 3)
+        num_samples_mhr = mhr_samples.shape[1]
+        distances = []
+        for i in range(num_samples_mhr):
+            sample_vertices = mhr_samples[0, i]  # (N_verts, 3)
+            vertex_distances = np.linalg.norm(
+                sample_vertices - mean_pred_vertices_np, axis=1
+            )
+            distances.append(vertex_distances)
+        avg_distances = np.mean(distances, axis=0)  # (N_verts,)
+
+        min_dist = np.min(avg_distances)
+        max_dist = np.max(avg_distances)
+        if max_dist > min_dist:
+            normalized_distances = (avg_distances - min_dist) / (max_dist - min_dist)
+        else:
+            normalized_distances = np.zeros_like(avg_distances)
+
+        viridis = cm.get_cmap("viridis")
+        vertex_colors_rgb = viridis(normalized_distances)[:, :3]  # (N_verts, 3)
+        vertex_colors_mean = np.ones((vertex_colors_rgb.shape[0], 4), dtype=np.float32)
+        vertex_colors_mean[:, :3] = vertex_colors_rgb
+    except Exception:
+        vertex_colors_mean = None
+
     img_mesh_list = []
     img_side_list = []
 
@@ -307,7 +340,7 @@ def my_visualize_samples(
                 all_pred_vertices,
                 outputs["pred_cam_t"][0],
                 img_mesh,
-                mesh_base_color=LIGHT_BLUE,
+                mesh_base_color=ORANGE,
                 scene_bg_color=(1, 1, 1),
             )
             * 255
@@ -319,12 +352,12 @@ def my_visualize_samples(
             gt_rgba = renderer(
                 gt_verts, gt_cam_t,
                 np.ones_like(img_mesh) * 255,
-                mesh_base_color=(1.0, 0.8, 0.5),
+                mesh_base_color=BLUE,
                 scene_bg_color=(1, 1, 1),
                 return_rgba=True,
             )
             alpha = (gt_rgba[..., 3:4].astype(np.float32) * 0.5)
-            # import ipdb; ipdb.set_trace()
+            
             pred_rgb = img_mesh.astype(np.float32) / 255.0
             gt_rgb = gt_rgba[..., :3].astype(np.float32)
             blended_pred = alpha * gt_rgb + (1.0 - alpha) * pred_rgb
@@ -341,7 +374,7 @@ def my_visualize_samples(
                     all_pred_vertices - all_pred_vertices.mean(axis=0, keepdims=True),
                     np.array([0.0, -0.25, 6.0]),
                     np.ones_like(img_mesh) * 255,
-                    mesh_base_color=LIGHT_BLUE,
+                    mesh_base_color=ORANGE,
                     side_view=True,
                     rot_angle=90,
                 )
@@ -351,7 +384,7 @@ def my_visualize_samples(
                     gt_verts - gt_verts.mean(axis=0, keepdims=True),
                     np.array([0.0, -0.25, 6.0]),
                     np.ones_like(img_mesh) * 255,
-                    mesh_base_color=(1.0, 0.8, 0.5),
+                    mesh_base_color=BLUE,
                     side_view=True,
                     rot_angle=90,
                     return_rgba=True,
@@ -368,25 +401,70 @@ def my_visualize_samples(
     img_side_list = np.concatenate(img_side_list, axis=axis)
 
     if overlay_gt:
-        gt_base_img = (
-            renderer(
-                gt_verts,
-                gt_cam_t,
-                img_cv2.copy(),
-                mesh_base_color=(1.0, 0.8, 0.5),
-                scene_bg_color=(1, 1, 1),
-            )
-            * 255
-        ).astype(np.uint8)
+        # Top-left panel: GT overlaid on mean prediction on the original image (unchanged)
+        gt_base_img = renderer(
+            gt_verts,
+            gt_cam_t,
+            img_cv2.copy(),
+            mesh_base_color=BLUE,
+            scene_bg_color=(1, 1, 1),
+            return_rgba=True,
+        )
+
+        mean_pred_verts = outputs["pred_vertices"][0]
+        mean_pred_cam_t = outputs["pred_cam_t"][0]
+        mean_pred_rgb_full = renderer(
+            mean_pred_verts,
+            mean_pred_cam_t,
+            img_cv2.copy(),
+            mesh_base_color=ORANGE,
+            scene_bg_color=(1, 1, 1),
+        )
+        alpha = (gt_base_img[..., 3:4].astype(np.float32) * 0.5)
+        gt_base_rgb_full = gt_base_img[..., :3].astype(np.float32)
+        blended_pred_full = alpha * gt_base_rgb_full + (1.0 - alpha) * mean_pred_rgb_full
+        gt_base_img = (blended_pred_full * 255.0).clip(0, 255).astype(np.uint8)
+
+        # Bottom-left panel: mean prediction on white background with per-vertex colors,
+        # overlaid with GT (as requested)
+        white_bg = np.ones_like(img_cv2) * 255
+        mean_pred_unc = renderer(
+            mean_pred_verts,
+            mean_pred_cam_t,
+            white_bg.copy(),
+            mesh_base_color=ORANGE,
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vertex_colors_mean,
+        )
+        gt_rgba_unc = renderer(
+            gt_verts,
+            gt_cam_t,
+            white_bg.copy(),
+            mesh_base_color=BLUE,
+            scene_bg_color=(1, 1, 1),
+            return_rgba=True,
+        )
+        alpha_unc = (gt_rgba_unc[..., 3:4].astype(np.float32) * 0.5)
+        gt_unc_rgb = gt_rgba_unc[..., :3].astype(np.float32)
+        mean_pred_unc_rgb = mean_pred_unc.astype(np.float32)
+        blended_unc = alpha_unc * gt_unc_rgb + (1.0 - alpha_unc) * mean_pred_unc_rgb
+        mean_unc_panel = (blended_unc * 255.0).clip(0, 255).astype(np.uint8)
+
         if affine is not None:
             gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)
+            mean_unc_panel = cv2.warpAffine(mean_unc_panel, affine, img_size)
     else:
         gt_base_img = base_img
+        white_bg = np.ones_like(base_img) * 255
+        mean_unc_panel = white_bg
 
     cur_img = np.concatenate([gt_base_img, img_mesh_list], axis=axis)
-    cur_img = np.concatenate([
-        cur_img, 
-        np.concatenate([gt_base_img, img_side_list], axis=axis), 
-    ], axis=1 - axis)
+    cur_img = np.concatenate(
+        [
+            cur_img,
+            np.concatenate([mean_unc_panel, img_side_list], axis=axis),
+        ],
+        axis=1 - axis,
+    )
 
     return cur_img

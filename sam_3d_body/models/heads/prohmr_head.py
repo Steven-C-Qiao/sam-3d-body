@@ -181,7 +181,7 @@ class NFHead(nn.Module):
         
         
         shape_residual_samples = samples[..., 39+34:39+34+45] * 0.5
-        shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1) + shape_residual_samples
+        shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1) #+ shape_residual_samples
         
         scale_residual_samples = samples[..., 39+34+45:39+34+45+10] * 0.5
         scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)

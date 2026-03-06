@@ -22,7 +22,7 @@ from .data.bedlam_dataset import MultiViewEvaluationDataset
 from .metrics.metrics_tracker import Metrics
 from .visualization.my_vis import Visualiser
 
-# from .configs.config import INDICES_PATH
+from .configs.config import INDICES_PATH
 
 import sys
 from pathlib import Path
@@ -71,7 +71,7 @@ class Trainer(BaseLightningModule):
         )
         self.mhr_dense_kp_indices = None
         if self.use_dense_keypoints:
-            # mhr_dense_kp_indices_np = np.load(INDICES_PATH)
+            mhr_dense_kp_indices_np = np.load(INDICES_PATH)
             self.mhr_dense_kp_indices = torch.from_numpy(mhr_dense_kp_indices_np).long()
             # Expose to the meta-arch and the MHR head for dense keypoint extraction
             setattr(self.model, "mhr_dense_kp_indices", self.mhr_dense_kp_indices)
@@ -225,8 +225,8 @@ class Trainer(BaseLightningModule):
             vis_step > 4000 and vis_step % 5000 == 0
         )
         global_rank = getattr(self, "global_rank", 0)
-        if should_visualize and global_rank == 0:
-        # if global_rank == 0:
+        # if should_visualize and global_rank == 0:
+        if global_rank == 0:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
             image = image.cpu().detach().numpy()  # [3, H, W]
@@ -241,7 +241,7 @@ class Trainer(BaseLightningModule):
                 image,
                 outputs,
                 self.faces,
-                stack_vertically=self.stack_vertically,
+                stack_vertically=False, # self.stack_vertically,
                 affine=affine,
                 img_size=img_size,
                 overlay_gt=True,
