@@ -180,6 +180,42 @@ class NFHead(nn.Module):
         z = flow_output["z"]
 
         
+
+
+        samples[..., :73] *= 0.2
+        samples[..., 73:] *= 0.5
+
+
+        pose_3dof_residual_samples = samples[..., :39]
+        pose_1dof_residual_samples = samples[..., 39:39+34]
+
+        aa_3dof_samples = aa_3dofs.unsqueeze(1).repeat(1, N, 1) + pose_3dof_residual_samples
+        params_1dofs_samples = params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
+
+        pose_samples = self.convert_samples_to_params(aa_3dof_samples, params_1dofs_samples, pose_params_mhr)
+
+        
+        # shape_residual_samples = samples[..., 39+34:39+34+45]
+        shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1) # + shape_residual_samples
+
+        # scale_residual_samples = samples[..., 39+34+45:39+34+45+10]
+        scale_residual_samples = samples[..., -10:]
+        scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
+        scale_samples_68D[..., scale_indices] += scale_residual_samples
+
+        ret = {
+            "samples": samples,
+            "log_prob": log_prob,
+            "z": z,
+            "shape_samples": shape_samples,
+            "scale_samples": scale_samples_68D,
+            "pose_samples": pose_samples,
+            # "shape_residual_samples": shape_residual_samples,
+            "scale_residual_samples": scale_residual_samples,
+            "pose_3dof_residual_samples_aa": pose_3dof_residual_samples,
+            "pose_1dof_residual_samples": pose_1dof_residual_samples,
+            "flow_context": flow_context,
+        }        
         # log_prob_using_func, z = self.log_prob(
         #     samples.flatten(0, 1), 
         #     flow_context.repeat_interleave(N, dim=0)
@@ -206,42 +242,6 @@ class NFHead(nn.Module):
         # log_prob_using_func = log_prob_using_func.unflatten(0, (B, N))
         # print(log_prob_using_func[0])
         # print(log_prob[0])
-
-
-        samples[..., :73] *= 0.2
-        samples[..., 73:] *= 0.5
-
-
-        pose_3dof_residual_samples = samples[..., :39]
-        pose_1dof_residual_samples = samples[..., 39:39+34]
-
-        aa_3dof_samples = aa_3dofs.unsqueeze(1).repeat(1, N, 1) + pose_3dof_residual_samples
-        params_1dofs_samples = params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
-
-        pose_samples = self.convert_samples_to_params(aa_3dof_samples, params_1dofs_samples, pose_params_mhr)
-
-        
-        shape_residual_samples = samples[..., 39+34:39+34+45]
-        shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1) # + shape_residual_samples
-
-        # scale_residual_samples = samples[..., 39+34+45:39+34+45+10]
-        scale_residual_samples = samples[..., -10:]
-        scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
-        scale_samples_68D[..., scale_indices] += scale_residual_samples
-
-        ret = {
-            "samples": samples,
-            "log_prob": log_prob,
-            "z": z,
-            "shape_samples": shape_samples,
-            "scale_samples": scale_samples_68D,
-            "pose_samples": pose_samples,
-            "shape_residual_samples": shape_residual_samples,
-            "scale_residual_samples": scale_residual_samples,
-            "pose_3dof_residual_samples_aa": pose_3dof_residual_samples,
-            "pose_1dof_residual_samples": pose_1dof_residual_samples,
-            "flow_context": flow_context,
-        }        
         return ret 
     
 

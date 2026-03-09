@@ -78,12 +78,6 @@ class Loss(pl.LightningModule):
             """
             gt_model_params = batch["model_params"]
             gt_shape = batch["shape_params"]
-            gt_face = batch["face_expr_coeffs"]
-
-
-            gt_scale_68D = gt_model_params[:, -68:]
-            gt_pose = gt_model_params[:, 6:-68]
-
 
             gt_flow_params = convert_mhr_params_to_flow_params(gt_model_params, gt_shape)
             
@@ -97,45 +91,8 @@ class Loss(pl.LightningModule):
                 mean_pred["shape"]
             )
 
-            # from sam_3d_body.models.modules.mhr_utils import (
-            #     all_param_3dof_rot_idxs, 
-            #     all_param_1dof_rot_idxs, 
-            #     indices_3dof, 
-            #     indices_1dof, 
-            #     scale_indices
-            # )
-            # from sam_3d_body.models.modules.mhr_utils import batch6DFromXYZ
-
-            # gt_pose_3dof_euler = gt_pose[..., all_param_3dof_rot_idxs[:-1].flatten()]
-            # gt_pose_3dof_euler = torch.cat([gt_pose_3dof_euler, torch.zeros_like(gt_pose_3dof_euler[..., :3])], dim=-1)
-            # gt_pose_3dof_euler = gt_pose_3dof_euler.unflatten(-1, (-1, 3))
-            # gt_pose_1dof_angle = gt_pose[..., indices_1dof]
-            # gt_pose_3dof_rotmat = batch6DFromXYZ(gt_pose_3dof_euler, return_9D=True)
-            # gt_pose_3dof_aa = matrix_to_axis_angle(gt_pose_3dof_rotmat)
-            # gt_pose_3dof_aa_selected = gt_pose_3dof_aa[..., indices_3dof, :].flatten(-2, -1)
-            # gt_scale_selected = gt_scale_68D[..., scale_indices]
-            # gt_flow_params  = torch.cat([
-            #     gt_pose_3dof_aa_selected, gt_pose_1dof_angle, gt_shape, gt_scale_selected
-            # ], dim=-1)
-
-            # mean_pred = predictions["mhr"]
-            # mean_pred_shape = mean_pred["shape"]
-            # mean_pred_scale_68D = mean_pred["scale_68D"]
-            # mean_pred_pose = mean_pred["body_pose"][..., 6:]
-            # mean_pred_pose_3dof_euler = mean_pred_pose[..., all_param_3dof_rot_idxs[:-1].flatten()]
-            # mean_pred_pose_3dof_euler = torch.cat([mean_pred_pose_3dof_euler, torch.zeros_like(mean_pred_pose_3dof_euler[..., :3])], dim=-1)
-            # mean_pred_pose_3dof_euler = mean_pred_pose_3dof_euler.unflatten(-1, (-1, 3))
-            # mean_pred_pose_1dof_angle = mean_pred_pose[..., indices_1dof]
-            # mean_pred_pose_3dof_rotmat = batch6DFromXYZ(mean_pred_pose_3dof_euler, return_9D=True)
-            # mean_pred_pose_3dof_aa = matrix_to_axis_angle(mean_pred_pose_3dof_rotmat)
-            # mean_pred_pose_3dof_aa_selected = mean_pred_pose_3dof_aa[..., indices_3dof, :].flatten(-2, -1)
-            # mean_pred_scale_selected = mean_pred_scale_68D[..., scale_indices]
-            # mean_pred_flow_params  = torch.cat([
-            #     mean_pred_pose_3dof_aa_selected, mean_pred_pose_1dof_angle, mean_pred_shape, mean_pred_scale_selected
-            # ], dim=-1)
-
             true_residual = gt_flow_params - mean_pred_flow_params
-            # evaluate the true_residual nll 
+            
             flow_context = predictions["uncertainty_output"]["flow_context"]
 
             self.nf_head.eval()
@@ -146,13 +103,13 @@ class Loss(pl.LightningModule):
 
             nll_loss = - flow_log_prob.mean()
 
-            auto_sample_loglik = predictions['uncertainty_output']['log_prob']
-            samples = predictions["uncertainty_output"]["samples"]            
-            sample_log_prob, z = self.nf_head.log_prob(samples.flatten(0, 1), flow_context.repeat_interleave(5, dim=0))
-            sample_log_prob = sample_log_prob.unflatten(0, (B, -1))
-            print(flow_log_prob[:5])
-            print(auto_sample_loglik[0, :5])
-            print(sample_log_prob[0, :5])
+            # auto_sample_loglik = predictions['uncertainty_output']['log_prob']
+            # samples = predictions["uncertainty_output"]["samples"]            
+            # sample_log_prob, z = self.nf_head.log_prob(samples.flatten(0, 1), flow_context.repeat_interleave(5, dim=0))
+            # sample_log_prob = sample_log_prob.unflatten(0, (B, -1))
+            # print(flow_log_prob[:5])
+            # print(auto_sample_loglik[0, :5])
+            # print(sample_log_prob[0, :5])
     
             self.nf_head.train()
 
@@ -167,8 +124,8 @@ class Loss(pl.LightningModule):
 
         for k, v in loss_dict.items():
             print(f"{k}: {v.item():.3f}", end=" ")
-        print(flow_log_prob[:5])
         print('')
-        import ipdb; ipdb.set_trace()
+        # print(flow_log_prob[:5])
+        # import ipdb; ipdb.set_trace()
 
         return loss_dict
