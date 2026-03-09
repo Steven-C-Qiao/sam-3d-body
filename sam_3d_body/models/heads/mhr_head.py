@@ -210,7 +210,7 @@ class MHRHead(nn.Module):
         ## 10 here is because it's more stable to optimize global translation in meters.
         full_pose_params = torch.cat(
             [global_trans * 10, global_rot, body_pose_params], dim=1
-        )  # B x 127
+        )  # B x [3 + 3 + 130] = 136, 136 + 68 = 204
         ## Put in hands
         if hand_pose_params is not None:
             full_pose_params = self.replace_hands_in_pose(

@@ -157,7 +157,10 @@ class Trainer(BaseLightningModule):
         self.scale_comps = self.model.head_pose.scale_comps.float()
 
         self.criterion = Loss(
-            cfg, scale_mean=self.scale_mean, scale_comps=self.scale_comps
+            cfg, 
+            scale_mean=self.scale_mean, 
+            scale_comps=self.scale_comps,
+            nf_head=self.model.nf_head
         )
 
         self.faces = self.model.head_pose.faces.cpu().detach().numpy()
@@ -225,8 +228,8 @@ class Trainer(BaseLightningModule):
             vis_step > 4000 and vis_step % 5000 == 0
         )
         global_rank = getattr(self, "global_rank", 0)
-        # if should_visualize and global_rank == 0:
-        if global_rank == 0:
+        if should_visualize and global_rank == 0:
+        # if global_rank == 0:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
             image = image.cpu().detach().numpy()  # [3, H, W]
