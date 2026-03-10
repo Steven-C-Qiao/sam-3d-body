@@ -318,7 +318,6 @@ class MHRHead(nn.Module):
 
         pred_scales_68D = self.scale_mean[None, :] + pred_scale @ self.scale_comps
 
-
         # Run everything through mhr
         output = self.mhr_forward(
             global_trans=global_trans,

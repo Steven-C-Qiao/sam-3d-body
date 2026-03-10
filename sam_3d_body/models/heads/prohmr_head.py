@@ -18,6 +18,8 @@ from pytorch3d.transforms import (
     matrix_to_axis_angle,
     matrix_to_euler_angles,
 )
+
+
 def aa_to_euler(aa, euler_convention="XYZ"):
     rotmat = axis_angle_to_matrix(aa)
     euler = matrix_to_euler_angles(rotmat, euler_convention)
@@ -34,13 +36,13 @@ class NFHead(nn.Module):
 
         self.num_shape_comps = 45 if self.model_shape else 0
         self.num_scale_comps = 10 if self.model_scale else 0
-        self.num_pose_comps = 39
+        self.num_3dof_comps = 39
         self.num_1dof_comps = 34
         self.num_glob_rot_comps = 3 if self.model_glob_rot else 0
 
         self.flow_dim = (
             self.num_scale_comps
-            + self.num_pose_comps
+            + self.num_3dof_comps
             + self.num_1dof_comps
             + self.num_shape_comps
             + self.num_glob_rot_comps
@@ -50,7 +52,7 @@ class NFHead(nn.Module):
             "num_layers": 4,
             "context_features": 2048,
             "layer_hidden_features": 1024,
-            "layer_depth": 2
+            "layer_depth": 2,
         }
         self.flow = ConditionalGlow(
             config["flow_dim"],
@@ -58,27 +60,15 @@ class NFHead(nn.Module):
             config["num_layers"],
             config["layer_depth"],
             context_features=config["context_features"],
-            # dropout_probability=0.0
         )
-
-        # Default number of NF samples per instance (can be overridden at call time)
         self.num_samples = cfg.MODEL.NUM_SAMPLES
 
         context_dim = 1024 + 45 + 10 + 39 + 34
         self.context_proj = nn.Linear(context_dim, 2048)
 
-        self.register_buffer('initialized', torch.tensor(False))
-
-
+        self.register_buffer("initialized", torch.tensor(False))
 
     def initialize_actnorm(self, batch: Dict, flow_context: torch.Tensor):
-        """
-        Initialize ActNorm buffers by running a dummy forward step
-        Args:
-            batch (Dict): Dictionary containing batch data
-            conditioning_feats (torch.Tensor): Tensor of shape (N, C) containing the conditioning features extracted using thee backbonee
-        """
-
         model_params = batch["model_params"]
         shape_params = batch["shape_params"]
         flow_params = convert_mhr_params_to_flow_params(
@@ -95,28 +85,11 @@ class NFHead(nn.Module):
 
     @autocast("cuda", enabled=False)
     def log_prob(self, params: torch.Tensor, flow_context: torch.Tensor) -> Tuple:
-
-        """
-        Compute log probability of parameters given flow context.
-        Args:
-            params: torch.Tensor of shape (B, flow_dim) containing flow parameters.
-                   Flow samples are of dim B, 128, where:
-                   - :39 are 3dofs
-                   - 39:73 are 1dofs  
-                   - 73:73+45 are shape
-                   - 73+45:73+45+10 are selected scale
-            flow_context: torch.Tensor of shape (B, context_features) containing conditioning features
-            
-        Returns:
-            log_prob: torch.Tensor of log probabilities
-            z: torch.Tensor of latent representations
-        """
         log_prob, z = self.flow.log_prob(
             inputs=params,
             context=flow_context,
         )
         return log_prob, z
-
 
     @autocast("cuda", enabled=False)
     def flow_forward(
@@ -142,7 +115,6 @@ class NFHead(nn.Module):
         }
         return ret
 
-    
     @autocast("cuda", enabled=False)
     def forward(
         self,
@@ -152,38 +124,43 @@ class NFHead(nn.Module):
         batch: Dict = None,
     ) -> Dict:
         """
-            Given context and mean predictions, compute residual uncertainty by NF
-            sampling needs to be handled here, instead of in model forward
+        Given context and mean predictions, compute residual uncertainty by NF
+        sampling needs to be handled here, instead of in model forward
 
-            Args:
-                mean_pred:
+        Args:
+            mean_pred:
 
         """
         if num_samples <= 0:
             num_samples = self.num_samples
 
         B, N = flow_context.shape[0], num_samples
-        
-        shape_mean = mean_pred["shape"] # B, 45
-        scale_mean = mean_pred["scale_68D"] # B, 68 
+
+        shape_mean = mean_pred["shape"]  # B, 45
+        scale_mean = mean_pred["scale_68D"]  # B, 68
         scale_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
 
-        pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:] # first 6 are global transl and rot 
+        pose_mean_cont = mean_pred["pred_pose_raw"][
+            :, 6:
+        ]  # first 6 are global transl and rot
 
         pose_params_mhr = compact_cont_to_model_params_body(pose_mean_cont)
 
         pose_params = self.convert_pose_cont_to_params_for_context(pose_mean_cont)
-        aa_3dofs = pose_params["aa_3dofs"] # B, 39 
-        params_1dofs = pose_params["params_1dofs"] # B, 34 
+        aa_3dofs = pose_params["aa_3dofs"]  # B, 39
+        params_1dofs = pose_params["params_1dofs"]  # B, 34
 
         flow_context = self.context_proj(
-            torch.cat([
-                flow_context, 
-                shape_mean, 
-                scale_mean[..., scale_indices], 
-                aa_3dofs, 
-                params_1dofs
-            ], dim=-1)
+            torch.cat(
+                [
+                    flow_context,
+                    shape_mean,
+                    scale_mean[..., scale_indices],
+                    aa_3dofs,
+                    params_1dofs,
+                ],
+                dim=-1,
+            )
         )
 
         if not self.initialized.item():
@@ -198,34 +175,34 @@ class NFHead(nn.Module):
         log_prob = flow_output["log_prob"]
         z = flow_output["z"]
 
-
-        # log_prob_from_func, z = self.log_prob(samples.flatten(0, 1), flow_context.repeat_interleave(N, dim=0))
-        # log_prob_from_func = log_prob_from_func.unflatten(0, (B, N))
-        # print('log_prob_from_func', log_prob_from_func[0, :5])
-        print('samples', samples[0, :2, :10].cpu().detach().numpy())
-        print('log_prob', log_prob[0, :2].cpu().detach().numpy())
-        # import ipdb; ipdb.set_trace()
-
         # samples *= 0.5
 
-        # Layout in flow space:
-        #   [glob_rot(3? optional), pose_3dof(39), pose_1dof(34), shape(45? optional), scale(10? optional)]
         offset = self.num_glob_rot_comps
-        pose_3dof_residual_samples = samples[..., offset : offset + self.num_pose_comps]
+        pose_3dof_residual_samples = samples[..., offset : offset + self.num_3dof_comps]
         pose_1dof_residual_samples = samples[
-            ..., offset + self.num_pose_comps : offset + self.num_pose_comps + self.num_1dof_comps
+            ...,
+            offset
+            + self.num_3dof_comps : offset
+            + self.num_3dof_comps
+            + self.num_1dof_comps,
         ]
 
-        aa_3dof_samples = aa_3dofs.unsqueeze(1).repeat(1, N, 1) + pose_3dof_residual_samples
-        params_1dofs_samples = params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
+        aa_3dof_samples = (
+            aa_3dofs.unsqueeze(1).repeat(1, N, 1) + pose_3dof_residual_samples
+        )
+        params_1dofs_samples = (
+            params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
+        )
 
-        pose_samples = self.convert_samples_to_params(aa_3dof_samples, params_1dofs_samples, pose_params_mhr)
+        pose_samples = self.convert_samples_to_params(
+            aa_3dof_samples, params_1dofs_samples, pose_params_mhr
+        )
 
-        
         # shape_residual_samples = samples[..., 39+34:39+34+45]
-        shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1) # + shape_residual_samples
+        shape_samples = shape_mean.unsqueeze(1).repeat(
+            1, N, 1
+        )  # + shape_residual_samples
 
-        # scale_residual_samples = samples[..., 39+34+45:39+34+45+10]
         scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
         if self.model_scale and self.num_scale_comps > 0:
             scale_residual_samples = samples[..., -self.num_scale_comps :]
@@ -243,70 +220,17 @@ class NFHead(nn.Module):
             # "pose_3dof_residual_samples_aa": pose_3dof_residual_samples,
             # "pose_1dof_residual_samples": pose_1dof_residual_samples,
             "flow_context": flow_context,
-        }        
-        
-        # gt_model_params = batch["model_params"]
-        # gt_shape = batch["shape_params"]
+        }
 
-        # gt_flow_params = convert_mhr_params_to_flow_params(gt_model_params, gt_shape)
-        
-        # mean_pred_flow_params = convert_mhr_params_to_flow_params(
-        #     torch.cat([
-        #         torch.zeros_like(mean_pred["body_pose"][..., :6]), # Adds global, which is not used
-        #         mean_pred["body_pose"][..., :130], # gets rid of jaw
-        #         mean_pred["scale_68D"],
-        #     ], dim=-1), 
-        #     mean_pred["shape"]
-        # )
+        return ret
 
-        # true_residual = gt_flow_params - mean_pred_flow_params
-        # samples = true_residual.unsqueeze(1).repeat(1, N, 1)
-
-        # aa_3dof_samples = gt_flow_params[..., :39].unsqueeze(1).repeat(1, N, 1) 
-        # params_1dofs_samples = gt_flow_params[..., 39:39+34].unsqueeze(1).repeat(1, N, 1)
-
-
-        # log_prob_using_func, z = self.log_prob(
-        #     samples.flatten(0, 1), 
-        #     flow_context.repeat_interleave(N, dim=0)
-        # )
-        # log_prob_using_func = log_prob_using_func.unflatten(0, (B, N))
-        # print('log_prob_using_func, train mode')
-        # print(log_prob_using_func[0, :5])
-        # print('log_prob, train mode')
-        # print(log_prob[0, :5])
-                
-        # self.flow.eval()
-
-        # # flow_output = self.flow_forward(
-        # #     flow_context,
-        # #     num_samples=N,
-        # # )
-        # # samples = flow_output["samples"]
-        # # log_prob = flow_output["log_prob"]
-        # # z = flow_output["z"]
-
-        # # print(samples[0,0, :10])
-        # # print(flow_context[0, :10])
-
-        
-        # log_prob_using_func, z = self.log_prob(
-        #     samples.flatten(0, 1), 
-        #     flow_context.repeat_interleave(N, dim=0)
-        # )
-        # log_prob_using_func = log_prob_using_func.unflatten(0, (B, N))
-        # print('log_prob_using_func, eval mode')    
-        # print(log_prob_using_func[0, :5])
-        # print('log_prob, eval mode')
-        # print(log_prob[0, :5])
-        # self.flow.train()
-        
-        return ret 
-    
-
-
-    def convert_samples_to_params(self, aa_3dof_samples: torch.Tensor, params_1dofs_samples: torch.Tensor, pose_mean: torch.Tensor):
-         # fmt: off
+    def convert_samples_to_params(
+        self,
+        aa_3dof_samples: torch.Tensor,
+        params_1dofs_samples: torch.Tensor,
+        pose_mean: torch.Tensor,
+    ):
+        # fmt: off
         all_param_3dof_rot_idxs_except_hands = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (130, 131, 132)])
         all_param_1dof_rot_idxs_except_hands = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 116, 117, 118, 119, 120, 121, 122, 123])
         # fmt: on
@@ -327,7 +251,8 @@ class NFHead(nn.Module):
         matrix = torch.stack([x, y, z], dim=-1)
 
         sy = torch.sqrt(
-            matrix[..., 0, 0] * matrix[..., 0, 0] + matrix[..., 1, 0] * matrix[..., 1, 0]
+            matrix[..., 0, 0] * matrix[..., 0, 0]
+            + matrix[..., 1, 0] * matrix[..., 1, 0]
         )
         singular = sy < 1e-6
         singular = singular.float()
@@ -345,26 +270,18 @@ class NFHead(nn.Module):
         euler_3dof_samples[..., 1] = y * (1 - singular) + ys * singular
         euler_3dof_samples[..., 2] = z * (1 - singular) + zs * singular
 
-
         # euler_3dof_samples = aa_to_euler(aa_3dof_samples, "XYZ")
         euler_3dof_samples = euler_3dof_samples.flatten(-2, -1)
 
         pose_mean[..., all_param_3dof_rot_idxs_except_hands.flatten()] = (
             euler_3dof_samples
         )
-        pose_mean[..., all_param_1dof_rot_idxs_except_hands] = (
-            params_1dofs_samples
-        )
+        pose_mean[..., all_param_1dof_rot_idxs_except_hands] = params_1dofs_samples
         pose_mean[..., mhr_param_hand_mask] = 0
         pose_mean[..., -3:] = 0
         return pose_mean
-    
-
-
-
 
     def convert_pose_cont_to_params_for_context(self, pose_cont: torch.Tensor):
-
 
         # fmt: off
         all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
@@ -391,9 +308,9 @@ class NFHead(nn.Module):
         cont_3dofs = cont_3dofs.unflatten(-1, (-1, 6))
         rotmat_3dofs = batch9Dfrom6D(cont_3dofs).unflatten(-1, (3, 3))
 
-        aa_3dofs = matrix_to_axis_angle(rotmat_3dofs)[
-            :, indices_3dof, ...
-        ].flatten(-2, -1)
+        aa_3dofs = matrix_to_axis_angle(rotmat_3dofs)[:, indices_3dof, ...].flatten(
+            -2, -1
+        )
 
         cont_1dofs = cont_1dofs.unflatten(-1, (-1, 2))  # (sincos)
         params_1dofs = torch.atan2(cont_1dofs[..., -2], cont_1dofs[..., -1])
@@ -401,13 +318,9 @@ class NFHead(nn.Module):
 
         ret = {
             "aa_3dofs": aa_3dofs,
-            "params_1dofs": params_1dofs,   
+            "params_1dofs": params_1dofs,
         }
         return ret
-
-
-
-
 
         # with torch.cuda.amp.autocast(enabled=False):
 
@@ -416,7 +329,6 @@ class NFHead(nn.Module):
 
         #     # --------------------- path 1 ---------------------
         #     selected_euler = batchXYZfrom6D(body_cont_3dofs)[:, indices_3dof, ...].flatten(-2, -1)
-
 
         #     x_raw = body_cont_3dofs[..., :3]
         #     y_raw = body_cont_3dofs[..., 3:]
@@ -429,9 +341,8 @@ class NFHead(nn.Module):
 
         #     matrix = torch.stack([x, y, z], dim=-1)  # ... x 3 x 3
 
-
         #     # --------------------- path 2 ---------------------
-            
+
         #     rotmat_3dofs = batch9Dfrom6D(body_cont_3dofs).unflatten(-1, (3, 3))
 
         #     aa_3dofs = matrix_to_axis_angle(rotmat_3dofs)[:, indices_3dof, ...].flatten(-2, -1)
@@ -467,5 +378,3 @@ class NFHead(nn.Module):
         #     print(x.mean(), x.max())
 
         #     import ipdb; ipdb.set_trace()
-
-

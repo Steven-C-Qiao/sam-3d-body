@@ -15,6 +15,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from .models.meta_arch.sam3d_body import SAM3DBody
 from .models.meta_arch.base_lightning_module import BaseLightningModule
+
 # from .losses.loss import Loss
 from .losses.nf_loss import Loss
 from .data.bedlam_dataset import DatasetHMR as BEDLAMDataset
@@ -119,59 +120,25 @@ class Trainer(BaseLightningModule):
                 for p in param.parameters():
                     p.requires_grad = True
 
-            # Count and print trainable vs frozen parameters
-            trainable_params = sum(
-                p.numel() for p in self.model.parameters() if p.requires_grad
-            )
-            frozen_params = sum(
-                p.numel() for p in self.model.parameters() if not p.requires_grad
-            )
-            decoder_params = sum(p.numel() for p in self.model.decoder.parameters())
-            if self.use_lora:
-                decoder_lora_params = sum(
-                    p.numel() for p in self.model.decoder.lora_layers.parameters()
-                )
-            total_params = trainable_params + frozen_params
 
-            logger.info("=" * 60)
-            logger.info("Parameter Statistics:")
-            logger.info("=" * 60)
-            logger.info(f"Total parameters: {total_params:,}")
-            logger.info(
-                f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)"
-            )
-            logger.info(
-                f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.2f}%)"
-            )
-            logger.info(
-                f"Decoder parameters: {decoder_params:,} ({100 * decoder_params / total_params:.2f}%)"
-            )
-            if self.use_lora:
-                logger.info(
-                    f"LoRA decoder parameters: {decoder_lora_params:,} ({100 * decoder_lora_params / total_params:.2f}%)"
-                )
-                logger.info(f"LoRA trainable parameters: {lora_param_count:,}")
-            logger.info("=" * 60)
 
         self.scale_mean = self.model.head_pose.scale_mean.float()
         self.scale_comps = self.model.head_pose.scale_comps.float()
 
         self.criterion = Loss(
-            cfg, 
-            scale_mean=self.scale_mean, 
+            cfg,
+            scale_mean=self.scale_mean,
             scale_comps=self.scale_comps,
-            nf_head=self.model.nf_head
+            nf_head=self.model.nf_head,
         )
 
         self.faces = self.model.head_pose.faces.cpu().detach().numpy()
 
         self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
 
-
-
     def training_step(self, batch: Dict, batch_idx: int):
         batch = self.preprocess(batch)
-            
+
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
@@ -182,9 +149,9 @@ class Trainer(BaseLightningModule):
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
         )
 
-        for k, v in loss_dict.items():
-            print(f'{k}: {v.item():.3f}', end=' ')
-        print('')
+        # for k, v in loss_dict.items():
+        #     print(f"{k}: {v.item():.3f}", end=" ")
+        # print("")
         # import ipdb; ipdb.set_trace()
 
         return loss_dict["total_loss"]
@@ -226,15 +193,13 @@ class Trainer(BaseLightningModule):
                 self.global_step if self.global_step > 0 else (batch_idx or 0)
             )
 
-        should_visualize = vis_step in [0, 250, 500, 1000, 2000, 3000, 4000] or (
+        should_visualize = vis_step in [2, 250, 500, 1000, 2000, 3000, 4000] or (
             vis_step > 4000 and vis_step % 5000 == 0
         )
         global_rank = getattr(self, "global_rank", 0)
-        # if should_visualize and global_rank == 0:
-        # if global_rank == 0:
-        if False:
+        if should_visualize and global_rank == 0:
+            # if global_rank == 0:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
-            # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
             image = image.cpu().detach().numpy()  # [3, H, W]
 
             # Generate visualizations
@@ -247,7 +212,7 @@ class Trainer(BaseLightningModule):
                 image,
                 outputs,
                 self.faces,
-                stack_vertically=False, # self.stack_vertically,
+                stack_vertically=False,  # self.stack_vertically,
                 affine=affine,
                 img_size=img_size,
                 overlay_gt=True,
@@ -255,15 +220,7 @@ class Trainer(BaseLightningModule):
                 batch=batch,
                 mhr_model=self.model.head_pose,
             )
-            # rend_img_samples = my_visualize_samples(
-            #     image,
-            #     outputs,
-            #     self.faces,
-            #     stack_vertically=self.stack_vertically,
-            # )
-
             rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
-            # rend_img_samples_bgr = cv2.cvtColor(rend_img_samples, cv2.COLOR_RGB2BGR)
             rend_img_samples_crops_bgr = cv2.cvtColor(
                 rend_img_samples_crops, cv2.COLOR_RGB2BGR
             )
@@ -271,10 +228,6 @@ class Trainer(BaseLightningModule):
                 os.path.join(self.vis_save_dir, f"{vis_step:06d}_img.png"),
                 rend_img_bgr,
             )
-            # cv2.imwrite(
-            #     os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples.png"),
-            #     rend_img_samples_bgr,
-            # )
             cv2.imwrite(
                 os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples_crops.png"),
                 rend_img_samples_crops_bgr,
@@ -582,7 +535,9 @@ class Trainer(BaseLightningModule):
 
             logger.info(f"SSP-3D dataset with num_view={num_view}")
             return MultiSSP3DDataset(
-                "/scratches/kyuban/cq244/datasets/SSP-3D/ssp_3d", num_view=num_view, cfg=self.cfg
+                "/scratches/kyuban/cq244/datasets/SSP-3D/ssp_3d",
+                num_view=num_view,
+                cfg=self.cfg,
             )
         elif self.cfg.DATASET.VAL_DS == "4d-dress":
             from sam_3d_body.data.d4dress_dataset import MultiD4DressDataset
@@ -777,7 +732,7 @@ class Trainer(BaseLightningModule):
                 body_pose_params=outputs["mhr"]["body_pose"],
                 hand_pose_params=outputs["mhr"]["hand"],
                 expr_params=outputs["mhr"]["face"],
-                **mhr_output_config
+                **mhr_output_config,
             )
             verts_mean, j3d_mean, jcoords_mean, mhr_model_params, joint_global_rots = (
                 mean_mhr_output
@@ -793,11 +748,9 @@ class Trainer(BaseLightningModule):
                 body_pose_params=outputs["mhr"]["body_pose"],
                 hand_pose_params=outputs["mhr"]["hand"],
                 expr_params=outputs["mhr"]["face"],
-                **mhr_output_config
+                **mhr_output_config,
             )
-            verts_star, j3d_star, _, _, _ = (
-                merged_mhr_output
-            )
+            verts_star, j3d_star, _, _, _ = merged_mhr_output
             verts_star[..., [1, 2]] *= -1
             j3d_star[..., [1, 2]] *= -1
 
@@ -822,7 +775,7 @@ class Trainer(BaseLightningModule):
                 shape_params=pred_shape.flatten(0, 1),
                 scale_params=pred_scale.flatten(0, 1),
                 **mhr_zero_inputs,
-                **mhr_output_config
+                **mhr_output_config,
             )
             per_view_neutral_verts, _, per_view_neutral_joint_coords, _, _ = (
                 per_view_neutral_mhr_output
@@ -833,7 +786,7 @@ class Trainer(BaseLightningModule):
                 shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
                 scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
                 **mhr_zero_inputs,
-                **mhr_output_config
+                **mhr_output_config,
             )
             merged_neutral_verts, _, merged_neutral_joint_coords, _, _ = (
                 merged_neutral_mhr_output
@@ -843,9 +796,11 @@ class Trainer(BaseLightningModule):
                 shape_params=shape_mean,
                 scale_params=scale_mean,
                 **mhr_zero_inputs,
-                **mhr_output_config
+                **mhr_output_config,
             )
-            mean_neutral_verts, _, mean_neutral_joint_coords, _, _ = mean_neutral_mhr_output
+            mean_neutral_verts, _, mean_neutral_joint_coords, _, _ = (
+                mean_neutral_mhr_output
+            )
 
             stuff_for_metrics = {
                 "per_view_neutral_joint_coords": per_view_neutral_joint_coords,
@@ -859,8 +814,6 @@ class Trainer(BaseLightningModule):
             }
 
             self.multiframe_metrics(all_metrics, stuff_for_metrics)
-
-
 
             renderer = Renderer(
                 focal_length=outputs["mhr"]["focal_length"][0], faces=self.faces
@@ -914,7 +867,6 @@ class Trainer(BaseLightningModule):
         # for k, v in all_metrics.items():
         #     print(f"{k}: {type(v)}")
         # import ipdb; ipdb.set_trace()
-
 
         for k, v in mean_metrics.items():
             summary_lines.append(f"{k}: {v:.4f}")
@@ -1100,7 +1052,6 @@ class Trainer(BaseLightningModule):
 
         return all_metrics
 
-
     def vis_predictions(
         self,
         input_dict,
@@ -1124,7 +1075,7 @@ class Trainer(BaseLightningModule):
         # Initialize gallery: list of lists to store rendered images [bs][num_views]
         gallery = [[None for _ in range(num_views)] for _ in range(bs)]
 
-        i=0
+        i = 0
         all_distances = []
         pred_vertex_dists = {}
         merged_vertex_dists = {}
@@ -1158,9 +1109,13 @@ class Trainer(BaseLightningModule):
             # plt.close()
             # import ipdb; ipdb.set_trace()
 
-            verts = input_dict["per_view_neutral_verts"][flat_idx].cpu().detach().numpy()
+            verts = (
+                input_dict["per_view_neutral_verts"][flat_idx].cpu().detach().numpy()
+            )
             gt_verts = input_dict["gt_neutral_verts"][flat_idx].cpu().detach().numpy()
-            merged_verts = input_dict["merged_neutral_verts"][flat_idx].cpu().detach().numpy()
+            merged_verts = (
+                input_dict["merged_neutral_verts"][flat_idx].cpu().detach().numpy()
+            )
 
             pred_dist = np.linalg.norm(verts - gt_verts, axis=1)
             merged_dist = np.linalg.norm(merged_verts - gt_verts, axis=1)
@@ -1205,9 +1160,7 @@ class Trainer(BaseLightningModule):
                 assert batch["dataset_name"][0] == "ssp3d"
                 gt_cam_t = batch["trans_cam"][flat_idx].cpu().detach().numpy()
             else:
-                gt_cam_t = (
-                    batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
-                )
+                gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
 
             merged_verts = verts_star[flat_idx].cpu().detach().numpy()
 
@@ -1258,7 +1211,7 @@ class Trainer(BaseLightningModule):
                 ),
                 return_rgba=True,
             )
-            alpha = (gt_rgba[..., 3:4].astype(np.float32) * 0.5)
+            alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
             pred_rgb = rendered_img.astype(np.float32) / 255.0
             gt_rgb = gt_rgba[..., :3].astype(np.float32)
             blended_pred = alpha * gt_rgb + (1.0 - alpha) * pred_rgb
@@ -1295,7 +1248,7 @@ class Trainer(BaseLightningModule):
                 ),
                 return_rgba=True,
             )
-            alpha_m = (gt_rgba_merged[..., 3:4].astype(np.float32) * 0.3)
+            alpha_m = gt_rgba_merged[..., 3:4].astype(np.float32) * 0.3
             merged_rgb = rendered_merged_img.astype(np.float32) / 255.0
             gt_m_rgb = gt_rgba_merged[..., :3].astype(np.float32)
             blended_merged = alpha_m * gt_m_rgb + (1.0 - alpha_m) * merged_rgb
@@ -1347,9 +1300,7 @@ class Trainer(BaseLightningModule):
             y_start = 10 + text_height + baseline + 10
             y_offset = y_start
             for line in text_lines:
-                (tw, th), bl = cv2.getTextSize(
-                    line, font, font_scale_small, thickness
-                )
+                (tw, th), bl = cv2.getTextSize(line, font, font_scale_small, thickness)
                 cv2.rectangle(
                     gt_rendered_img,
                     (10, y_offset),
@@ -1393,20 +1344,14 @@ class Trainer(BaseLightningModule):
             # Add per-view predicted shape parameters (first 5) and uncertainties
             pred_mu = pred_shape[i, view].cpu().detach().numpy()
             pred_var = shape_var_unflattened[i, view].cpu().detach().numpy()
-            mu_str = "pred shape mean: " + " ".join(
-                f"{v:.2f}" for v in pred_mu[:5]
-            )
-            sigma_str = "pred shape var: " + " ".join(
-                f"{v:.2f}" for v in pred_var[:5]
-            )
+            mu_str = "pred shape mean: " + " ".join(f"{v:.2f}" for v in pred_mu[:5])
+            sigma_str = "pred shape var: " + " ".join(f"{v:.2f}" for v in pred_var[:5])
 
             pred_text_lines = [mu_str, sigma_str]
             y_start = 10 + text_height + baseline + 10
             y_offset = y_start
             for line in pred_text_lines:
-                (tw, th), bl = cv2.getTextSize(
-                    line, font, font_scale_small, thickness
-                )
+                (tw, th), bl = cv2.getTextSize(line, font, font_scale_small, thickness)
                 cv2.rectangle(
                     rendered_img,
                     (10, y_offset),
@@ -1461,9 +1406,7 @@ class Trainer(BaseLightningModule):
             y_start_m = 10 + text_height + baseline + 10
             y_offset_m = y_start_m
             for line in merged_text_lines:
-                (tw, th), bl = cv2.getTextSize(
-                    line, font, font_scale_small, thickness
-                )
+                (tw, th), bl = cv2.getTextSize(line, font, font_scale_small, thickness)
                 cv2.rectangle(
                     rendered_merged_img,
                     (10, y_offset_m),
@@ -1514,8 +1457,9 @@ class Trainer(BaseLightningModule):
 
                         gt_centered = gt_verts - gt_verts.mean(axis=0, keepdims=True)
                         verts_centered = verts - verts.mean(axis=0, keepdims=True)
-                        merged_centered = merged_verts - merged_verts.mean(axis=0, keepdims=True)
-
+                        merged_centered = merged_verts - merged_verts.mean(
+                            axis=0, keepdims=True
+                        )
 
                     # GT side view (for the GT column)
                     gt_side = (
@@ -1555,11 +1499,15 @@ class Trainer(BaseLightningModule):
                         rot_angle=90,
                         return_rgba=True,
                     )
-                    alpha_side = (gt_side_rgba[..., 3:4].astype(np.float32) * 0.5)
+                    alpha_side = gt_side_rgba[..., 3:4].astype(np.float32) * 0.5
                     pred_side_rgb = pred_side_base.astype(np.float32) / 255.0
                     gt_side_rgb = gt_side_rgba[..., :3].astype(np.float32)
-                    blended_pred_side = alpha_side * gt_side_rgb + (1.0 - alpha_side) * pred_side_rgb
-                    pred_side = (blended_pred_side * 255.0).clip(0, 255).astype(np.uint8)
+                    blended_pred_side = (
+                        alpha_side * gt_side_rgb + (1.0 - alpha_side) * pred_side_rgb
+                    )
+                    pred_side = (
+                        (blended_pred_side * 255.0).clip(0, 255).astype(np.uint8)
+                    )
 
                     # Merged side view with GT overlay
                     merged_side_base = (
@@ -1576,8 +1524,12 @@ class Trainer(BaseLightningModule):
                         * 255
                     ).astype(np.uint8)
                     merged_side_rgb = merged_side_base.astype(np.float32) / 255.0
-                    blended_merged_side = alpha_side * gt_side_rgb + (1.0 - alpha_side) * merged_side_rgb
-                    merged_side = (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
+                    blended_merged_side = (
+                        alpha_side * gt_side_rgb + (1.0 - alpha_side) * merged_side_rgb
+                    )
+                    merged_side = (
+                        (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
+                    )
 
                 else:
                     # Original behavior: independent side views using view-specific camera
@@ -1678,7 +1630,6 @@ class Trainer(BaseLightningModule):
         logger.info(
             f"Saved multiview gallery: {save_path} (shape: {gallery_img.shape})"
         )
-
 
     def vis_neutral(self, stuff_for_vis, sc: bool = True):
         neutral_renderer = stuff_for_vis["neutral_renderer"]
@@ -1802,7 +1753,7 @@ class Trainer(BaseLightningModule):
             rot_angle=90,
             return_rgba=True,
         )
-        gt_side_alpha = (gt_neutral_side_rgba[..., 3:4].astype(np.float32) * 0.5)
+        gt_side_alpha = gt_neutral_side_rgba[..., 3:4].astype(np.float32) * 0.5
         gt_side_rgb = gt_neutral_side_rgba[..., :3].astype(np.float32)
 
         # Pre-compute semi-transparent GT overlay (RGBA) for neutral views (light orange)
@@ -1814,7 +1765,7 @@ class Trainer(BaseLightningModule):
             scene_bg_color=(1, 1, 1),
             return_rgba=True,
         )
-        gt_alpha = (gt_neutral_rgba[..., 3:4].astype(np.float32) * 0.5)
+        gt_alpha = gt_neutral_rgba[..., 3:4].astype(np.float32) * 0.5
         gt_rgb = gt_neutral_rgba[..., :3].astype(np.float32)
 
         # ----- Render per-view neutral meshes with per-vertex colors -----
@@ -1865,7 +1816,9 @@ class Trainer(BaseLightningModule):
                 * 255
             ).astype(np.uint8)
             pv_side_rgb = rendered_side.astype(np.float32) / 255.0
-            blended_side = gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * pv_side_rgb
+            blended_side = (
+                gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * pv_side_rgb
+            )
             rendered_side = (blended_side * 255.0).clip(0, 255).astype(np.uint8)
             per_view_rendered_side.append(rendered_side)
 
@@ -1911,8 +1864,12 @@ class Trainer(BaseLightningModule):
             * 255
         ).astype(np.uint8)
         merged_side_rgb = merged_neutral_side.astype(np.float32) / 255.0
-        blended_merged_side = gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * merged_side_rgb
-        merged_neutral_side = (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
+        blended_merged_side = (
+            gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * merged_side_rgb
+        )
+        merged_neutral_side = (
+            (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
+        )
 
         # Assemble gallery into three rows:
         #   top    = front views (GT, merged, per-view)
@@ -1978,3 +1935,40 @@ class Trainer(BaseLightningModule):
         )
         cv2.imwrite(save_path, gallery_img_bgr)
         logger.info(f"Saved neutral meshes gallery: {save_path}")
+
+
+
+    def _count_params(self):
+        # Count and print trainable vs frozen parameters
+        trainable_params = sum(
+            p.numel() for p in self.model.parameters() if p.requires_grad
+        )
+        frozen_params = sum(
+            p.numel() for p in self.model.parameters() if not p.requires_grad
+        )
+        decoder_params = sum(p.numel() for p in self.model.decoder.parameters())
+        if self.use_lora:
+            decoder_lora_params = sum(
+                p.numel() for p in self.model.decoder.lora_layers.parameters()
+            )
+        total_params = trainable_params + frozen_params
+
+        logger.info("=" * 60)
+        logger.info("Parameter Statistics:")
+        logger.info("=" * 60)
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(
+            f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)"
+        )
+        logger.info(
+            f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.2f}%)"
+        )
+        logger.info(
+            f"Decoder parameters: {decoder_params:,} ({100 * decoder_params / total_params:.2f}%)"
+        )
+        if self.use_lora:
+            logger.info(
+                f"LoRA decoder parameters: {decoder_lora_params:,} ({100 * decoder_lora_params / total_params:.2f}%)"
+            )
+            logger.info(f"LoRA trainable parameters: {lora_param_count:,}")
+        logger.info("=" * 60)

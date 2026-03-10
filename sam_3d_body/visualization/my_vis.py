@@ -753,14 +753,12 @@ class Visualiser(pl.LightningModule):
         batch_idx = 0
         img_size = batch["img_size"][batch_idx, 0][0]
 
-        gt_kp2d_normalized = batch["keypoints_2d"][ # joints_2d
-            batch_idx, :70, :
-        ]
+        gt_kp2d_normalized = batch["keypoints_2d"][batch_idx, :70, :]  # joints_2d
         gt_kp2d = (gt_kp2d_normalized + 0.5) * img_size  # [N, 2]
 
         # Visibility mask for the first 70 keypoints (1 = visible, 0 = invisible)
         visibility = batch["visibility"][batch_idx]  # [N]
-        visible_mask = visibility 
+        visible_mask = visibility
         invisible_mask = ~visible_mask
 
         pred_kp2d_cropped_normalised = predictions["mhr"]["pred_keypoints_2d_cropped"][
@@ -770,7 +768,9 @@ class Visualiser(pl.LightningModule):
             pred_kp2d_cropped_normalised + 0.5
         ) * img_size  # [N, 2]
 
-        sample_kp2d_cropped_normalized = predictions["kp2d_samples_cropped"][ # j2d_samples_cropped
+        sample_kp2d_cropped_normalized = predictions[
+            "kp2d_samples_cropped"
+        ][  # j2d_samples_cropped
             batch_idx
         ]  # [num_samples, N, 2]
         num_samples = sample_kp2d_cropped_normalized.shape[0]

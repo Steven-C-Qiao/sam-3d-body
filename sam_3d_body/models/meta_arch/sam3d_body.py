@@ -799,7 +799,6 @@ class SAM3DBody(BaseModel):
 
         # use_nf = "pose_samples" in outputs["uncertainty_output"]
         use_nf = True
-        
 
         if num_samples > 0:
             output_mhr = outputs["mhr"]
@@ -816,7 +815,7 @@ class SAM3DBody(BaseModel):
                 samples_dict = outputs["uncertainty_output"]
                 num_samples = samples_dict["samples"].shape[1]
             else:
-                assert False 
+                assert False
                 samples_dict = gen_samples(
                     output_mhr,
                     outputs["uncertainty_output"],

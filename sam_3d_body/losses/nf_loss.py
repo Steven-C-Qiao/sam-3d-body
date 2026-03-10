@@ -18,17 +18,14 @@ class Loss(pl.LightningModule):
         self.mse_loss = nn.MSELoss(reduction="none")
         self.kp2d_loss = nn.L1Loss(reduction="none")
 
-
         self.hand_keypoint_indices = list(range(21, 63))  # 21–62 inclusive
         hand_weight = getattr(self.cfg.LOSS, "HAND_WEIGHT", 0.1)
         self.hand_weight = hand_weight
-
 
     def forward(self, predictions, batch):
         loss_dict = {}
 
         B, N = batch["img"].shape[:2]
-
 
         if self.cfg.LOSS.KP2D_WEIGHT > 0:
             pred_kp2d_samples = predictions["kp2d_samples_cropped"]
@@ -76,7 +73,7 @@ class Loss(pl.LightningModule):
 
         if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0:
             """
-            Evaluate the gt residual NLL 
+            Evaluate the gt residual NLL
             """
             gt_model_params = batch["model_params"]
             gt_shape = batch["shape_params"]
@@ -88,14 +85,19 @@ class Loss(pl.LightningModule):
                 include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
                 include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
             )
-            
+
             mean_pred = predictions["mhr"]
             mean_pred_flow_params = convert_mhr_params_to_flow_params(
-                torch.cat([
-                    torch.zeros_like(mean_pred["body_pose"][..., :6]), # Adds global, which is not used
-                    mean_pred["body_pose"][..., :130], # gets rid of jaw
-                    mean_pred["scale_68D"],
-                ], dim=-1), 
+                torch.cat(
+                    [
+                        torch.zeros_like(
+                            mean_pred["body_pose"][..., :6]
+                        ),  # Adds global, which is not used
+                        mean_pred["body_pose"][..., :130],  # gets rid of jaw
+                        mean_pred["scale_68D"],
+                    ],
+                    dim=-1,
+                ),
                 mean_pred["shape"],
                 include_global_rot=getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False),
                 include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
@@ -104,34 +106,15 @@ class Loss(pl.LightningModule):
 
             true_residual = gt_flow_params - mean_pred_flow_params
 
-            true_residual = torch.zeros_like(true_residual)
-            
+            # true_residual = torch.zeros_like(true_residual)
+
             flow_context = predictions["uncertainty_output"]["flow_context"]
             num_samples = predictions["uncertainty_output"]["samples"].shape[1]
 
-            # self.nf_head.eval()
-            flow_log_prob, z = self.nf_head.log_prob(
-                true_residual, 
-                flow_context
-            )
-            nll_loss = - flow_log_prob.mean()
+            flow_log_prob, z = self.nf_head.log_prob(true_residual, flow_context)
+            nll_loss = -flow_log_prob.mean()
 
-
-            # auto_sample_loglik = predictions['uncertainty_output']['log_prob']
-            # samples = predictions["uncertainty_output"]["samples"]    
-            # # print(samples[0,0, :10])
-            # # print(flow_context[0, :10])
-            # sample_log_prob, z = self.nf_head.log_prob(samples.flatten(0, 1), flow_context.repeat_interleave(num_samples, dim=0))
-            # sample_log_prob = sample_log_prob.unflatten(0, (B, -1))
-            # print('gt residual flow_log_prob', flow_log_prob[:5])
-            # print('forward log prob', auto_sample_loglik[0, :5])
-            # print('inverse log_prob in loss', sample_log_prob[0, :5])
-
-            # import ipdb; ipdb.set_trace()
-    
-            # self.nf_head.train()
-
-            loss_dict["loss_param_nll"] = (self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss)
+            loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
 
         assert "total_loss" not in loss_dict
         loss_dict["total_loss"] = sum(
@@ -143,7 +126,6 @@ class Loss(pl.LightningModule):
         # for k, v in loss_dict.items():
         #     print(f"{k}: {v.item():.3f}", end=" ")
         # print('')
-        # print(flow_log_prob[:5])
         # import ipdb; ipdb.set_trace()
 
         return loss_dict
