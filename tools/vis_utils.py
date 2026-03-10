@@ -274,6 +274,7 @@ def my_visualize_samples(
     overlay_gt=True,
     plot_side=True,
     batch=None,
+    mhr_model=None,
 ):
     affine = affine.cpu().detach().numpy() if affine is not None else None
     img_size = img_size.cpu().detach().numpy() if img_size is not None else None
@@ -287,6 +288,7 @@ def my_visualize_samples(
         base_img = cv2.warpAffine(base_img_uint8, affine, img_size)
 
     mhr_samples = outputs["verts_samples"].cpu().detach().numpy()
+    mhr_root_joint_samples = outputs["j3d_samples"][..., 1, :].cpu().detach().numpy()
 
     outputs = outputs["mhr"]
     for key in outputs:
@@ -332,12 +334,11 @@ def my_visualize_samples(
     )
     for i in range(mhr_samples.shape[1]):
         img_mesh = img_cv2.copy()
-        all_pred_vertices = mhr_samples[0, i]
 
         # Render front view
         img_mesh = (
             renderer(
-                all_pred_vertices,
+                mhr_samples[0, i],
                 outputs["pred_cam_t"][0],
                 img_mesh,
                 mesh_base_color=ORANGE,
@@ -349,6 +350,8 @@ def my_visualize_samples(
         if overlay_gt:
             gt_verts = batch['gt_verts_w_transl'][0].cpu().detach().numpy()
             gt_cam_t = batch["cam_ext"][0][:3, -1].cpu().detach().numpy()
+            gt_root_joint = batch['gt_joint_coords'][0, [1], :].cpu().detach().numpy()
+
             gt_rgba = renderer(
                 gt_verts, gt_cam_t,
                 np.ones_like(img_mesh) * 255,
@@ -371,7 +374,7 @@ def my_visualize_samples(
         if plot_side:
             pred_side = (
                 renderer(
-                    all_pred_vertices - all_pred_vertices.mean(axis=0, keepdims=True),
+                    mhr_samples[0, i] - mhr_root_joint_samples[0, [1]],
                     np.array([0.0, -0.25, 6.0]),
                     np.ones_like(img_mesh) * 255,
                     mesh_base_color=ORANGE,
@@ -381,7 +384,7 @@ def my_visualize_samples(
             )
             gt_side = (
                 renderer(
-                    gt_verts - gt_verts.mean(axis=0, keepdims=True),
+                    gt_verts - gt_root_joint,
                     np.array([0.0, -0.25, 6.0]),
                     np.ones_like(img_mesh) * 255,
                     mesh_base_color=BLUE,

@@ -45,7 +45,7 @@ def convert_mhr_params_to_flow_params(
     pose_3dof_euler = pose[..., all_param_3dof_rot_idxs[:-1].flatten()]
     pose_3dof_euler = torch.cat([pose_3dof_euler, torch.zeros_like(pose_3dof_euler[..., :3])], dim=-1)
     pose_3dof_euler = pose_3dof_euler.unflatten(-1, (-1, 3))
-    pose_1dof_angle = pose[..., indices_1dof]
+    pose_1dof_angle = pose[..., all_param_1dof_rot_idxs_except_hands]
 
     pose_3dof_rotmat = batch6DFromXYZ(pose_3dof_euler, return_9D=True)
     pose_3dof_aa = matrix_to_axis_angle(pose_3dof_rotmat)

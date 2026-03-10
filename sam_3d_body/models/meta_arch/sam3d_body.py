@@ -826,6 +826,8 @@ class SAM3DBody(BaseModel):
                     scale_bias=self.head_pose.scale_mean.float(),
                     scale_comps=self.head_pose.scale_comps.float(),
                 )
+                dist_3dof = samples_dict["dist_3dof"]
+                outputs["dist_3dof"] = dist_3dof
             shape_samples = samples_dict["shape_samples"].view(
                 -1, samples_dict["shape_samples"].shape[-1]
             )
@@ -835,8 +837,6 @@ class SAM3DBody(BaseModel):
             pose_samples = samples_dict["pose_samples"].view(
                 -1, samples_dict["pose_samples"].shape[-1]
             )
-            # dist_3dof = samples_dict["dist_3dof"]
-            # outputs["dist_3dof"] = dist_3dof
 
             mhr_output = self.head_pose.mhr_forward(
                 scale_params=torch.zeros_like(scale_samples),

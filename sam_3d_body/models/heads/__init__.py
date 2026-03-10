@@ -44,6 +44,6 @@ def build_head(cfg, head_type="mhr", enable_hand_model=False, default_scale_fact
             default_scale_factor=default_scale_factor,
         )
     elif head_type == "nf":
-        return NFHead()
+        return NFHead(cfg)
     else:
         raise ValueError("Invalid head type: ", head_type)

@@ -25,7 +25,7 @@ def aa_to_euler(aa, euler_convention="XYZ"):
 
 
 class NFHead(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg: CfgNode):
         super(NFHead, self).__init__()
 
         self.num_shape_comps = 45
@@ -54,6 +54,9 @@ class NFHead(nn.Module):
             context_features=config["context_features"],
             # dropout_probability=0.0
         )
+
+        # Default number of NF samples per instance (can be overridden at call time)
+        self.num_samples = cfg.MODEL.NUM_SAMPLES
 
         self.context_proj = nn.Linear(self.flow_dim + 1024, 2048)
 
@@ -132,7 +135,7 @@ class NFHead(nn.Module):
         self,
         flow_context: torch.Tensor,
         mean_pred: Dict,
-        num_samples: int = 5,
+        num_samples: int = 0,
         batch: Dict = None,
     ) -> Dict:
         """
@@ -143,6 +146,9 @@ class NFHead(nn.Module):
                 mean_pred:
 
         """
+        if num_samples <= 0:
+            num_samples = self.num_samples
+
         B, N = flow_context.shape[0], num_samples
         
         shape_mean = mean_pred["shape"] # B, 45
@@ -211,11 +217,33 @@ class NFHead(nn.Module):
             "scale_samples": scale_samples_68D,
             "pose_samples": pose_samples,
             # "shape_residual_samples": shape_residual_samples,
-            "scale_residual_samples": scale_residual_samples,
-            "pose_3dof_residual_samples_aa": pose_3dof_residual_samples,
-            "pose_1dof_residual_samples": pose_1dof_residual_samples,
+            # "scale_residual_samples": scale_residual_samples,
+            # "pose_3dof_residual_samples_aa": pose_3dof_residual_samples,
+            # "pose_1dof_residual_samples": pose_1dof_residual_samples,
             "flow_context": flow_context,
         }        
+        
+        # gt_model_params = batch["model_params"]
+        # gt_shape = batch["shape_params"]
+
+        # gt_flow_params = convert_mhr_params_to_flow_params(gt_model_params, gt_shape)
+        
+        # mean_pred_flow_params = convert_mhr_params_to_flow_params(
+        #     torch.cat([
+        #         torch.zeros_like(mean_pred["body_pose"][..., :6]), # Adds global, which is not used
+        #         mean_pred["body_pose"][..., :130], # gets rid of jaw
+        #         mean_pred["scale_68D"],
+        #     ], dim=-1), 
+        #     mean_pred["shape"]
+        # )
+
+        # true_residual = gt_flow_params - mean_pred_flow_params
+        # samples = true_residual.unsqueeze(1).repeat(1, N, 1)
+
+        # aa_3dof_samples = gt_flow_params[..., :39].unsqueeze(1).repeat(1, N, 1) 
+        # params_1dofs_samples = gt_flow_params[..., 39:39+34].unsqueeze(1).repeat(1, N, 1)
+
+        
         # log_prob_using_func, z = self.log_prob(
         #     samples.flatten(0, 1), 
         #     flow_context.repeat_interleave(N, dim=0)

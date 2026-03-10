@@ -11,7 +11,7 @@ _C.TRAIN.MODEL_TYPE = "full"  # Options: "full" (SAM3DBody) or "toy" (ToyModel)
 _C.TRAIN.USE_FP16 = True
 _C.TRAIN.FP16_TYPE = "high"
 _C.TRAIN.LR = 2e-5
-_C.TRAIN.NUM_EPOCHS = 20
+_C.TRAIN.NUM_EPOCHS = 50
 _C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 _C.TRAIN.FREEZE_BACKBONE = True
 
@@ -26,6 +26,7 @@ _C.MODEL.SAMPLE_SCALE = True
 _C.MODEL.SAMPLE_POSE = True 
 _C.MODEL.FULL_COV = True
 _C.MODEL.DECODER.USE_LORA = True
+_C.MODEL.NUM_SAMPLES = 50
 
 
 _C.LOSS = CfgNode()
@@ -36,7 +37,7 @@ _C.LOSS.KP2D_WEIGHT = 100.0
 _C.LOSS.KP3D_WEIGHT = 100.0
 _C.LOSS.JOINTS_3D_WEIGHT = 0.0
 _C.LOSS.JOINTS_2D_WEIGHT = 0.0
-_C.LOSS.PARAM_NLL_WEIGHT = 5e-4
+_C.LOSS.PARAM_NLL_WEIGHT = 0.0
 
 # Dataset hparams
 _C.DATASET = CfgNode()

@@ -122,9 +122,9 @@ class Loss(pl.LightningModule):
         if torch.isnan(loss_dict["total_loss"]):
             loss_dict["total_loss"] = torch.zeros_like(loss_dict["total_loss"])
 
-        for k, v in loss_dict.items():
-            print(f"{k}: {v.item():.3f}", end=" ")
-        print('')
+        # for k, v in loss_dict.items():
+        #     print(f"{k}: {v.item():.3f}", end=" ")
+        # print('')
         # print(flow_log_prob[:5])
         # import ipdb; ipdb.set_trace()
 

@@ -170,7 +170,7 @@ class Trainer(BaseLightningModule):
     def training_step(self, batch: Dict, batch_idx: int):
         batch = self.preprocess(batch)
 
-        outputs = self(batch, num_samples=5)
+        outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
 
@@ -250,6 +250,7 @@ class Trainer(BaseLightningModule):
                 overlay_gt=True,
                 plot_side=True,
                 batch=batch,
+                mhr_model=self.model.head_pose,
             )
             # rend_img_samples = my_visualize_samples(
             #     image,
@@ -286,7 +287,7 @@ class Trainer(BaseLightningModule):
     def validation_step(self, batch: Dict, batch_idx: int):
         batch = self.preprocess(batch)
 
-        outputs = self(batch, num_samples=5)
+        outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
 
@@ -305,7 +306,7 @@ class Trainer(BaseLightningModule):
         """
         batch = self.preprocess(batch)
 
-        outputs = self(batch, num_samples=5)
+        outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
 
@@ -345,6 +346,7 @@ class Trainer(BaseLightningModule):
             gt_verts = gt_verts @ R.transpose(-2, -1)
 
         batch["gt_verts_w_transl"] = gt_verts
+        batch["gt_joint_coords"] = gt_joint_coords
 
         cam_int = batch["cam_int"]
         if "cam_ext" not in batch:
@@ -364,16 +366,6 @@ class Trainer(BaseLightningModule):
             return projected_points
 
         kp2d = project(gt_keypoints_3d, trans_cam.unsqueeze(1), cam_int)[:, :70, :2]
-
-        # import matplotlib.pyplot as plt
-        # plt.imshow(batch["img_ori"][0].data.cpu().numpy())
-        # plt.scatter(verts_2d[0,:, 0].cpu().numpy(), verts_2d[0,:, 1].cpu().numpy(), s=0.1, c='red')
-        # plt.title("2D projected mesh vertices")
-        # plt.axis("off")
-        # plt.savefig("temp_vis.png")
-        # plt.close()
-
-        # import ipdb; ipdb.set_trace()
 
         # Optionally append dense keypoints
         if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:

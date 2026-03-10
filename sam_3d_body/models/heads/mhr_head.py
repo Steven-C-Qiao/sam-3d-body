@@ -363,6 +363,7 @@ class MHRHead(nn.Module):
             ),  # Both global rot and continuous pose
             "pred_pose_rotmat": None,  # This normally used for mhr pose param rotmat supervision.
             "global_rot": global_rot_euler,
+            "global_rotmat": global_rot_rotmat,
             "body_pose": pred_pose_euler,  # Unused during training
             "shape": pred_shape,
             "scale": pred_scale,
