@@ -210,7 +210,7 @@ class MHRHead(nn.Module):
         ## 10 here is because it's more stable to optimize global translation in meters.
         full_pose_params = torch.cat(
             [global_trans * 10, global_rot, body_pose_params], dim=1
-        )  # B x 127
+        )  # B x [3 + 3 + 130] = 136, 136 + 68 = 204
         ## Put in hands
         if hand_pose_params is not None:
             full_pose_params = self.replace_hands_in_pose(
@@ -316,6 +316,9 @@ class MHRHead(nn.Module):
         pred_face = pred[:, count : count + self.num_face_comps] * 0
         count += self.num_face_comps
 
+        pred_scales_68D = self.scale_mean[None, :] + pred_scale @ self.scale_comps
+
+
         # Run everything through mhr
         output = self.mhr_forward(
             global_trans=global_trans,
@@ -360,9 +363,11 @@ class MHRHead(nn.Module):
             ),  # Both global rot and continuous pose
             "pred_pose_rotmat": None,  # This normally used for mhr pose param rotmat supervision.
             "global_rot": global_rot_euler,
+            "global_rotmat": global_rot_rotmat,
             "body_pose": pred_pose_euler,  # Unused during training
             "shape": pred_shape,
             "scale": pred_scale,
+            "scale_68D": pred_scales_68D,
             "hand": pred_hand,
             "face": pred_face,
             "pred_keypoints_3d": j3d.reshape(batch_size, -1, 3),

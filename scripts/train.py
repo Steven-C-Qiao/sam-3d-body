@@ -22,14 +22,11 @@ from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=41, dev=False):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
 
-    # If we are loading weights from a checkpoint, also load and merge any
-    # experiment-specific YAML config into the defaults so that hyperparameters
-    # (e.g. LOSS weights, MODEL flags) match the original run.
     if load_path is not None:
         config_yaml_path = Path(exp_dir) / "config.yaml"
         if config_yaml_path.exists():
@@ -39,7 +36,6 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     torch.set_float32_matmul_precision(cfg.TRAIN.FP16_TYPE)
 
     if dev:
-        cfg.TRAIN.NUM_EPOCHS = 5
         cfg.DATASET.BATCH_SIZE = 2
         cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
         cfg.DATASET.NUM_WORKERS = 4

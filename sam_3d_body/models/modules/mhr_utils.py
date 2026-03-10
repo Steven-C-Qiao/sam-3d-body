@@ -12,6 +12,70 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from pytorch3d.transforms import matrix_to_axis_angle
+
+
+# fmt: off
+all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
+all_param_1dof_rot_idxs = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 74, 75, 77, 78, 80, 81, 83, 84, 89, 90, 94, 95, 101, 102, 104, 105, 107, 108, 110, 111, 116, 117, 118, 119, 120, 121, 122, 123])
+all_param_1dof_trans_idxs = torch.LongTensor([124, 125, 126, 127, 128, 129])
+all_param_3dof_rot_idxs_except_hands = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (130, 131, 132)])
+all_param_1dof_rot_idxs_except_hands = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 116, 117, 118, 119, 120, 121, 122, 123])
+indices_3dof = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 22]
+indices_1dof = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 50, 51, 52, 53, 54, 55, 56, 57]
+num_3dof_angles = len(all_param_3dof_rot_idxs) * 3  # 69
+num_1dof_angles = len(all_param_1dof_rot_idxs)  # 58
+num_1dof_trans = len(all_param_1dof_trans_idxs)  # 6
+scale_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
+# fmt: on
+
+
+
+
+def convert_mhr_params_to_flow_params(
+    model_params: torch.Tensor,
+    shape_params: torch.Tensor,
+    include_global_rot: bool = False,
+    include_shape: bool = True,
+    include_scale: bool = True,
+) -> torch.Tensor:
+    assert model_params.shape[-1] == 204
+    assert shape_params.shape[-1] == 45
+    
+    scale = model_params[:, -68:]
+    pose = model_params[:, 6:-68]
+
+    pose_3dof_euler = pose[..., all_param_3dof_rot_idxs[:-1].flatten()]
+    pose_3dof_euler = torch.cat([pose_3dof_euler, torch.zeros_like(pose_3dof_euler[..., :3])], dim=-1)
+    pose_3dof_euler = pose_3dof_euler.unflatten(-1, (-1, 3))
+    pose_1dof_angle = pose[..., all_param_1dof_rot_idxs_except_hands]
+
+    pose_3dof_rotmat = batch6DFromXYZ(pose_3dof_euler, return_9D=True)
+    pose_3dof_aa = matrix_to_axis_angle(pose_3dof_rotmat)
+    pose_3dof_aa = pose_3dof_aa[..., indices_3dof, :].flatten(-2, -1)
+
+    scale = scale[..., scale_indices]
+
+    parts = []
+    if include_global_rot:
+        # model_params[..., :6] == [global_trans(3), global_rot(3)] in XYZ Euler.
+        glob_euler = model_params[:, 3:6]  # (B, 3)
+        glob_rotmat = batch6DFromXYZ(glob_euler, return_9D=True)  # (B, 3, 3)
+        glob_aa = matrix_to_axis_angle(glob_rotmat)  # (B, 3)
+        parts.append(glob_aa)
+
+    parts.extend([pose_3dof_aa, pose_1dof_angle])
+
+    if include_shape:
+        parts.append(shape_params)
+    if include_scale:
+        parts.append(scale)
+
+    flow_params = torch.cat(parts, dim=-1)
+
+    return flow_params
+
+
 
 def rotation_angle_difference(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     """

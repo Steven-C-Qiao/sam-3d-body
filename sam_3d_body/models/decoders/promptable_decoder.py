@@ -173,6 +173,7 @@ class PromptableDecoder(nn.Module):
                 keypoint_token_update_fn,
                 token_to_uncertainty_output_fn,
                 lora_path=True,
+                mean_pred=orig_output["all_pose_outputs"][-1],
             )
             # Update the original uncertainty with LoRA
             orig_output.update(lora_output)
@@ -193,6 +194,7 @@ class PromptableDecoder(nn.Module):
         keypoint_token_update_fn,
         token_to_uncertainty_output_fn,
         lora_path: bool = False,
+        mean_pred: Optional[Dict] = None,
     ):
         """Helper method to run forward through a set of layers."""
         if self.do_interm_preds:
@@ -239,12 +241,13 @@ class PromptableDecoder(nn.Module):
 
         out = self.norm_final(token_embedding)
 
-        uncertainty_output = token_to_uncertainty_output_fn(out)
         
         if lora_path:
+            uncertainty_output = token_to_uncertainty_output_fn(out, mean_pred)
             ret["uncertainty_output"] = uncertainty_output
             return ret
         
+        uncertainty_output = token_to_uncertainty_output_fn(out)
         ret["out"] = out
 
         if self.do_interm_preds:

@@ -15,13 +15,14 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from .models.meta_arch.sam3d_body import SAM3DBody
 from .models.meta_arch.base_lightning_module import BaseLightningModule
-from .losses.loss import Loss
+# from .losses.loss import Loss
+from .losses.nf_loss import Loss
 from .data.bedlam_dataset import DatasetHMR as BEDLAMDataset
 from .data.bedlam_dataset import MultiViewEvaluationDataset
 from .metrics.metrics_tracker import Metrics
 from .visualization.my_vis import Visualiser
 
-# from .configs.config import INDICES_PATH
+from .configs.config import INDICES_PATH
 
 import sys
 from pathlib import Path
@@ -51,7 +52,7 @@ class Trainer(BaseLightningModule):
         self.vis_save_dir = vis_save_dir
         self.stack_vertically = stack_vertically
 
-        self.use_lora = cfg.MODEL.USE_LORA
+        self.use_lora = cfg.MODEL.DECODER.USE_LORA
         self.model_type = cfg.TRAIN.get("MODEL_TYPE", "full")
         if self.model_type == "toy":
             assert False
@@ -70,7 +71,7 @@ class Trainer(BaseLightningModule):
         )
         self.mhr_dense_kp_indices = None
         if self.use_dense_keypoints:
-            # mhr_dense_kp_indices_np = np.load(INDICES_PATH)
+            mhr_dense_kp_indices_np = np.load(INDICES_PATH)
             self.mhr_dense_kp_indices = torch.from_numpy(mhr_dense_kp_indices_np).long()
             # Expose to the meta-arch and the MHR head for dense keypoint extraction
             setattr(self.model, "mhr_dense_kp_indices", self.mhr_dense_kp_indices)
@@ -113,6 +114,7 @@ class Trainer(BaseLightningModule):
             # Unfreeze uncertainty parameters
             for param in [
                 self.model.head_uncertainty,
+                self.model.nf_head,
             ]:
                 for p in param.parameters():
                     p.requires_grad = True
@@ -155,17 +157,22 @@ class Trainer(BaseLightningModule):
         self.scale_comps = self.model.head_pose.scale_comps.float()
 
         self.criterion = Loss(
-            cfg, scale_mean=self.scale_mean, scale_comps=self.scale_comps
+            cfg, 
+            scale_mean=self.scale_mean, 
+            scale_comps=self.scale_comps,
+            nf_head=self.model.nf_head
         )
 
         self.faces = self.model.head_pose.faces.cpu().detach().numpy()
 
         self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
 
+
+
     def training_step(self, batch: Dict, batch_idx: int):
         batch = self.preprocess(batch)
-
-        outputs = self(batch, num_samples=5)
+            
+        outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
 
@@ -175,9 +182,9 @@ class Trainer(BaseLightningModule):
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
         )
 
-        # for k, v in loss_dict.items():
-        #     print(f'{k}: {v.item():.3f}', end=' ')
-        # print('')
+        for k, v in loss_dict.items():
+            print(f'{k}: {v.item():.3f}', end=' ')
+        print('')
         # import ipdb; ipdb.set_trace()
 
         return loss_dict["total_loss"]
@@ -223,8 +230,9 @@ class Trainer(BaseLightningModule):
             vis_step > 4000 and vis_step % 5000 == 0
         )
         global_rank = getattr(self, "global_rank", 0)
-        if should_visualize and global_rank == 0:
+        # if should_visualize and global_rank == 0:
         # if global_rank == 0:
+        if False:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
             image = image.cpu().detach().numpy()  # [3, H, W]
@@ -239,12 +247,13 @@ class Trainer(BaseLightningModule):
                 image,
                 outputs,
                 self.faces,
-                stack_vertically=self.stack_vertically,
+                stack_vertically=False, # self.stack_vertically,
                 affine=affine,
                 img_size=img_size,
                 overlay_gt=True,
                 plot_side=True,
                 batch=batch,
+                mhr_model=self.model.head_pose,
             )
             # rend_img_samples = my_visualize_samples(
             #     image,
@@ -281,7 +290,7 @@ class Trainer(BaseLightningModule):
     def validation_step(self, batch: Dict, batch_idx: int):
         batch = self.preprocess(batch)
 
-        outputs = self(batch, num_samples=5)
+        outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
 
@@ -300,7 +309,7 @@ class Trainer(BaseLightningModule):
         """
         batch = self.preprocess(batch)
 
-        outputs = self(batch, num_samples=5)
+        outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
 
@@ -340,6 +349,7 @@ class Trainer(BaseLightningModule):
             gt_verts = gt_verts @ R.transpose(-2, -1)
 
         batch["gt_verts_w_transl"] = gt_verts
+        batch["gt_joint_coords"] = gt_joint_coords
 
         cam_int = batch["cam_int"]
         if "cam_ext" not in batch:
@@ -359,16 +369,6 @@ class Trainer(BaseLightningModule):
             return projected_points
 
         kp2d = project(gt_keypoints_3d, trans_cam.unsqueeze(1), cam_int)[:, :70, :2]
-
-        # import matplotlib.pyplot as plt
-        # plt.imshow(batch["img_ori"][0].data.cpu().numpy())
-        # plt.scatter(verts_2d[0,:, 0].cpu().numpy(), verts_2d[0,:, 1].cpu().numpy(), s=0.1, c='red')
-        # plt.title("2D projected mesh vertices")
-        # plt.axis("off")
-        # plt.savefig("temp_vis.png")
-        # plt.close()
-
-        # import ipdb; ipdb.set_trace()
 
         # Optionally append dense keypoints
         if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
