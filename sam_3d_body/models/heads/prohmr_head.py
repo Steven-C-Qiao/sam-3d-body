@@ -28,16 +28,22 @@ class NFHead(nn.Module):
     def __init__(self, cfg: CfgNode):
         super(NFHead, self).__init__()
 
-        self.num_shape_comps = 45
-        self.num_scale_comps = 10
+        self.model_glob_rot = getattr(cfg.MODEL, "MODEL_GLOB_ROT", False)
+        self.model_shape = getattr(cfg.MODEL, "MODEL_SHAPE", True)
+        self.model_scale = getattr(cfg.MODEL, "MODEL_SCALE", True)
+
+        self.num_shape_comps = 45 if self.model_shape else 0
+        self.num_scale_comps = 10 if self.model_scale else 0
         self.num_pose_comps = 39
         self.num_1dof_comps = 34
+        self.num_glob_rot_comps = 3 if self.model_glob_rot else 0
 
         self.flow_dim = (
-            self.num_scale_comps 
-            + self.num_pose_comps 
-            + self.num_1dof_comps 
-            + self.num_shape_comps 
+            self.num_scale_comps
+            + self.num_pose_comps
+            + self.num_1dof_comps
+            + self.num_shape_comps
+            + self.num_glob_rot_comps
         )
         config = {
             "flow_dim": self.flow_dim,
@@ -58,7 +64,8 @@ class NFHead(nn.Module):
         # Default number of NF samples per instance (can be overridden at call time)
         self.num_samples = cfg.MODEL.NUM_SAMPLES
 
-        self.context_proj = nn.Linear(self.flow_dim + 1024, 2048)
+        context_dim = 1024 + 45 + 10 + 39 + 34
+        self.context_proj = nn.Linear(context_dim, 2048)
 
         self.register_buffer('initialized', torch.tensor(False))
 
@@ -72,9 +79,15 @@ class NFHead(nn.Module):
             conditioning_feats (torch.Tensor): Tensor of shape (N, C) containing the conditioning features extracted using thee backbonee
         """
 
-        model_params = batch['model_params']
-        shape_params = batch['shape_params']
-        flow_params = convert_mhr_params_to_flow_params(model_params, shape_params)
+        model_params = batch["model_params"]
+        shape_params = batch["shape_params"]
+        flow_params = convert_mhr_params_to_flow_params(
+            model_params,
+            shape_params,
+            include_global_rot=self.model_glob_rot,
+            include_shape=self.model_shape,
+            include_scale=self.model_scale,
+        )
 
         with torch.no_grad():
             _, _ = self.flow.log_prob(flow_params, flow_context)
@@ -130,7 +143,7 @@ class NFHead(nn.Module):
         return ret
 
     
-
+    @autocast("cuda", enabled=False)
     def forward(
         self,
         flow_context: torch.Tensor,
@@ -185,15 +198,23 @@ class NFHead(nn.Module):
         log_prob = flow_output["log_prob"]
         z = flow_output["z"]
 
-        
 
+        # log_prob_from_func, z = self.log_prob(samples.flatten(0, 1), flow_context.repeat_interleave(N, dim=0))
+        # log_prob_from_func = log_prob_from_func.unflatten(0, (B, N))
+        # print('log_prob_from_func', log_prob_from_func[0, :5])
+        print('samples', samples[0, :2, :10].cpu().detach().numpy())
+        print('log_prob', log_prob[0, :2].cpu().detach().numpy())
+        # import ipdb; ipdb.set_trace()
 
-        samples[..., :73] *= 0.2
-        samples[..., 73:] *= 0.5
+        # samples *= 0.5
 
-
-        pose_3dof_residual_samples = samples[..., :39]
-        pose_1dof_residual_samples = samples[..., 39:39+34]
+        # Layout in flow space:
+        #   [glob_rot(3? optional), pose_3dof(39), pose_1dof(34), shape(45? optional), scale(10? optional)]
+        offset = self.num_glob_rot_comps
+        pose_3dof_residual_samples = samples[..., offset : offset + self.num_pose_comps]
+        pose_1dof_residual_samples = samples[
+            ..., offset + self.num_pose_comps : offset + self.num_pose_comps + self.num_1dof_comps
+        ]
 
         aa_3dof_samples = aa_3dofs.unsqueeze(1).repeat(1, N, 1) + pose_3dof_residual_samples
         params_1dofs_samples = params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
@@ -205,9 +226,10 @@ class NFHead(nn.Module):
         shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1) # + shape_residual_samples
 
         # scale_residual_samples = samples[..., 39+34+45:39+34+45+10]
-        scale_residual_samples = samples[..., -10:]
         scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
-        scale_samples_68D[..., scale_indices] += scale_residual_samples
+        if self.model_scale and self.num_scale_comps > 0:
+            scale_residual_samples = samples[..., -self.num_scale_comps :]
+            scale_samples_68D[..., scale_indices] += scale_residual_samples
 
         ret = {
             "samples": samples,
@@ -243,24 +265,29 @@ class NFHead(nn.Module):
         # aa_3dof_samples = gt_flow_params[..., :39].unsqueeze(1).repeat(1, N, 1) 
         # params_1dofs_samples = gt_flow_params[..., 39:39+34].unsqueeze(1).repeat(1, N, 1)
 
-        
+
         # log_prob_using_func, z = self.log_prob(
         #     samples.flatten(0, 1), 
         #     flow_context.repeat_interleave(N, dim=0)
         # )
         # log_prob_using_func = log_prob_using_func.unflatten(0, (B, N))
-        # print(log_prob_using_func[0])
-        # print(log_prob[0])
+        # print('log_prob_using_func, train mode')
+        # print(log_prob_using_func[0, :5])
+        # print('log_prob, train mode')
+        # print(log_prob[0, :5])
                 
         # self.flow.eval()
 
-        # flow_output = self.flow_forward(
-        #     flow_context,
-        #     num_samples=N,
-        # )
-        # samples = flow_output["samples"]
-        # log_prob = flow_output["log_prob"]
-        # z = flow_output["z"]
+        # # flow_output = self.flow_forward(
+        # #     flow_context,
+        # #     num_samples=N,
+        # # )
+        # # samples = flow_output["samples"]
+        # # log_prob = flow_output["log_prob"]
+        # # z = flow_output["z"]
+
+        # # print(samples[0,0, :10])
+        # # print(flow_context[0, :10])
 
         
         # log_prob_using_func, z = self.log_prob(
@@ -268,8 +295,12 @@ class NFHead(nn.Module):
         #     flow_context.repeat_interleave(N, dim=0)
         # )
         # log_prob_using_func = log_prob_using_func.unflatten(0, (B, N))
-        # print(log_prob_using_func[0])
-        # print(log_prob[0])
+        # print('log_prob_using_func, eval mode')    
+        # print(log_prob_using_func[0, :5])
+        # print('log_prob, eval mode')
+        # print(log_prob[0, :5])
+        # self.flow.train()
+        
         return ret 
     
 

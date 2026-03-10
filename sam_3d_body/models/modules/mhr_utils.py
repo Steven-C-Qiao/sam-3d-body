@@ -33,8 +33,11 @@ scale_indices = [3, 4, 5, 6, 7, 10, 11, 12, 13, 14]
 
 
 def convert_mhr_params_to_flow_params(
-    model_params: torch.Tensor, 
-    shape_params: torch.Tensor
+    model_params: torch.Tensor,
+    shape_params: torch.Tensor,
+    include_global_rot: bool = False,
+    include_shape: bool = True,
+    include_scale: bool = True,
 ) -> torch.Tensor:
     assert model_params.shape[-1] == 204
     assert shape_params.shape[-1] == 45
@@ -53,12 +56,22 @@ def convert_mhr_params_to_flow_params(
 
     scale = scale[..., scale_indices]
 
-    flow_params = torch.cat([
-        pose_3dof_aa,
-        pose_1dof_angle,
-        shape_params,
-        scale
-    ], dim=-1)
+    parts = []
+    if include_global_rot:
+        # model_params[..., :6] == [global_trans(3), global_rot(3)] in XYZ Euler.
+        glob_euler = model_params[:, 3:6]  # (B, 3)
+        glob_rotmat = batch6DFromXYZ(glob_euler, return_9D=True)  # (B, 3, 3)
+        glob_aa = matrix_to_axis_angle(glob_rotmat)  # (B, 3)
+        parts.append(glob_aa)
+
+    parts.extend([pose_3dof_aa, pose_1dof_angle])
+
+    if include_shape:
+        parts.append(shape_params)
+    if include_scale:
+        parts.append(scale)
+
+    flow_params = torch.cat(parts, dim=-1)
 
     return flow_params
 

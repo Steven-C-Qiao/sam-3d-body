@@ -167,9 +167,11 @@ class Trainer(BaseLightningModule):
 
         self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
 
+
+
     def training_step(self, batch: Dict, batch_idx: int):
         batch = self.preprocess(batch)
-
+            
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
 
         loss_dict = self.criterion(outputs, batch)
@@ -180,9 +182,9 @@ class Trainer(BaseLightningModule):
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
         )
 
-        # for k, v in loss_dict.items():
-        #     print(f'{k}: {v.item():.3f}', end=' ')
-        # print('')
+        for k, v in loss_dict.items():
+            print(f'{k}: {v.item():.3f}', end=' ')
+        print('')
         # import ipdb; ipdb.set_trace()
 
         return loss_dict["total_loss"]
@@ -228,8 +230,9 @@ class Trainer(BaseLightningModule):
             vis_step > 4000 and vis_step % 5000 == 0
         )
         global_rank = getattr(self, "global_rank", 0)
-        if should_visualize and global_rank == 0:
+        # if should_visualize and global_rank == 0:
         # if global_rank == 0:
+        if False:
             image = batch["img_ori"][0].data  # H W 3, bedlam 720 1280 3
             # image = batch['img'][0,0].data # [3, 256, 256] - CHW format, normalized
             image = image.cpu().detach().numpy()  # [3, H, W]

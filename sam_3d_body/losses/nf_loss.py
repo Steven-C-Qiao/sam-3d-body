@@ -53,14 +53,16 @@ class Loss(pl.LightningModule):
 
         if self.cfg.LOSS.KP3D_WEIGHT > 0:
             pred_kp3d_samples = predictions["kp3d_samples"]
+            num_samples = pred_kp3d_samples.shape[1]
+
+            visibility = batch["visibility"]
+            visibility = visibility.unsqueeze(1).expand(-1, num_samples, -1)
 
             # pred_kp3d is in the wrong way up in 3D space, and projects correctly onto the image.
             # Thus, flip gt_kp3d for loss. Both pred and gt are upside down
             gt_kp3d = batch["keypoints_3d"][..., :3]
             gt_kp3d[..., [1, 2]] *= -1
-            gt_kp3d = gt_kp3d.unsqueeze(1).expand(
-                -1, pred_kp3d_samples.shape[1], -1, -1
-            )
+            gt_kp3d = gt_kp3d.unsqueeze(1).expand(-1, num_samples, -1, -1)
 
             kp3d_loss = self.mse_loss(pred_kp3d_samples, gt_kp3d)
             kp3d_loss = kp3d_loss.mean(dim=-1)
@@ -79,7 +81,13 @@ class Loss(pl.LightningModule):
             gt_model_params = batch["model_params"]
             gt_shape = batch["shape_params"]
 
-            gt_flow_params = convert_mhr_params_to_flow_params(gt_model_params, gt_shape)
+            gt_flow_params = convert_mhr_params_to_flow_params(
+                gt_model_params,
+                gt_shape,
+                include_global_rot=getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False),
+                include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
+                include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
+            )
             
             mean_pred = predictions["mhr"]
             mean_pred_flow_params = convert_mhr_params_to_flow_params(
@@ -88,30 +96,40 @@ class Loss(pl.LightningModule):
                     mean_pred["body_pose"][..., :130], # gets rid of jaw
                     mean_pred["scale_68D"],
                 ], dim=-1), 
-                mean_pred["shape"]
+                mean_pred["shape"],
+                include_global_rot=getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False),
+                include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
+                include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
             )
 
             true_residual = gt_flow_params - mean_pred_flow_params
+
+            true_residual = torch.zeros_like(true_residual)
             
             flow_context = predictions["uncertainty_output"]["flow_context"]
+            num_samples = predictions["uncertainty_output"]["samples"].shape[1]
 
-            self.nf_head.eval()
+            # self.nf_head.eval()
             flow_log_prob, z = self.nf_head.log_prob(
                 true_residual, 
                 flow_context
             )
-
             nll_loss = - flow_log_prob.mean()
 
+
             # auto_sample_loglik = predictions['uncertainty_output']['log_prob']
-            # samples = predictions["uncertainty_output"]["samples"]            
-            # sample_log_prob, z = self.nf_head.log_prob(samples.flatten(0, 1), flow_context.repeat_interleave(5, dim=0))
+            # samples = predictions["uncertainty_output"]["samples"]    
+            # # print(samples[0,0, :10])
+            # # print(flow_context[0, :10])
+            # sample_log_prob, z = self.nf_head.log_prob(samples.flatten(0, 1), flow_context.repeat_interleave(num_samples, dim=0))
             # sample_log_prob = sample_log_prob.unflatten(0, (B, -1))
-            # print(flow_log_prob[:5])
-            # print(auto_sample_loglik[0, :5])
-            # print(sample_log_prob[0, :5])
+            # print('gt residual flow_log_prob', flow_log_prob[:5])
+            # print('forward log prob', auto_sample_loglik[0, :5])
+            # print('inverse log_prob in loss', sample_log_prob[0, :5])
+
+            # import ipdb; ipdb.set_trace()
     
-            self.nf_head.train()
+            # self.nf_head.train()
 
             loss_dict["loss_param_nll"] = (self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss)
 
