@@ -106,8 +106,6 @@ class Loss(pl.LightningModule):
 
             true_residual = gt_flow_params - mean_pred_flow_params
 
-            # true_residual = torch.zeros_like(true_residual)
-
             flow_context = predictions["uncertainty_output"]["flow_context"]
             num_samples = predictions["uncertainty_output"]["samples"].shape[1]
 

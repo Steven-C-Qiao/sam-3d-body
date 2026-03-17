@@ -129,12 +129,17 @@ class Metrics(pl.LightningModule):
     def __init__(self):
         super().__init__()
 
+    @torch.no_grad()
     def forward(self, predictions, batch):
         metrics = {}
 
         if "pred_keypoints_3d" in predictions["mhr"]:
-            gt_kp3d = batch["keypoints_3d"]
             pred_kp3d = predictions["mhr"]["pred_keypoints_3d"]
+            gt_kp3d = batch["keypoints_3d"]
+
+            pred_vertices = predictions["mhr"]["pred_vertices"]
+            gt_vertices = batch["vertices"]
+            gt_vertices[..., [1, 2]] *= -1
 
             mpjpe_mean = self.mpjpe(
                 pred_kp3d[:, :70, :],
@@ -148,34 +153,101 @@ class Metrics(pl.LightningModule):
             )
             metrics["pampjpe"] = pampjpe_mean
 
-            if pred_kp3d.shape[1] > 70:
-                pve_mean = self.pve(pred_kp3d[:, 70:, :], gt_kp3d[:, 70:, :])
-                metrics["pve"] = pve_mean
+            pve_mean = self.pve(pred_vertices, gt_vertices)
+            metrics["pve"] = pve_mean
 
         if "kp3d_samples" in predictions:
             pred_kp3d_samples = predictions["kp3d_samples"]
-            num_samples = pred_kp3d_samples.shape[1]
-            gt_kp3d_samples = batch["keypoints_3d"][:, None].expand(
-                -1, num_samples, -1, -1
-            )
+            B, N = pred_kp3d_samples.shape[:2]
+            gt_kp3d_expanded = batch["keypoints_3d"][:, None].expand(-1, N, -1, -1)
+
+            pred_vertices_samples = predictions["verts_samples"]
+            gt_vertices_expanded = batch["vertices"][:, None].expand(-1, N, -1, -1)
 
             mpjpe_samples = self.mpjpe(
-                pred_kp3d_samples[:, :, :70, :], gt_kp3d_samples[:, :, :70, :]
-            )
-            metrics["mpjpe_samples"] = mpjpe_samples
+                pred_kp3d_samples[:, :, :70, :],
+                gt_kp3d_expanded[:, :, :70, :],
+                reduction="none",
+            ).mean(
+                dim=-1
+            )  # B, N
+            metrics["mpjpe_samples"] = mpjpe_samples.mean()
+            metrics["mpjpe_samples_min"] = mpjpe_samples.min(dim=-1).values.mean()
 
-            pampjpe_samples = self.pampjpe(
-                pred_kp3d_samples[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
-                gt_kp3d_samples[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
-            )
-            metrics["pampjpe_samples"] = pampjpe_samples
-
-            if pred_kp3d_samples.shape[2] > 70:
-                pve_samples = self.pve(
-                    pred_kp3d_samples[:, :, 70:, :],
-                    gt_kp3d_samples[:, :, 70:, :],
+            pampjpe_samples = (
+                self.pampjpe(
+                    pred_kp3d_samples[:, :, :70, :]
+                    .flatten(0, 1)
+                    .cpu()
+                    .detach()
+                    .numpy(),
+                    gt_kp3d_expanded[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
+                    reduction="none",
                 )
-                metrics["pve_samples"] = pve_samples
+                .reshape(B, N, -1)
+                .mean(axis=-1)
+            )
+            metrics["pampjpe_samples"] = pampjpe_samples.mean()
+            metrics["pampjpe_samples_min"] = pampjpe_samples.min(axis=-1).mean()
+
+            pve_samples = self.pve(
+                pred_vertices_samples, gt_vertices_expanded, reduction="none"
+            ).mean(dim=-1)
+            metrics["pve_samples"] = pve_samples.mean()
+            metrics["pve_samples_min"] = pve_samples.min(dim=-1).values.mean()
+
+            if "visibility" in batch:
+                # pred_kp3d_samples: (B, N, J, 3)
+                centered = pred_kp3d_samples - pred_kp3d_samples.mean(
+                    dim=1, keepdim=True
+                )
+                # Distances of each sample to its joint-wise mean: (B, N, J)
+                dists_per_sample = torch.sqrt((centered**2).sum(dim=-1))
+
+                per_joint_spread = dists_per_sample.mean(dim=1)
+
+                kp_visibility = batch["visibility"].bool()  # (B, J)
+
+                if kp_visibility.any():
+                    metrics["spread_visible_kp3d"] = per_joint_spread[
+                        kp_visibility
+                    ].mean()
+                else:
+                    metrics["spread_visible_kp3d"] = None
+
+                if (~kp_visibility).any():
+                    metrics["spread_invisible_kp3d"] = per_joint_spread[
+                        ~kp_visibility
+                    ].mean()
+                else:
+                    metrics["spread_invisible_kp3d"] = None
+
+        if "kp2d_samples_cropped" in predictions:
+            img_size = batch["img_size"]
+
+            pred_kp2d_norm = predictions["mhr"][
+                "pred_keypoints_2d_cropped"
+            ]  # (B, J, 2)
+            gt_kp2d_norm = batch["keypoints_2d"]  # (B, J, 2)
+
+            pred_kp2d = (pred_kp2d_norm + 0.5) * img_size.unsqueeze(1)
+            gt_kp2d = (gt_kp2d_norm + 0.5) * img_size.unsqueeze(1)
+
+            pred_kp2d_samples_norm = predictions["kp2d_samples_cropped"]  # (B, N, J, 2)
+            B, N = pred_kp2d_samples_norm.shape[:2]
+            gt_kp2d_samples_norm = batch["keypoints_2d"][:, None].expand(-1, N, -1, -1)
+
+            img_size_b = img_size.view(B, 1, 1, 2)
+            pred_kp2d_samples = (pred_kp2d_samples_norm + 0.5) * img_size_b
+            gt_kp2d_samples = (gt_kp2d_samples_norm + 0.5) * img_size_b
+
+            metrics["kp2d_pixel_error"] = self.avg_kp2d_pixel(
+                pred_kp2d, gt_kp2d, metrics="l2", reduction="mean"
+            )
+            kp2d_err_samples = self.avg_kp2d_pixel(
+                pred_kp2d_samples, gt_kp2d_samples, metrics="l2", reduction="none"
+            )
+            metrics["kp2d_samples_pixel_error"] = kp2d_err_samples.mean()
 
         # for k, v in metrics.items():
         #     print(f"{k}: {v:.4f}")
@@ -183,18 +255,46 @@ class Metrics(pl.LightningModule):
 
         return metrics
 
-    def mpjpe(self, pred, gt):
-        return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).mean()
+    def mpjpe(self, pred, gt, reduction="mean"):
+        if reduction == "mean":
+            return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).mean()
+        elif reduction == "sum":
+            return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).sum()
+        else:
+            return torch.sqrt(((pred - gt) ** 2).sum(dim=-1))
 
-    def pampjpe(self, pred, gt):
+    def pampjpe(self, pred, gt, reduction="mean"):
         r_error, _ = reconstruction_error(pred, gt, reduction=None)
-        return r_error.mean()
+        if reduction == "mean":
+            return r_error.mean()
+        elif reduction == "sum":
+            return r_error.sum()
+        else:
+            return r_error
 
-    def pve(self, pred, gt):
-        return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).mean()
+    def pve(self, pred, gt, reduction="mean"):
+        if reduction == "mean":
+            return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).mean()
+        elif reduction == "sum":
+            return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).sum()
+        else:
+            return torch.sqrt(((pred - gt) ** 2).sum(dim=-1))
 
-    def avg_kp2d_l1_dist(self, pred, gt):
-        return torch.abs(pred - gt).mean()
+    def avg_kp2d_pixel(self, pred, gt, metrics="l1", reduction="mean"):
+        if metrics == "l1":
+            if reduction == "mean":
+                return torch.abs(pred - gt).mean()
+            elif reduction == "sum":
+                return torch.abs(pred - gt).sum()
+            else:
+                return torch.abs(pred - gt)
+        elif metrics == "l2":
+            if reduction == "mean":
+                return torch.sqrt(((pred - gt) ** 2).mean(dim=-1)).mean()
+            elif reduction == "sum":
+                return torch.sqrt(((pred - gt) ** 2).sum(dim=-1)).sum()
+            else:
+                return torch.sqrt(((pred - gt) ** 2).sum(dim=-1))
 
     def pvetsc(self, pred, gt):
         pred_tpose_vertices_sc = scale_and_translation_transform_batch(pred, gt)

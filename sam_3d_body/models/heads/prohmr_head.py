@@ -20,12 +20,6 @@ from pytorch3d.transforms import (
 )
 
 
-def aa_to_euler(aa, euler_convention="XYZ"):
-    rotmat = axis_angle_to_matrix(aa)
-    euler = matrix_to_euler_angles(rotmat, euler_convention)
-    return euler
-
-
 class NFHead(nn.Module):
     def __init__(self, cfg: CfgNode):
         super(NFHead, self).__init__()
@@ -34,10 +28,10 @@ class NFHead(nn.Module):
         self.model_shape = getattr(cfg.MODEL, "MODEL_SHAPE", True)
         self.model_scale = getattr(cfg.MODEL, "MODEL_SCALE", True)
 
-        self.num_shape_comps = 45 if self.model_shape else 0
-        self.num_scale_comps = 10 if self.model_scale else 0
         self.num_3dof_comps = 39
         self.num_1dof_comps = 34
+        self.num_shape_comps = 45 if self.model_shape else 0
+        self.num_scale_comps = 10 if self.model_scale else 0
         self.num_glob_rot_comps = 3 if self.model_glob_rot else 0
 
         self.flow_dim = (
@@ -174,8 +168,6 @@ class NFHead(nn.Module):
         samples = flow_output["samples"]
         log_prob = flow_output["log_prob"]
         z = flow_output["z"]
-
-        # samples *= 0.5
 
         offset = self.num_glob_rot_comps
         pose_3dof_residual_samples = samples[..., offset : offset + self.num_3dof_comps]

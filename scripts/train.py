@@ -22,7 +22,7 @@ from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=41, dev=False):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
@@ -62,6 +62,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=41, dev=False):
     model = Trainer(
         cfg=cfg,
         vis_save_dir=vis_save_dir,
+        always_visualise=args.plot,
     )
 
     checkpoint_kwargs = {
@@ -160,7 +161,11 @@ if __name__ == "__main__":
         help="Comma-separated list of GPU indices to use. E.g., '0,1,2'",
     )
     parser.add_argument("--dev", action="store_true")
-    parser.add_argument("--plot", action="store_true")
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="If set, always generate visualisations each step.",
+    )
     args = parser.parse_args()
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -169,10 +174,10 @@ if __name__ == "__main__":
 
     if args.plot:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
-
-    device_ids = list(map(int, args.gpus.split(",")))
-    logger.info(f"Using GPUs: {args.gpus} (Device IDs: {device_ids})")
+    if args.gpus is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+        device_ids = list(map(int, args.gpus.split(",")))
+        logger.info(f"Using GPUs: {args.gpus} (Device IDs: {device_ids})")
 
     run_train(
         exp_dir=args.experiment_dir,

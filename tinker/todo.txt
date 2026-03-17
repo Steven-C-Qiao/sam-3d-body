@@ -1,0 +1,7 @@
+Importance sampling code for merging 
+hand alignment bugfix 
+Metrics for the visible part of the body 
+Fix train/val sets, add 4d-dress to the val loop 
+
+Cam_trans alignment 
+height raw predictions 

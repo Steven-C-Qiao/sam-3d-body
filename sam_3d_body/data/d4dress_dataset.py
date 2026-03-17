@@ -108,8 +108,215 @@ IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
 
 
+class D4DressDataset(Dataset):
+    """
+    Single-view 4D-DRESS dataset used during training as an evaluation dataset,
+    jointly with the BEDLAM evaluation set.
+
+    It mirrors the structure of `MultiD4DressDataset` but returns a single
+    randomly sampled view per `__getitem__` so that it is compatible with the
+    standard Trainer validation loop (which expects single-view samples).
+    """
+
+    def __init__(self, cfg=None, ids=None):
+        """
+        Args:
+            cfg: YACS config node, expected to have DATASET.IMAGE_SIZE.
+            ids: Optional list of subject IDs. If None, uses a default subset.
+        """
+        if ids is None:
+            ids = [
+                "00122",
+                "00123",
+                "00127",
+                "00129",
+                "00134",
+                "00135",
+                "00136",
+                "00137",
+                "00140",
+                "00147",
+                "00148",
+                "00149",
+                "00151",
+                "00152",
+                "00154",
+                "00156",
+                "00160",
+                "00163",
+                "00167",
+                "00168",
+                "00169",
+                "00170",
+                "00174",
+                "00175",
+                "00176",
+                "00179",
+                "00180",
+                "00185",
+                "00187",
+                "00190",
+            ]
+
+        self.cfg = cfg
+        # We sample one frame per person (per __getitem__) for evaluation.
+        self.num_frames_pp = 1
+        # Virtually lengthen the dataset if desired (kept at 1 for eval usage).
+        self.lengthen_by = 1
+
+        self.body_model = "smplx"
+        self.num_joints = 55
+
+        self.subject_ids = ids
+        self.camera_ids = ["0004", "0028", "0052", "0076"]
+
+        self.takes = defaultdict(list)
+        self.num_takes = defaultdict(int)
+
+        for subject_id in self.subject_ids:
+            inner_takes = sorted(
+                os.listdir(os.path.join(PATH_TO_DATASET, subject_id, "Inner"))
+            )
+            inner_takes = [
+                (take, "Inner") for take in inner_takes if take.startswith("Take")
+            ]
+
+            self.takes[subject_id] = inner_takes
+            self.num_takes[subject_id] = len(inner_takes)
+
+        self.transform = Compose(
+            [
+                FakeGetBBoxCenterScale(),
+                TopdownAffine(input_size=self.cfg.DATASET.IMAGE_SIZE, use_udp=False),
+                VisionTransformWrapper(ToTensor()),
+            ]
+        )
+        print(f"D4DressDataset initialized with {len(self.subject_ids)} subjects")
+
+    def __len__(self):
+        # One logical item per subject (optionally lengthened).
+        return int(len(self.subject_ids) * self.lengthen_by)
+
+    def __getitem__(self, index):
+        item: Dict = {}
+
+        subject_id = self.subject_ids[index // self.lengthen_by]
+
+        # Sample a take for this subject
+        num_takes = self.num_takes[subject_id]
+        sampled_take = self.takes[subject_id][torch.randint(0, num_takes, (1,)).item()]
+        take_dir = os.path.join(
+            PATH_TO_DATASET, subject_id, sampled_take[1], sampled_take[0]
+        )
+
+        item["take_dir"] = take_dir
+        item["scan_ids"] = subject_id
+
+        # Load MHR parameters
+        mhr_params = np.load(os.path.join(take_dir, "MHR_params.npz"))
+        mhr_shape = mhr_params["identity_coeffs_np"]
+        mhr_pose = mhr_params["lbs_params_np"]
+        mhr_expr = mhr_params["face_expr_coeffs_np"]
+
+        # Load basic_info from main take
+        basic_info = load_pickle(os.path.join(take_dir, "basic_info.pkl"))
+        scan_frames, scan_rotation = basic_info["scan_frames"], basic_info["rotation"]
+
+        # Ensure scan_frames is a numpy array
+        if not isinstance(scan_frames, np.ndarray):
+            scan_frames = np.array(scan_frames)
+
+        num_scan_frames = len(scan_frames)
+        # Sample a single frame index (not frame number) to align with MHR params
+        sampled_idx = np.random.choice(num_scan_frames, size=1, replace=False)[0]
+        sampled_frame = scan_frames[sampled_idx]
+
+        # Sample a single camera
+        sampled_camera = np.random.choice(self.camera_ids, size=1, replace=False)[0]
+
+        # Load camera params
+        camera_params = load_pickle(os.path.join(take_dir, "Capture", "cameras.pkl"))
+        cam_int = camera_params[sampled_camera]["intrinsics"].astype(np.float32)
+        cam_ext = camera_params[sampled_camera]["extrinsics"].astype(np.float32)
+
+        item["cam_int"] = torch.from_numpy(cam_int)
+        item["cam_ext"] = torch.from_numpy(cam_ext)
+
+        # Build paths to image and mask
+        img_fname = os.path.join(
+            take_dir,
+            "Capture",
+            sampled_camera,
+            "images",
+            f"capture-f{sampled_frame}.png",
+        )
+        mask_fname = os.path.join(
+            take_dir,
+            "Capture",
+            sampled_camera,
+            "masks",
+            f"mask-f{sampled_frame}.png",
+        )
+
+        # Load images and apply transforms
+        img = load_image(img_fname)
+        mask = load_image(mask_fname)
+
+        item["img_ori"] = img
+
+        img_h, img_w = img.shape[:2]
+        assert (
+            img_h >= img_w
+        ), f"D4Dress images expected portrait mode (H>=W), got H={img_h}, W={img_w}"
+
+        # Use principal point as crop center (matches MultiD4DressDataset)
+        bbox_center = np.array([cam_int[0, 2], cam_int[1, 2]], dtype=np.float32)
+        bbox_scale = img_w / 200.0
+
+        data_info = dict(
+            img=img,
+            center=bbox_center,
+            scale=bbox_scale,
+            bbox_format="xyxy",
+            mask=mask,
+        )
+        data_list = [self.transform(data_info)]
+        data = default_collate(data_list)
+
+        # Copy all transformed fields into item
+        for key in data:
+            item[key] = data[key]
+
+        # BEDLAM-style mask & metadata
+        # item["mask"] shape is [1, H, W] -> make it [1, 1, H, W]
+        item["mask"] = item["mask"].float().unsqueeze(-3)
+        item["mask_score"] = torch.ones((1, 1, 1, 1))
+        item["person_valid"] = torch.ones((1, 1))
+
+        # Slice the parameter arrays with the sampled frame index
+        item["shape_params"] = torch.from_numpy(mhr_shape[sampled_idx]).float()
+        item["model_params"] = torch.from_numpy(mhr_pose[sampled_idx]).float()
+        item["face_expr_coeffs"] = torch.from_numpy(mhr_expr[sampled_idx]).float()
+
+        item["dataset_name"] = "4d-dress"
+
+        return item
+
+
 class MultiD4DressDataset(Dataset):
-    def __init__(self, ids, cfg):
+    def __init__(self, ids=None, cfg=None):
+
+        if ids is None:
+            ids = [
+                "00122", "00123", "00127", "00129",
+                "00134", "00135", "00136", "00137",
+                "00140", "00147", "00148", "00149",
+                "00151", "00152", "00154", "00156",
+                "00160", "00163", "00167", "00168",
+                "00169", "00170", "00174", "00175",
+                "00176", "00179", "00180", "00185",
+                "00187", "00190",
+            ]
         self.cfg = cfg
         self.num_frames_pp = 4
         self.lengthen_by = 1
