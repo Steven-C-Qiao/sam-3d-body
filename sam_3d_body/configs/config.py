@@ -36,11 +36,12 @@ _C.LOSS = CfgNode()
 _C.LOSS.SHAPE_PARAM_WEIGHT = 1.0
 _C.LOSS.SCALE_PARAM_WEIGHT = 1.0
 _C.LOSS.POSE_PARAM_WEIGHT = 1.0
+_C.LOSS.JOINTS_3D_WEIGHT = 1.0
+_C.LOSS.JOINTS_2D_WEIGHT = 1.0
 _C.LOSS.KP2D_WEIGHT = 100.0
 _C.LOSS.KP3D_WEIGHT = 100.0
-_C.LOSS.JOINTS_3D_WEIGHT = 0.0
-_C.LOSS.JOINTS_2D_WEIGHT = 0.0
-_C.LOSS.PARAM_NLL_WEIGHT = 5e-3
+_C.LOSS.PARAM_NLL_WEIGHT = 0.005
+_C.LOSS.PARAM_L2_WEIGHT = 10.0
 
 # Dataset hparams
 _C.DATASET = CfgNode()
@@ -55,7 +56,9 @@ _C.DATASET.SHUFFLE_TRAIN = True
 _C.DATASET.TRAIN_DS = 'all'
 _C.DATASET.VAL_DS = 'static-hdri-bmi_orbit-archviz-15'
 _C.DATASET.MESH_COLOR = 'pinkish'
-_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_zoom-suburbd_zoom-gym_static-office_orbit-office_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
+_C.DATASET.DATASETS_AND_RATIOS_FULL = 'static-hdri_agora-bfh_agora-body_zoom-suburbd_closeup-suburba_closeup-suburbb_closeup-suburbc_closeup-suburbd_closeup-gym_zoom-gym_static-gym_static-office_orbit-office_static-hdri-zoomed_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_static-suburbd-bmi_zoom-gym-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-15_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
+_C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_agora-bfh_agora-body_zoom-suburbd_closeup-suburba_closeup-suburbb_closeup-suburbc_closeup-suburbd_closeup-gym_zoom-gym_static-gym_static-office_orbit-office_static-hdri-zoomed_pitchup-stadium_pitchdown-stadium_closeup-suburbb-bmi_closeup-suburbc-bmi_static-suburbd-bmi_zoom-gym-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
+
 _C.DATASET.CROP_PERCENT = 0.8
 _C.DATASET.ALB = True
 _C.DATASET.ALB_PROB = 0.5
@@ -197,7 +200,7 @@ DATASET_FOLDERS = {
     'static-stadium-bmi': os.path.join(PATH, 'data/training_images/20221019_3-8_250_highbmihand_static_stadium_6fps/png'),
     'orbit-stadium-bmi': os.path.join(PATH, 'data/training_images/20221019_3-8_250_highbmihand_orbit_stadium_6fps/png'),
     'static-suburbd-bmi': os.path.join(PATH, 'data/training_images/20221019_3-8_1000_highbmihand_static_suburb_d_6fps/png'),
-    # 'zoom-gym-bmi': os.path.join(PATH, 'data/training_images/20221020-3-8_250_highbmihand_zoom_highSchoolGym_a_6fps/png'),
+    'zoom-gym-bmi': os.path.join(PATH, 'data/training_images/20221020-3-8_250_highbmihand_zoom_highSchoolGym_a_6fps/png'),
     'static-office-hair': os.path.join(PATH, 'data/training_images/20221022_3_250_batch01handhair_static_bigOffice_30fps/png'),
     'zoom-suburbd-hair': os.path.join(PATH, 'data/training_images/20221024_10_100_batch01handhair_zoom_suburb_d_30fps/png'),
     'static-gym-hair': os.path.join(PATH, 'data/training_images/20221024_3-10_100_batch01handhair_static_highSchoolGym_30fps/png'),
@@ -225,8 +228,6 @@ DATASET_FILES = [
         'static-gym': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221013_3-10_500_batch01hand_static_highSchoolGym_6fps.npz'),
         'orbit-archviz-15': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221014_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
         'static-hdri-bmi': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/20221019_3_250_highbmihand_6fps.npz'),
-
-        # NOTE: Temporarily added zoom-suburbd for code testing
     },
     {
         'agora-bfh': os.path.join(PATH, 'data/training_labels/all_npz_12_training_extra_mhr/agora-bfh.npz'), # was _extra_mhr 

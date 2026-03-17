@@ -160,10 +160,15 @@ def visualize_sample_together(img_cv2, outputs, faces):
 import cv2 
 import torch
 import matplotlib.cm as cm
-def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
+def my_visualize(img_cv2, outputs, faces, stack_vertically=True, batch=None):
     # Render everything together
     img_keypoints = img_cv2.copy()
     img_mesh = img_cv2.copy()
+
+    camera_center=(
+        batch["cam_int"][0, 0, 2],
+        batch["cam_int"][0, 1, 2],
+    )
 
     # Get original output (mean prediction)
     mhr_outputs = outputs['mhr']
@@ -219,10 +224,6 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
 
     all_pred_vertices = person_output["pred_vertices"][0] # + person_output["pred_cam_t"][0])
     all_faces = faces
-    
-    # Pull out a fake translation; take the closest two
-    # fake_pred_cam_t = (np.max(all_pred_vertices[-2*18439:], axis=0) + np.min(all_pred_vertices[-2*18439:], axis=0)) / 2
-    # all_pred_vertices = all_pred_vertices - fake_pred_cam_t
 
     # Render front view
     renderer = Renderer(focal_length=person_output["focal_length"][0], faces=all_faces)
@@ -234,6 +235,7 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
             mesh_base_color=LIGHT_BLUE,
             scene_bg_color=(1, 1, 1),
             vertex_colors=vertex_colors,
+            camera_center=camera_center,
         )
         * 255
     )
@@ -249,6 +251,7 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True):
             scene_bg_color=(1, 1, 1),
             side_view=True,
             vertex_colors=vertex_colors,
+            camera_center=camera_center,
         )
         * 255
     )
@@ -275,9 +278,15 @@ def my_visualize_samples(
     plot_side=True,
     batch=None,
     mhr_model=None,
+    metrics=None,
 ):
     affine = affine.cpu().detach().numpy() if affine is not None else None
     img_size = img_size.cpu().detach().numpy() if img_size is not None else None
+
+    camera_center=(
+        batch["cam_int"][0, 0, 2],
+        batch["cam_int"][0, 1, 2],
+    )
 
     img_mesh = img_cv2.copy()
 
@@ -288,6 +297,18 @@ def my_visualize_samples(
         base_img = cv2.warpAffine(base_img_uint8, affine, img_size)
 
     mhr_samples = outputs["verts_samples"].cpu().detach().numpy()
+    # Optional: per-sample log-probabilities (from outputs) and PA-MPJPE (from metrics), shape (B, N)
+    log_prob = None
+    pampjpe_samples = None
+    if "uncertainty_output" in outputs and "log_prob" in outputs["uncertainty_output"]:
+        try:
+            log_prob = (
+                outputs["uncertainty_output"]["log_prob"].cpu().detach().numpy()
+            )
+        except Exception:
+            log_prob = None
+    if metrics is not None and "pampjpe_samples_per_sample" in metrics:
+        pampjpe_samples = metrics["pampjpe_samples_per_sample"]
     mhr_root_joint_samples = outputs["j3d_samples"][..., 1, :].cpu().detach().numpy()
 
     gt_verts = batch['gt_verts_w_transl'].cpu().detach().numpy()
@@ -336,6 +357,9 @@ def my_visualize_samples(
     renderer = Renderer(
         focal_length=outputs["focal_length"][0], faces=all_faces
     )
+    renderer_side = Renderer(
+        focal_length=1000, faces=all_faces
+    )
     for i in range(mhr_samples.shape[1]):
         img_mesh = img_cv2.copy()
 
@@ -347,6 +371,7 @@ def my_visualize_samples(
                 img_mesh,
                 mesh_base_color=ORANGE,
                 scene_bg_color=(1, 1, 1),
+                camera_center=camera_center,
             )
             * 255
         )
@@ -358,6 +383,7 @@ def my_visualize_samples(
                 mesh_base_color=BLUE,
                 scene_bg_color=(1, 1, 1),
                 return_rgba=True,
+                camera_center=camera_center,
             )
             alpha = (gt_rgba[..., 3:4].astype(np.float32) * 0.5)
             
@@ -374,9 +400,9 @@ def my_visualize_samples(
         # ----------------------- side view -----------------------
         if plot_side:
             pred_side = (
-                renderer(
+                renderer_side(
                     mhr_samples[0, i] - mhr_root_joint_samples[0, i],
-                    np.array([0.0, -0.25, 6.0]),
+                    np.array([0.0, -0.25, 4.0]),
                     np.ones_like(img_mesh) * 255,
                     mesh_base_color=ORANGE,
                     side_view=True,
@@ -384,9 +410,9 @@ def my_visualize_samples(
                 )
             )
             gt_side = (
-                renderer(
+                renderer_side(
                     gt_verts[0] - gt_root_joint[0],
-                    np.array([0.0, -0.25, 6.0]),
+                    np.array([0.0, -0.25, 4.0]),
                     np.ones_like(img_mesh) * 255,
                     mesh_base_color=BLUE,
                     side_view=True,
@@ -398,6 +424,34 @@ def my_visualize_samples(
             gt_side_rgb = gt_side[..., :3]
             blended_sideview = alpha * gt_side_rgb + (1.0 - alpha) * pred_side
             img_side = (blended_sideview * 255.0).clip(0, 255).astype(np.uint8)
+
+            # Annotate side-view image with log probability and PA-MPJPE if available
+            if log_prob is not None:
+                lp_val = float(log_prob[0, i])
+                text = f"log p: {lp_val:.1f}"
+                cv2.putText(
+                    img_side,
+                    text,
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 139),
+                    2,
+                    cv2.LINE_AA,
+                )
+            if pampjpe_samples is not None:
+                pa_val = float(pampjpe_samples[0, i])
+                text2 = f"PA-MPJPE: {pa_val:.1f}"
+                cv2.putText(
+                    img_side,
+                    text2,
+                    (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 139, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
             img_side_list.append(img_side)
 
     axis = 0 if stack_vertically else 1
@@ -413,6 +467,7 @@ def my_visualize_samples(
             mesh_base_color=BLUE,
             scene_bg_color=(1, 1, 1),
             return_rgba=True,
+            camera_center=camera_center,
         )
 
         mean_pred_verts = outputs["pred_vertices"][0]
@@ -425,6 +480,7 @@ def my_visualize_samples(
             img_cv2.copy(),
             mesh_base_color=ORANGE,
             scene_bg_color=(1, 1, 1),
+            camera_center=camera_center,
         )
         alpha = (gt_base_img[..., 3:4].astype(np.float32) * 0.5)
         gt_base_rgb_full = gt_base_img[..., :3].astype(np.float32)
@@ -433,9 +489,9 @@ def my_visualize_samples(
 
         # Bottom-left panel: 90-deg rotated side views of mean prediction and GT on
         white_bg = np.ones_like(img_mesh) * 255
-        mean_pred_unc = renderer(
+        mean_pred_unc = renderer_side(
             mean_pred_verts - mean_pred_root_joint,
-            np.array([0.0, -0.25, 6.0]),
+            np.array([0.0, -0.25, 4.0]),
             white_bg.copy(),
             mesh_base_color=ORANGE,
             scene_bg_color=(1, 1, 1),
@@ -443,9 +499,9 @@ def my_visualize_samples(
             side_view=True,
             rot_angle=90,
         )
-        gt_rgba_unc = renderer(
+        gt_rgba_unc = renderer_side(
             gt_verts[0] - gt_root_joint[0],
-            np.array([0.0, -0.25, 6.0]),
+            np.array([0.0, -0.25, 4.0]),
             white_bg.copy(),
             mesh_base_color=BLUE,
             scene_bg_color=(1, 1, 1),
@@ -458,6 +514,38 @@ def my_visualize_samples(
         mean_pred_unc_rgb = mean_pred_unc.astype(np.float32)
         blended_unc = alpha_unc * gt_unc_rgb + (1.0 - alpha_unc) * mean_pred_unc_rgb
         mean_unc_panel = (blended_unc * 255.0).clip(0, 255).astype(np.uint8)
+
+        # Annotate first figure of second row with mean PA-MPJPE (in mm) and log p = '-'
+        if metrics is not None:
+            pa_mean = metrics.get("pampjpe", None)
+            if pa_mean is not None:
+                # detach scalar if tensor
+                if hasattr(pa_mean, "item"):
+                    pa_val = float(pa_mean.item())
+                else:
+                    pa_val = float(pa_mean)
+                text_pa = f"PA-MPJPE (mean): {pa_val:.1f} mm"
+                text_logp = "log p: na"
+                cv2.putText(
+                    mean_unc_panel,
+                    text_pa,
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 139, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    mean_unc_panel,
+                    text_logp,
+                    (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 139),
+                    2,
+                    cv2.LINE_AA,
+                )
 
         if affine is not None:
             gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)

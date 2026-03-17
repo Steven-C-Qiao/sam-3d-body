@@ -173,6 +173,8 @@ class Trainer(BaseLightningModule):
         batch_idx: Optional[int] = None,
     ):
 
+        raw_metrics = metrics.copy()
+        metrics.pop("pampjpe_samples_per_sample")
         metrics = {f"{prefix}{k}": v for k, v in metrics.items()}
         loss_dict = {f"{prefix}{k}": v for k, v in loss_dict.items()}
 
@@ -212,7 +214,7 @@ class Trainer(BaseLightningModule):
 
             # Generate visualizations
             rend_img = my_visualize(
-                image, outputs, self.faces, stack_vertically=self.stack_vertically
+                image, outputs, self.faces, stack_vertically=self.stack_vertically, batch=batch
             )
             affine = batch["affine_trans"][0, 0]
             img_size = batch["img_size"][0, 0]
@@ -227,6 +229,7 @@ class Trainer(BaseLightningModule):
                 plot_side=True,
                 batch=batch,
                 mhr_model=self.model.head_pose,
+                metrics=raw_metrics,
             )
             rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
             rend_img_samples_crops_bgr = cv2.cvtColor(
@@ -249,7 +252,7 @@ class Trainer(BaseLightningModule):
     def forward(self, batch: Dict, num_samples: int = 0) -> Dict:
         return self.model(batch, num_samples)
 
-    def validation_step(self, batch: Dict, batch_idx: int):
+    def validation_step(self, batch: Dict, batch_idx: int, dataloader_idx: int = 0):
         batch = self.preprocess(batch)
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
         loss_dict = self.criterion(outputs, batch)
@@ -300,6 +303,7 @@ class Trainer(BaseLightningModule):
         if batch["dataset_name"][0] == "4d-dress":
             R = batch["cam_ext"][:, :3, :3]
             gt_verts = gt_verts @ R.transpose(-2, -1)
+            gt_joint_coords = gt_joint_coords @ R.transpose(-2, -1)
 
         batch["gt_verts_w_transl"] = gt_verts
         batch["gt_joint_coords"] = gt_joint_coords
@@ -342,6 +346,9 @@ class Trainer(BaseLightningModule):
         gt_kp2d_crop = gt_kp2d_crop / img_size.unsqueeze(1) - 0.5  # [B, 70, 2]
         batch["keypoints_2d"] = gt_kp2d_crop
 
+        if "visibility" not in batch: # eg. 4d-dress 
+            batch["visibility"] = torch.ones_like(batch["keypoints_2d"][:, :70, 0]).bool()
+
         # --- temp mirror for joints ---
         j2d = project(gt_joint_coords, trans_cam.unsqueeze(1), cam_int)[..., :2]
         j2d_h = torch.cat([j2d, torch.ones_like(j2d[..., :1])], dim=-1).float()
@@ -358,7 +365,13 @@ class Trainer(BaseLightningModule):
 
         global_rot = batch["model_params"][:, 3:6]
 
+
+
         global_rotmat = roma.euler_to_rotmat("xyz", global_rot)  # B x 3 x 3
+        
+        if batch["dataset_name"][0] == "4d-dress":
+            R = batch["cam_ext"][:, :3, :3]
+            global_rotmat = global_rotmat @ R.transpose(-2, -1)
 
         batch_size = global_rot.shape[0]
         rot_180_x = (
@@ -440,49 +453,41 @@ class Trainer(BaseLightningModule):
 
     def val_dataset(self):
         datasets = self.cfg.DATASET.VAL_DS.split("_")
-        # logger.info(f"Validation datasets are: {datasets}")
-        # val_datasets = []
-        # for dataset_name in datasets:
-        #     val_datasets.append(
-        #         BEDLAMDataset(
-        #             options=self.cfg.DATASET,
-        #             dataset=dataset_name,
-        #             is_train=False,
-        #         )
-        #     )
+        logger.info(f"Validation datasets are: {datasets}")
+        val_datasets = []
+        for dataset_name in datasets:
+            val_datasets.append(
+                BEDLAMDataset(
+                    options=self.cfg.DATASET,
+                    dataset=dataset_name,
+                )
+            )
         from sam_3d_body.data.d4dress_dataset import D4DressDataset
-
-        # val_datasets = [D4DressDataset(cfg=self.cfg, ids=None)]
-        # val_datasets.extend([BEDLAMDataset(self.cfg.DATASET, ds) for ds in datasets])
-        val_datasets = [BEDLAMDataset(self.cfg.DATASET, ds) for ds in datasets]
-        val_ds = ConcatDataset(val_datasets)
-        return val_ds
+        val_datasets.append(D4DressDataset(cfg=self.cfg, ids=None))
+        return val_datasets
 
     def val_dataloader(self):
         self.val_ds = self.val_dataset()
-        # dataloaders = []
-        # for val_ds in self.val_ds:
-        #     import ipdb; ipdb.set_trace()
-        #     print(val_ds)
-        #     dataloaders.append(
-        #         DataLoader(
-        #             dataset=val_ds,
-        #             batch_size=self.cfg.DATASET.BATCH_SIZE,
-        #             shuffle=False,
-        #             num_workers=self.cfg.DATASET.NUM_WORKERS,
-        #             drop_last=True,
-        #         )
-        #     )
-        # print(f"Validation dataloader length: {len(dataloaders)}")
-        # return dataloaders
-        return DataLoader(
-            dataset=self.val_ds,
-            batch_size=self.cfg.DATASET.BATCH_SIZE,
-            shuffle=False,
-            num_workers=self.cfg.DATASET.NUM_WORKERS,
-            pin_memory=self.cfg.DATASET.PIN_MEMORY,
-            drop_last=True,
-        )
+        dataloaders = []
+        for val_ds in self.val_ds:
+            dataloaders.append(
+                DataLoader(
+                    dataset=val_ds,
+                    batch_size=self.cfg.DATASET.BATCH_SIZE,
+                    shuffle=False,
+                    num_workers=self.cfg.DATASET.NUM_WORKERS,
+                    drop_last=False,
+                )
+            )
+        return dataloaders
+        # return DataLoader(
+        #     dataset=self.val_ds,
+        #     batch_size=self.cfg.DATASET.BATCH_SIZE,
+        #     shuffle=False,
+        #     num_workers=self.cfg.DATASET.NUM_WORKERS,
+        #     pin_memory=self.cfg.DATASET.PIN_MEMORY,
+        #     drop_last=False,
+        # )
 
     def multiview_eval_dataset(self, num_view: int = 4, dataset_name: str = "4d-dress"):
         """

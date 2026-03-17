@@ -185,18 +185,35 @@ class DatasetHMR(Dataset):
 
         try:
             cv_img = read_img(imgname)
-            if "closeup" in self.dataset:
-                cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
         except Exception as E:
             print(E)
             logger.info(f"@{imgname}@ from {self.dataset}")
             cv_img = np.zeros((1280, 720, 3), dtype=np.uint8)
-            if "closeup" in self.dataset:
-                cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
 
-        masks = cv2.imread(maskname, 0)
+        # Dataset-specific closeup rotation
         if "closeup" in self.dataset:
+            cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
+
+        # Enforce a consistent orientation (H <= W) for all original images
+        # so DataLoader can stack img_ori across the batch.
+        if cv_img.shape[0] > cv_img.shape[1]:
+            cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
+
+        # Load mask without triggering OpenCV warnings when the file is missing
+        if os.path.exists(maskname):
+            masks = cv2.imread(maskname, 0)
+        else:
+            masks = None
+
+        # If mask missing or failed to load, create an all-zero mask
+        if masks is None:
+            h, w = cv_img.shape[:2]
+            masks = np.zeros((h, w), dtype=np.uint8)
+
+        # Make sure mask orientation/shape matches the image
+        if masks.shape[:2] != cv_img.shape[:2]:
             masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
+
 
         item["img_ori"] = cv_img
         item["mask_ori"] = masks
@@ -221,8 +238,8 @@ class DatasetHMR(Dataset):
 
         item["person_valid"] = torch.ones((1, 1))
 
-        item["scale"] = (sc * scale).astype(np.float32)
-        item["center"] = center.astype(np.float32)
+        # item["scale"] = (sc * scale).astype(np.float32)
+        # item["center"] = center.astype(np.float32)
         item["shape_params"] = self.shape_params[index]
         item["model_params"] = self.model_params[index]
         item["face_expr_coeffs"] = self.face_expr_params[index]

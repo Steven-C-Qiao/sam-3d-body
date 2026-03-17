@@ -114,6 +114,14 @@ class Loss(pl.LightningModule):
 
             loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
 
+        if self.cfg.LOSS.PARAM_L2_WEIGHT > 0:
+            param_l2_loss = self.mse_loss(
+                true_residual.unsqueeze(1).expand(-1, num_samples, -1),
+                predictions["uncertainty_output"]["samples"]
+            )
+            param_l2_loss = param_l2_loss.mean()
+            loss_dict["loss_param_l2"] = self.cfg.LOSS.PARAM_L2_WEIGHT * param_l2_loss
+
         assert "total_loss" not in loss_dict
         loss_dict["total_loss"] = sum(
             v for k, v in loss_dict.items() if k != "total_loss"

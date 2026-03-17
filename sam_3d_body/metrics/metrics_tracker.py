@@ -145,18 +145,20 @@ class Metrics(pl.LightningModule):
                 pred_kp3d[:, :70, :],
                 gt_kp3d[:, :70, :],
             )
-            metrics["mpjpe"] = mpjpe_mean
+            # convert to mm
+            metrics["mpjpe"] = mpjpe_mean * 1000.0
 
             pampjpe_mean = self.pampjpe(
                 pred_kp3d[:, :70, :].cpu().detach().numpy(),
                 gt_kp3d[:, :70, :].cpu().detach().numpy(),
             )
-            metrics["pampjpe"] = pampjpe_mean
+            metrics["pampjpe"] = pampjpe_mean * 1000.0
 
             pve_mean = self.pve(pred_vertices, gt_vertices)
-            metrics["pve"] = pve_mean
+            metrics["pve"] = pve_mean * 1000.0
 
         if "kp3d_samples" in predictions:
+            # fmt: off
             pred_kp3d_samples = predictions["kp3d_samples"]
             B, N = pred_kp3d_samples.shape[:2]
             gt_kp3d_expanded = batch["keypoints_3d"][:, None].expand(-1, N, -1, -1)
@@ -168,33 +170,29 @@ class Metrics(pl.LightningModule):
                 pred_kp3d_samples[:, :, :70, :],
                 gt_kp3d_expanded[:, :, :70, :],
                 reduction="none",
-            ).mean(
-                dim=-1
-            )  # B, N
-            metrics["mpjpe_samples"] = mpjpe_samples.mean()
-            metrics["mpjpe_samples_min"] = mpjpe_samples.min(dim=-1).values.mean()
-
-            pampjpe_samples = (
-                self.pampjpe(
-                    pred_kp3d_samples[:, :, :70, :]
-                    .flatten(0, 1)
-                    .cpu()
-                    .detach()
-                    .numpy(),
-                    gt_kp3d_expanded[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
-                    reduction="none",
-                )
-                .reshape(B, N, -1)
-                .mean(axis=-1)
+            ).mean(dim=-1)
+            metrics["mpjpe_samples"] = mpjpe_samples.mean() * 1000.0
+            metrics["mpjpe_samples_min"] = (
+                mpjpe_samples.min(dim=-1).values.mean() * 1000.0
             )
-            metrics["pampjpe_samples"] = pampjpe_samples.mean()
-            metrics["pampjpe_samples_min"] = pampjpe_samples.min(axis=-1).mean()
+
+            pampjpe_samples = self.pampjpe(
+                pred_kp3d_samples[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
+                gt_kp3d_expanded[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
+                reduction="none",
+            ).reshape(B, N, -1).mean(axis=-1)  # meters
+            pampjpe_samples_mm = pampjpe_samples * 1000.0
+            metrics["pampjpe_samples_per_sample"] = pampjpe_samples_mm
+            metrics["pampjpe_samples"] = pampjpe_samples_mm.mean()
+            metrics["pampjpe_samples_min"] = pampjpe_samples_mm.min(axis=-1).mean()
 
             pve_samples = self.pve(
                 pred_vertices_samples, gt_vertices_expanded, reduction="none"
-            ).mean(dim=-1)
-            metrics["pve_samples"] = pve_samples.mean()
-            metrics["pve_samples_min"] = pve_samples.min(dim=-1).values.mean()
+            ).mean(dim=-1)  # meters
+            metrics["pve_samples"] = pve_samples.mean() * 1000.0
+            metrics["pve_samples_min"] = (
+                pve_samples.min(dim=-1).values.mean() * 1000.0
+            )
 
             if "visibility" in batch:
                 # pred_kp3d_samples: (B, N, J, 3)
@@ -209,18 +207,15 @@ class Metrics(pl.LightningModule):
                 kp_visibility = batch["visibility"].bool()  # (B, J)
 
                 if kp_visibility.any():
-                    metrics["spread_visible_kp3d"] = per_joint_spread[
-                        kp_visibility
-                    ].mean()
+                    metrics["spread_visible_kp3d"] = per_joint_spread[kp_visibility].mean()
                 else:
-                    metrics["spread_visible_kp3d"] = None
+                    metrics["spread_visible_kp3d"] = 0.0
 
                 if (~kp_visibility).any():
-                    metrics["spread_invisible_kp3d"] = per_joint_spread[
-                        ~kp_visibility
-                    ].mean()
+                    metrics["spread_invisible_kp3d"] = per_joint_spread[~kp_visibility].mean()
                 else:
-                    metrics["spread_invisible_kp3d"] = None
+                    metrics["spread_invisible_kp3d"] = 0.0
+            # fmt: on
 
         if "kp2d_samples_cropped" in predictions:
             img_size = batch["img_size"]

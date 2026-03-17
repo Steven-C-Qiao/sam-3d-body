@@ -126,36 +126,14 @@ class D4DressDataset(Dataset):
         """
         if ids is None:
             ids = [
-                "00122",
-                "00123",
-                "00127",
-                "00129",
-                "00134",
-                "00135",
-                "00136",
-                "00137",
-                "00140",
-                "00147",
-                "00148",
-                "00149",
-                "00151",
-                "00152",
-                "00154",
-                "00156",
-                "00160",
-                "00163",
-                "00167",
-                "00168",
-                "00169",
-                "00170",
-                "00174",
-                "00175",
-                "00176",
-                "00179",
-                "00180",
-                "00185",
-                "00187",
-                "00190",
+                "00122", "00123", "00127", "00129",
+                "00134", "00135", "00136", "00137",
+                "00140", "00147", "00148", "00149",
+                "00151", "00152", "00154", "00156",
+                "00160", "00163", "00167", "00168",
+                "00169", "00170", "00174", "00175",
+                "00176", "00179", "00180", "00185",
+                "00187", "00190",
             ]
 
         self.cfg = cfg
@@ -209,8 +187,8 @@ class D4DressDataset(Dataset):
             PATH_TO_DATASET, subject_id, sampled_take[1], sampled_take[0]
         )
 
-        item["take_dir"] = take_dir
-        item["scan_ids"] = subject_id
+        # item["take_dir"] = take_dir
+        # item["scan_ids"] = subject_id
 
         # Load MHR parameters
         mhr_params = np.load(os.path.join(take_dir, "MHR_params.npz"))
@@ -239,8 +217,6 @@ class D4DressDataset(Dataset):
         cam_int = camera_params[sampled_camera]["intrinsics"].astype(np.float32)
         cam_ext = camera_params[sampled_camera]["extrinsics"].astype(np.float32)
 
-        item["cam_int"] = torch.from_numpy(cam_int)
-        item["cam_ext"] = torch.from_numpy(cam_ext)
 
         # Build paths to image and mask
         img_fname = os.path.join(
@@ -292,11 +268,15 @@ class D4DressDataset(Dataset):
         item["mask"] = item["mask"].float().unsqueeze(-3)
         item["mask_score"] = torch.ones((1, 1, 1, 1))
         item["person_valid"] = torch.ones((1, 1))
-
-        # Slice the parameter arrays with the sampled frame index
+        
         item["shape_params"] = torch.from_numpy(mhr_shape[sampled_idx]).float()
         item["model_params"] = torch.from_numpy(mhr_pose[sampled_idx]).float()
         item["face_expr_coeffs"] = torch.from_numpy(mhr_expr[sampled_idx]).float()
+        item["scale_params"] = torch.from_numpy(mhr_pose[sampled_idx, -68:]).float()
+
+        item["cam_int"] = torch.from_numpy(cam_int)
+        item["cam_ext"] = torch.from_numpy(cam_ext)
+        item["focal_length"] = torch.tensor([cam_int[0, 0], cam_int[1, 1]])
 
         item["dataset_name"] = "4d-dress"
 
