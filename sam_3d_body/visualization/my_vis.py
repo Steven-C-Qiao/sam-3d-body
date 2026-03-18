@@ -28,10 +28,22 @@ class Visualiser(pl.LightningModule):
 
     def _get_filename(self, suffix=""):
         """
-        Generate filename with format: {counter:06d}_{epoch:03d}_{split}{suffix}.png
+        Generate filename with unified format:
+        - Train:  ep_xxx_train_xxxxxx{suffix}.png
+        - Val:    ep_xxx_val[_dataset]{suffix}.png
         """
-        split_part = f"_{self._split}" if self._split else ""
-        return f"{self.counter:06d}_{self._epoch:03d}{split_part}{suffix}.png"
+        epoch_part = f"ep_{self._epoch:03d}"
+        if self._split == "train":
+            step_part = f"{self.counter:06d}" if self.counter is not None else "000000"
+            return f"{epoch_part}_train_{step_part}{suffix}.png"
+        elif self._split.startswith("val"):
+            # self._split is e.g. "val_dataset" or just "val"
+            return f"{epoch_part}_{self._split}{suffix}.png"
+        else:
+            # Fallback
+            step_part = f"{self.counter:06d}" if self.counter is not None else "000000"
+            split_part = f"_{self._split}" if self._split else ""
+            return f"{epoch_part}{split_part}_{step_part}{suffix}.png"
 
     def visualise(
         self,

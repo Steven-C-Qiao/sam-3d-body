@@ -8,6 +8,7 @@ from pathlib import Path
 from loguru import logger
 
 import pytorch_lightning as pl
+
 from pytorch_lightning.strategies import DDPStrategy
 # Set PyTorch multiprocessing sharing strategy to file_system to avoid "Too many open files" error
 torch.multiprocessing.set_sharing_strategy("file_system")
@@ -120,14 +121,19 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         else:
             logger.warning("No model parameters found in checkpoint state_dict!")
 
+
     trainer = pl.Trainer(
         max_epochs=cfg.TRAIN.NUM_EPOCHS,
+        # max_steps=50,  # stop training after 100 steps for profiling
         devices="auto",
         # strategy=DDPStrategy(find_unused_parameters=True),
         strategy="auto",
-        callbacks=checkpoint_callbacks,
+        # callbacks=checkpoint_callbacks,
         logger=tensorboard_logger,
         num_sanity_val_steps=num_sanity_val_steps,
+        precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
+        enable_progress_bar=True,
+        # profiler='simple',
     )
     trainer.fit(model, ckpt_path=resume_path)
 

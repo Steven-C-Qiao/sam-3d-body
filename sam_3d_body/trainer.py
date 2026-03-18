@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import torch
+from torch import amp
 from typing import Dict, Optional
 from collections import defaultdict
 import roma
@@ -174,7 +175,7 @@ class Trainer(BaseLightningModule):
     ):
 
         raw_metrics = metrics.copy()
-        metrics.pop("pampjpe_samples_per_sample")
+        metrics.pop("pampjpe_samples_per_sample", None)
         metrics = {f"{prefix}{k}": v for k, v in metrics.items()}
         loss_dict = {f"{prefix}{k}": v for k, v in loss_dict.items()}
 
@@ -195,17 +196,21 @@ class Trainer(BaseLightningModule):
         self.log_dict(metrics, sync_dist=True)
         self.log_dict(loss_dict, sync_dist=True)
 
+        if getattr(self.trainer, "sanity_checking", False):
+            return None
+
         if prefix == "train_":
             vis_step = int(self.global_step)
+            should_visualize = self.always_visualise or (
+                vis_step in [2, 250, 500, 1000, 2000, 3000, 4000]
+                or (vis_step > 4000 and vis_step % 5000 == 0)
+            )
         else:
+            # For validation/test: one visualization per dataloader per epoch
             vis_step = int(
                 self.global_step if self.global_step > 0 else (batch_idx or 0)
             )
-
-        should_visualize = self.always_visualise or (
-            vis_step in [2, 250, 500, 1000, 2000, 3000, 4000]
-            or (vis_step > 4000 and vis_step % 5000 == 0)
-        )
+            should_visualize = batch_idx == 0
         global_rank = getattr(self, "global_rank", 0)
         if should_visualize and global_rank == 0:
             # if global_rank == 0:
@@ -235,17 +240,47 @@ class Trainer(BaseLightningModule):
             rend_img_samples_crops_bgr = cv2.cvtColor(
                 rend_img_samples_crops, cv2.COLOR_RGB2BGR
             )
+            # Build filenames with unified format:
+            # - Train: ep_xxx_train_xxxxxx_*.png
+            # - Val:   ep_xxx_val[_dataset]_*.png
+            epoch_part = f"ep_{self.current_epoch:03d}"
+            if prefix == "train_":
+                split_part = "train"
+                step_part = f"{vis_step:06d}"
+                base = f"{epoch_part}_{split_part}_{step_part}"
+            else:
+                split_part = "val"
+                dataset_name = batch.get("dataset_name", ["unknown"])[0]
+                if hasattr(dataset_name, "item"):
+                    dataset_name = dataset_name.item()
+                dataset_name = str(dataset_name)
+                base = f"{epoch_part}_{split_part}_{dataset_name}"
+
+            img_name = f"{base}_img.png"
+            samples_name = f"{base}_samples_crops.png"
+
+            cv2.imwrite(os.path.join(self.vis_save_dir, img_name), rend_img_bgr)
             cv2.imwrite(
-                os.path.join(self.vis_save_dir, f"{vis_step:06d}_img.png"),
-                rend_img_bgr,
-            )
-            cv2.imwrite(
-                os.path.join(self.vis_save_dir, f"{vis_step:06d}_samples_crops.png"),
+                os.path.join(self.vis_save_dir, samples_name),
                 rend_img_samples_crops_bgr,
             )
 
+            # Build split name for Visualiser so filenames include epoch & dataset
+            if prefix == "train_":
+                split = "train"
+            else:
+                dataset_name = batch.get("dataset_name", ["unknown"])[0]
+                if hasattr(dataset_name, "item"):
+                    dataset_name = dataset_name.item()
+                split = f"val_{str(dataset_name)}"
+
             self.visualiser.visualise(
-                outputs, batch, batch_idx=batch_idx, global_step=vis_step
+                outputs,
+                batch,
+                batch_idx=batch_idx,
+                split=split,
+                epoch=self.current_epoch,
+                global_step=vis_step,
             )
         return None
 
@@ -447,7 +482,7 @@ class Trainer(BaseLightningModule):
             batch_size=self.cfg.DATASET.BATCH_SIZE,
             num_workers=self.cfg.DATASET.NUM_WORKERS,
             pin_memory=self.cfg.DATASET.PIN_MEMORY,
-            shuffle=True,  # self.cfg.DATASET.SHUFFLE_TRAIN,
+            shuffle=True,
             drop_last=True,
         )
 
