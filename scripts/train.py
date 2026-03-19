@@ -73,10 +73,24 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         "every_n_epochs": 1,  # Save checkpoint every 5 epochs
         "save_last": True,
         "verbose": True,
-        "monitor": "val_total_loss",
+        "monitor": "val_total_loss/dataloader_idx_2",
         "mode": "min",
     }
+    # 1) Metric-based checkpointing (existing behavior)
     checkpoint_callbacks = [ModelCheckpoint(**checkpoint_kwargs)]
+
+    # 2) Periodic step checkpointing (independent of validation metrics)
+    #    Useful for long runs where you want snapshots even if val metrics don't improve.
+    step_checkpoint_kwargs = {
+        "dirpath": model_save_dir,
+        "filename": "train_step_{step:08d}",
+        "save_top_k": -1,  # save all checkpoints at this interval
+        "every_n_train_steps": 5000,
+        "save_last": False,
+        "verbose": True,
+        "monitor": None,
+    }
+    checkpoint_callbacks.append(ModelCheckpoint(**step_checkpoint_kwargs))
 
     tensorboard_logger = TensorBoardLogger(exp_dir, name="lightning_logs")
 
@@ -128,11 +142,10 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         devices="auto",
         # strategy=DDPStrategy(find_unused_parameters=True),
         strategy="auto",
-        # callbacks=checkpoint_callbacks,
+        callbacks=checkpoint_callbacks,
         logger=tensorboard_logger,
         num_sanity_val_steps=num_sanity_val_steps,
-        precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
-        enable_progress_bar=True,
+        # precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
         # profiler='simple',
     )
     trainer.fit(model, ckpt_path=resume_path)

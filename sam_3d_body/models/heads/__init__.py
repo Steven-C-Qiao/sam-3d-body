@@ -4,6 +4,7 @@ from ..modules import to_2tuple
 from .camera_head import PerspectiveHead
 from .mhr_head import MHRHead, UncertaintyHead # MHRUncertaintyHead
 from .prohmr_head import NFHead
+from .prohmr_ar_head import NFARHead
 
 
 def build_head(cfg, head_type="mhr", enable_hand_model=False, default_scale_factor=1.0):
@@ -45,5 +46,7 @@ def build_head(cfg, head_type="mhr", enable_hand_model=False, default_scale_fact
         )
     elif head_type == "nf":
         return NFHead(cfg)
+    elif head_type == "nf_ar":
+        return NFARHead(cfg)
     else:
         raise ValueError("Invalid head type: ", head_type)

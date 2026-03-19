@@ -154,8 +154,8 @@ class Metrics(pl.LightningModule):
             )
             metrics["pampjpe"] = pampjpe_mean * 1000.0
 
-            pve_mean = self.pve(pred_vertices, gt_vertices)
-            metrics["pve"] = pve_mean * 1000.0
+            # pve_mean = self.pve(pred_vertices, gt_vertices)
+            # metrics["pve"] = pve_mean * 1000.0
 
         if "kp3d_samples" in predictions:
             # fmt: off
@@ -186,13 +186,13 @@ class Metrics(pl.LightningModule):
             metrics["pampjpe_samples"] = pampjpe_samples_mm.mean()
             metrics["pampjpe_samples_min"] = pampjpe_samples_mm.min(axis=-1).mean()
 
-            pve_samples = self.pve(
-                pred_vertices_samples, gt_vertices_expanded, reduction="none"
-            ).mean(dim=-1)  # meters
-            metrics["pve_samples"] = pve_samples.mean() * 1000.0
-            metrics["pve_samples_min"] = (
-                pve_samples.min(dim=-1).values.mean() * 1000.0
-            )
+            # pve_samples = self.pve(
+            #     pred_vertices_samples, gt_vertices_expanded, reduction="none"
+            # ).mean(dim=-1)  # meters
+            # metrics["pve_samples"] = pve_samples.mean() * 1000.0
+            # metrics["pve_samples_min"] = (
+            #     pve_samples.min(dim=-1).values.mean() * 1000.0
+            # )
 
             if "visibility" in batch:
                 # pred_kp3d_samples: (B, N, J, 3)

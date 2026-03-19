@@ -71,7 +71,7 @@ class SAM3DBody(BaseModel):
         )
 
         self.head_uncertainty = build_head(self.cfg, "uncertainty")
-        self.nf_head = build_head(self.cfg, "nf")
+        self.nf_head = build_head(self.cfg, "nf_ar")
 
         # Initialize pose token with learnable params
         # Note: bias/initial value should be zero-pose in cont, not all-zeros
