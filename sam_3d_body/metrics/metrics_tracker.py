@@ -141,18 +141,19 @@ class Metrics(pl.LightningModule):
             gt_vertices = batch["vertices"]
             gt_vertices[..., [1, 2]] *= -1
 
-            mpjpe_mean = self.mpjpe(
+            mpjpe_per_joint = self.mpjpe(
                 pred_kp3d[:, :70, :],
                 gt_kp3d[:, :70, :],
+                reduction="none",
             )
-            # convert to mm
-            metrics["mpjpe"] = mpjpe_mean * 1000.0
+            metrics["mpjpe"] = mpjpe_per_joint.mean(dim=-1) * 1000.0
 
-            pampjpe_mean = self.pampjpe(
+            pampjpe_per_joint = self.pampjpe(
                 pred_kp3d[:, :70, :].cpu().detach().numpy(),
                 gt_kp3d[:, :70, :].cpu().detach().numpy(),
+                reduction="none",
             )
-            metrics["pampjpe"] = pampjpe_mean * 1000.0
+            metrics["pampjpe"] = pampjpe_per_joint.mean(axis=-1) * 1000.0
 
             # pve_mean = self.pve(pred_vertices, gt_vertices)
             # metrics["pve"] = pve_mean * 1000.0
@@ -171,10 +172,8 @@ class Metrics(pl.LightningModule):
                 gt_kp3d_expanded[:, :, :70, :],
                 reduction="none",
             ).mean(dim=-1)
-            metrics["mpjpe_samples"] = mpjpe_samples.mean() * 1000.0
-            metrics["mpjpe_samples_min"] = (
-                mpjpe_samples.min(dim=-1).values.mean() * 1000.0
-            )
+            metrics["mpjpe_samples"] = mpjpe_samples * 1000.0
+            metrics["mpjpe_samples_min"] = mpjpe_samples.min(dim=-1).values * 1000.0
 
             pampjpe_samples = self.pampjpe(
                 pred_kp3d_samples[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
@@ -182,9 +181,8 @@ class Metrics(pl.LightningModule):
                 reduction="none",
             ).reshape(B, N, -1).mean(axis=-1)  # meters
             pampjpe_samples_mm = pampjpe_samples * 1000.0
-            metrics["pampjpe_samples_per_sample"] = pampjpe_samples_mm
-            metrics["pampjpe_samples"] = pampjpe_samples_mm.mean()
-            metrics["pampjpe_samples_min"] = pampjpe_samples_mm.min(axis=-1).mean()
+            metrics["pampjpe_samples"] = pampjpe_samples_mm
+            metrics["pampjpe_samples_min"] = pampjpe_samples_mm.min(axis=-1)
 
             # pve_samples = self.pve(
             #     pred_vertices_samples, gt_vertices_expanded, reduction="none"
@@ -206,15 +204,15 @@ class Metrics(pl.LightningModule):
 
                 kp_visibility = batch["visibility"].bool()  # (B, J)
 
-                if kp_visibility.any():
-                    metrics["spread_visible_kp3d"] = per_joint_spread[kp_visibility].mean()
-                else:
-                    metrics["spread_visible_kp3d"] = 0.0
-
-                if (~kp_visibility).any():
-                    metrics["spread_invisible_kp3d"] = per_joint_spread[~kp_visibility].mean()
-                else:
-                    metrics["spread_invisible_kp3d"] = 0.0
+                visible_mask = kp_visibility.float()
+                invisible_mask = (~kp_visibility).float()
+                metrics["spread_visible_kp3d"] = (
+                    (per_joint_spread * visible_mask).sum(dim=1) / visible_mask.sum(dim=1)
+                )
+                metrics["spread_invisible_kp3d"] = (
+                    (per_joint_spread * invisible_mask).sum(dim=1)
+                    / invisible_mask.sum(dim=1)
+                )
             # fmt: on
 
         if "kp2d_samples_cropped" in predictions:
@@ -236,13 +234,14 @@ class Metrics(pl.LightningModule):
             pred_kp2d_samples = (pred_kp2d_samples_norm + 0.5) * img_size_b
             gt_kp2d_samples = (gt_kp2d_samples_norm + 0.5) * img_size_b
 
-            metrics["kp2d_pixel_error"] = self.avg_kp2d_pixel(
-                pred_kp2d, gt_kp2d, metrics="l2", reduction="mean"
+            kp2d_err = self.avg_kp2d_pixel(
+                pred_kp2d, gt_kp2d, metrics="l2", reduction="none"
             )
+            metrics["kp2d_pixel_error"] = kp2d_err.mean(dim=-1)
             kp2d_err_samples = self.avg_kp2d_pixel(
                 pred_kp2d_samples, gt_kp2d_samples, metrics="l2", reduction="none"
             )
-            metrics["kp2d_samples_pixel_error"] = kp2d_err_samples.mean()
+            metrics["kp2d_samples_pixel_error"] = kp2d_err_samples.mean(dim=-1)
 
         # for k, v in metrics.items():
         #     print(f"{k}: {v:.4f}")

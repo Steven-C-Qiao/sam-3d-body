@@ -167,6 +167,8 @@ class Loss(pl.LightningModule):
             )
             nll_loss = -flow_log_prob.mean()
 
+            # Keep the GT-residual log probability for visualization/analysis.
+            # This is the log p(gt_residual | context) before weighting.
             loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
 
         if self.cfg.LOSS.PARAM_L2_WEIGHT > 0:
@@ -181,6 +183,9 @@ class Loss(pl.LightningModule):
         loss_dict["total_loss"] = sum(
             v for k, v in loss_dict.items() if k != "total_loss"
         )
+        
+        loss_dict["gt_residual_log_prob"] = flow_log_prob.detach()
+
         if torch.isnan(loss_dict["total_loss"]):
             loss_dict["total_loss"] = torch.zeros_like(loss_dict["total_loss"])
 

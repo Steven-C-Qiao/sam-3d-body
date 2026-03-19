@@ -38,6 +38,7 @@ from tools.vis_utils import my_visualize
 from tools.vis_utils import my_visualize_samples
 from tools.vis_utils import view_one_in_another
 from tools.vis_utils import LIGHT_BLUE
+from .models.modules.mhr_utils import scale_indices
 
 
 class Trainer(BaseLightningModule):
@@ -175,7 +176,14 @@ class Trainer(BaseLightningModule):
     ):
 
         raw_metrics = metrics.copy()
-        metrics.pop("pampjpe_samples_per_sample", None)
+        # Also propagate selected loss quantities needed for visualization (e.g., GT log-prob).
+        if "gt_residual_log_prob" in loss_dict:
+            raw_metrics["gt_residual_log_prob"] = loss_dict["gt_residual_log_prob"]
+        loss_dict.pop("gt_residual_log_prob", None)
+        metrics = {
+            k: (v.float().mean() if isinstance(v, torch.Tensor) else np.asarray(v).mean())
+            for k, v in metrics.items()
+        }
         metrics = {f"{prefix}{k}": v for k, v in metrics.items()}
         loss_dict = {f"{prefix}{k}": v for k, v in loss_dict.items()}
 
@@ -667,29 +675,27 @@ class Trainer(BaseLightningModule):
                 cross_view_gallery_bgr,
             )
 
-            # param_dict = self.merge_parameters(num_views, bs, outputs)
-            # pred_shape = param_dict["pred_shape"]
-            # pred_scale = param_dict["pred_scale"]
-            # shape_mu_star = param_dict["shape_mu_star"]
-            # shape_var_unflattened = param_dict["shape_var_unflattened"]
-            # merged_shape_var = param_dict["merged_shape_var"]
-            # scale_mu_star_full = param_dict["scale_mu_star_full"]
-            # shape_mean = param_dict["shape_mean"]
-            # scale_mean = param_dict["scale_mean"]
+            param_dict = self.merge_parameters_importance_sampling(num_views, bs, outputs)
+            pred_shape = param_dict["pred_shape"]
+            pred_scale = param_dict["pred_scale"]
+            shape_mu_star = param_dict["shape_mu_star"]
+            scale_mu_star_full = param_dict["scale_mu_star_full"]
+            shape_mean = param_dict["shape_mean"]
+            scale_mean = param_dict["scale_mean"]
 
             stuff_for_metrics = self.get_mhr_outputs(
                 batch,
                 num_views,
                 outputs,
-                pred_shape=None,
-                pred_scale=None,
-                shape_mu_star=None,
-                scale_mu_star_full=None,
-                shape_mean=None,
-                scale_mean=None,
+                pred_shape=pred_shape,
+                pred_scale=pred_scale,
+                shape_mu_star=shape_mu_star,
+                scale_mu_star_full=scale_mu_star_full,
+                shape_mean=shape_mean,
+                scale_mean=scale_mean,
             )
 
-            # self.multiframe_metrics(all_metrics, stuff_for_metrics)
+            self.multiframe_metrics(all_metrics, stuff_for_metrics)
 
             renderer = Renderer(
                 focal_length=outputs["mhr"]["focal_length"][0], faces=self.faces
@@ -704,18 +710,16 @@ class Trainer(BaseLightningModule):
                     "outputs": outputs,
                     "batch": batch,
                     "metrics": all_metrics,
-                    # "pred_shape": pred_shape,
-                    # "shape_mu_star": shape_mu_star,
-                    # "merged_shape_var": merged_shape_var,
-                    # "shape_var_unflattened": shape_var_unflattened,
+                    "pred_shape": pred_shape,
+                    "shape_mu_star": shape_mu_star,
                     "num_views": num_views,
                     "bs": bs,
                     "batch_idx": batch_idx,
                 }
             )
 
-            # self.vis_predictions(stuff_for_vis, sc=True)
-            # self.vis_predictions(stuff_for_vis, sc=False)
+            self.vis_predictions(stuff_for_vis, sc=True)
+            self.vis_predictions(stuff_for_vis, sc=False)
 
             self.vis_neutral(stuff_for_vis, sc=True)
             self.vis_neutral(stuff_for_vis, sc=False)
@@ -733,10 +737,10 @@ class Trainer(BaseLightningModule):
             "=" * 60,
         ]
 
-        # print(all_metrics)
-        # for k, v in all_metrics.items():
-        #     print(f"{k}: {type(v)}")
-        # import ipdb; ipdb.set_trace()
+        print(all_metrics)
+        for k, v in all_metrics.items():
+            print(f"{k}: {type(v)}")
+        import ipdb; ipdb.set_trace()
 
         for k, v in mean_metrics.items():
             summary_lines.append(f"{k}: {v:.4f}")
@@ -821,14 +825,26 @@ class Trainer(BaseLightningModule):
 
         has_merged = shape_mu_star is not None and scale_mu_star_full is not None
         if has_merged:
+            if scale_mu_star_full.shape[-1] == outputs["mhr"]["scale_68D"].shape[-1]:
+                merged_scale_params = torch.zeros(
+                    shape_mu_star.shape[0] * num_views,
+                    outputs["mhr"]["scale"].shape[-1],
+                    device=shape_mu_star.device,
+                    dtype=shape_mu_star.dtype,
+                )
+                merged_scale_offsets = scale_mu_star_full.repeat_interleave(num_views, dim=0)
+            else:
+                merged_scale_params = scale_mu_star_full.repeat_interleave(num_views, dim=0)
+                merged_scale_offsets = None
             merged_mhr_output = self.model.head_pose.mhr_forward(
                 shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
-                scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
+                scale_params=merged_scale_params,
                 global_trans=torch.zeros_like(outputs["mhr"]["global_rot"]),
                 global_rot=outputs["mhr"]["global_rot"],
                 body_pose_params=outputs["mhr"]["body_pose"],
                 hand_pose_params=outputs["mhr"]["hand"],
                 expr_params=outputs["mhr"]["face"],
+                scale_offsets=merged_scale_offsets,
                 **mhr_output_config,
             )
             verts_star, j3d_star, _, _, _ = merged_mhr_output
@@ -866,7 +882,8 @@ class Trainer(BaseLightningModule):
         if has_merged:
             merged_neutral_mhr_output = self.model.head_pose.mhr_forward(
                 shape_params=shape_mu_star.repeat_interleave(num_views, dim=0),
-                scale_params=scale_mu_star_full.repeat_interleave(num_views, dim=0),
+                scale_params=merged_scale_params,
+                scale_offsets=merged_scale_offsets,
                 **mhr_zero_inputs,
                 **mhr_output_config,
             )
@@ -948,6 +965,97 @@ class Trainer(BaseLightningModule):
             "scale_mean": scale_mean,
         }
         return param_dict
+
+    def merge_parameters_importance_sampling(self, num_views, bs, outputs):
+        """
+        Importance-sampling merge of multiview shape/scale predictions using NF stage-1 likelihoods.
+
+        For proposal view i with samples beta_i^k ~ p(beta|I_i), weight each sample by
+        product_{j != i} p(beta_i^k | I_j), and pool over all proposals.
+        """
+        nf_head = self.model.nf_head
+
+        pred_shape_flat = outputs["mhr"]["shape"]  # [B*V, 45]
+        pred_scale68_flat = outputs["mhr"]["scale_68D"]  # [B*V, 68]
+        pred_scale_params_flat = outputs["mhr"]["scale"]  # [B*V, 28]
+        context_shape_scale_flat = outputs["uncertainty_output"]["flow_context_shape_scale"]  # [B*V, 2048]
+
+        shape_samples_flat = outputs["uncertainty_output"]["shape_samples"]  # [B*V, S, 45]
+        scale68_samples_flat = outputs["uncertainty_output"]["scale_samples"]  # [B*V, S, 68]
+
+        S = shape_samples_flat.shape[1]
+
+        pred_shape = pred_shape_flat.unflatten(0, (bs, num_views))
+        pred_scale68 = pred_scale68_flat.unflatten(0, (bs, num_views))
+        pred_scale_params = pred_scale_params_flat.unflatten(0, (bs, num_views))
+        context_shape_scale = context_shape_scale_flat.unflatten(0, (bs, num_views))
+        shape_samples = shape_samples_flat.unflatten(0, (bs, num_views))
+        scale68_samples = scale68_samples_flat.unflatten(0, (bs, num_views))
+
+        merged_shape = []
+        merged_scale68 = []
+
+        for b in range(bs):
+            candidate_beta = []
+            candidate_logw = []
+
+            for i in range(num_views):
+                # Proposal samples from view i: beta = [shape(45), selected_scale(10)].
+                beta_i = torch.cat(
+                    [
+                        shape_samples[b, i],  # [S, 45]
+                        scale68_samples[b, i, :, scale_indices],  # [S, 10]
+                    ],
+                    dim=-1,
+                )  # [S, 55]
+
+                # Eq. 18 generalised to multi-view: w ~ Π_{j != i} p(beta | I_j).
+                logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
+                for j in range(num_views):
+                    if j == i:
+                        continue
+                    mean_beta_j = torch.cat(
+                        [
+                            pred_shape[b, j],  # [45]
+                            pred_scale68[b, j, scale_indices],  # [10]
+                        ],
+                        dim=-1,
+                    )  # [55]
+                    residual_j = beta_i - mean_beta_j.unsqueeze(0)  # [S, 55]
+                    context_j = context_shape_scale[b, j].unsqueeze(0).expand(S, -1)  # [S, 2048]
+                    logp_j, _ = nf_head.flow_shape_scale.log_prob(
+                        inputs=residual_j, context=context_j
+                    )
+                    logw_i = logw_i + logp_j
+
+                candidate_beta.append(beta_i)
+                candidate_logw.append(logw_i)
+
+            candidate_beta = torch.cat(candidate_beta, dim=0)  # [V*S, 55]
+            candidate_logw = torch.cat(candidate_logw, dim=0)  # [V*S]
+            candidate_w = torch.softmax(candidate_logw, dim=0)  # normalized importance weights
+
+            merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)  # [55]
+            merged_shape.append(merged_beta[: nf_head.num_shape_comps])
+
+            scale68_merged = pred_scale68[b].mean(dim=0)
+            scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]
+            merged_scale68.append(scale68_merged)
+
+        shape_mu_star = torch.stack(merged_shape, dim=0)  # [B, 45]
+        scale_mu_star_full = torch.stack(merged_scale68, dim=0)  # [B, 68]
+
+        shape_mean = pred_shape.mean(dim=1).repeat_interleave(num_views, dim=0)
+        scale_mean = pred_scale_params.mean(dim=1).repeat_interleave(num_views, dim=0)
+
+        return {
+            "pred_shape": pred_shape,
+            "pred_scale": pred_scale_params,
+            "shape_mu_star": shape_mu_star,
+            "scale_mu_star_full": scale_mu_star_full,
+            "shape_mean": shape_mean,
+            "scale_mean": scale_mean,
+        }
 
     def merge_predictions(self, mu, sigma):
         """
@@ -1059,6 +1167,8 @@ class Trainer(BaseLightningModule):
         )
         mean_pampjpe = mean_pampjpe.mean(axis=-1)
 
+        import ipdb; ipdb.set_trace()
+
         # ----- pvetsc -----
         pred_sc = scale_and_translation_transform_batch(
             per_view_neutral_verts.cpu().detach().numpy(),
@@ -1127,15 +1237,17 @@ class Trainer(BaseLightningModule):
         renderer = input_dict["renderer"]
         outputs = input_dict["outputs"]
         batch = input_dict["batch"]
-        verts_star = input_dict["verts_star"]
+        verts_star = input_dict.get("verts_star", None)
         num_views = input_dict["num_views"]
         bs = input_dict["bs"]
         batch_idx = input_dict["batch_idx"]
-        pred_shape = input_dict["pred_shape"]
-        shape_var_unflattened = input_dict["shape_var_unflattened"]
-        shape_mu_star = input_dict["shape_mu_star"]
-        merged_shape_var = input_dict["merged_shape_var"]
-        metrics = input_dict["metrics"]
+        pred_shape = input_dict.get("pred_shape", None)
+        shape_var_unflattened = input_dict.get("shape_var_unflattened", None)
+        shape_mu_star = input_dict.get("shape_mu_star", None)
+        merged_shape_var = input_dict.get("merged_shape_var", None)
+        metrics = input_dict.get("metrics", {})
+        merged_neutral_verts = input_dict.get("merged_neutral_verts", None)
+        has_merged = verts_star is not None and merged_neutral_verts is not None
 
         # Initialize gallery: list of lists to store rendered images [bs][num_views]
         gallery = [[None for _ in range(num_views)] for _ in range(bs)]
@@ -1178,9 +1290,10 @@ class Trainer(BaseLightningModule):
                 input_dict["per_view_neutral_verts"][flat_idx].cpu().detach().numpy()
             )
             gt_verts = input_dict["gt_neutral_verts"][flat_idx].cpu().detach().numpy()
-            merged_verts = (
-                input_dict["merged_neutral_verts"][flat_idx].cpu().detach().numpy()
-            )
+            if has_merged:
+                merged_verts = merged_neutral_verts[flat_idx].cpu().detach().numpy()
+            else:
+                merged_verts = verts
 
             pred_dist = np.linalg.norm(verts - gt_verts, axis=1)
             merged_dist = np.linalg.norm(merged_verts - gt_verts, axis=1)
@@ -1227,7 +1340,10 @@ class Trainer(BaseLightningModule):
             else:
                 gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
 
-            merged_verts = verts_star[flat_idx].cpu().detach().numpy()
+            if has_merged:
+                merged_verts = verts_star[flat_idx].cpu().detach().numpy()
+            else:
+                merged_verts = verts
 
             # GT: keep fixed LIGHT_BLUE color
             gt_rendered_img = (
@@ -1354,13 +1470,21 @@ class Trainer(BaseLightningModule):
             (text_width, text_height), baseline = cv2.getTextSize(
                 gt_label, font, font_scale, thickness
             )
-            per_view_pampjpe = metrics["per_view_pampjpe"][-1]
-            merged_pampjpe = metrics["merged_pampjpe"][-1]
-            per_view_pvetsc = metrics["per_view_pvetsc"][-1]
-            merged_pvetsc = metrics["merged_pvetsc"][-1]
-            pampjpe_line = f"PA-MPJPE | View {view}: {per_view_pampjpe[view].item():.4f} | Merged: {merged_pampjpe.mean().item():.4f}"
-            pvetsc_line = f"PVE-T-SC | View {view}: {per_view_pvetsc[view].item():.4f} | Merged: {merged_pvetsc.mean().item():.4f}"
-            text_lines = [pampjpe_line, pvetsc_line]
+            text_lines = []
+            has_pampjpe = "per_view_pampjpe" in metrics and "merged_pampjpe" in metrics and len(metrics["per_view_pampjpe"]) > 0 and len(metrics["merged_pampjpe"]) > 0
+            has_pvetsc = "per_view_pvetsc" in metrics and "merged_pvetsc" in metrics and len(metrics["per_view_pvetsc"]) > 0 and len(metrics["merged_pvetsc"]) > 0
+            if has_pampjpe:
+                per_view_pampjpe = metrics["per_view_pampjpe"][-1]
+                merged_pampjpe = metrics["merged_pampjpe"][-1]
+                text_lines.append(
+                    f"PA-MPJPE | View {view}: {per_view_pampjpe[view].item():.4f} | Merged: {merged_pampjpe.mean().item():.4f}"
+                )
+            if has_pvetsc:
+                per_view_pvetsc = metrics["per_view_pvetsc"][-1]
+                merged_pvetsc = metrics["merged_pvetsc"][-1]
+                text_lines.append(
+                    f"PVE-T-SC | View {view}: {per_view_pvetsc[view].item():.4f} | Merged: {merged_pvetsc.mean().item():.4f}"
+                )
 
             y_start = 10 + text_height + baseline + 10
             y_offset = y_start
@@ -1407,12 +1531,17 @@ class Trainer(BaseLightningModule):
             )
 
             # Add per-view predicted shape parameters (first 5) and uncertainties
-            pred_mu = pred_shape[i, view].cpu().detach().numpy()
-            pred_var = shape_var_unflattened[i, view].cpu().detach().numpy()
-            mu_str = "pred shape mean: " + " ".join(f"{v:.2f}" for v in pred_mu[:5])
-            sigma_str = "pred shape var: " + " ".join(f"{v:.2f}" for v in pred_var[:5])
-
-            pred_text_lines = [mu_str, sigma_str]
+            pred_text_lines = []
+            if pred_shape is not None:
+                pred_mu = pred_shape[i, view].cpu().detach().numpy()
+                pred_text_lines.append(
+                    "pred shape mean: " + " ".join(f"{v:.2f}" for v in pred_mu[:5])
+                )
+            if shape_var_unflattened is not None:
+                pred_var = shape_var_unflattened[i, view].cpu().detach().numpy()
+                pred_text_lines.append(
+                    "pred shape var: " + " ".join(f"{v:.2f}" for v in pred_var[:5])
+                )
             y_start = 10 + text_height + baseline + 10
             y_offset = y_start
             for line in pred_text_lines:
@@ -1458,16 +1587,19 @@ class Trainer(BaseLightningModule):
             )
 
             # Add merged shape parameters (first 5) and uncertainties
-            merged_mu = shape_mu_star[i].cpu().detach().numpy()
-            merged_var = merged_shape_var[i].cpu().detach().numpy()
-            m_mu_str = "merged shape mean: " + " ".join(
-                f"{v:.2f}" for v in merged_mu[:5]
-            )
-            m_sigma_str = "merged shape var: " + " ".join(
-                f"{v:.2f}" for v in merged_var[:5]
-            )
-
-            merged_text_lines = [m_mu_str, m_sigma_str]
+            merged_text_lines = []
+            if shape_mu_star is not None:
+                merged_mu = shape_mu_star[i].cpu().detach().numpy()
+                merged_text_lines.append(
+                    "merged shape mean: " + " ".join(f"{v:.2f}" for v in merged_mu[:5])
+                )
+            if merged_shape_var is not None:
+                merged_var = merged_shape_var[i].cpu().detach().numpy()
+                merged_text_lines.append(
+                    "merged shape var: " + " ".join(f"{v:.2f}" for v in merged_var[:5])
+                )
+            if not has_merged:
+                merged_text_lines.append("merged prediction unavailable")
             y_start_m = 10 + text_height + baseline + 10
             y_offset_m = y_start_m
             for line in merged_text_lines:

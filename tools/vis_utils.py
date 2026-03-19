@@ -297,9 +297,8 @@ def my_visualize_samples(
         base_img = cv2.warpAffine(base_img_uint8, affine, img_size)
 
     mhr_samples = outputs["verts_samples"].cpu().detach().numpy()
-    # Optional: per-sample log-probabilities (from outputs) and PA-MPJPE (from metrics), shape (B, N)
-    log_prob = None
-    pampjpe_samples = None
+    
+    log_prob, pampjpe_samples, pampjpe_mean, gt_logp = None, None, None, None
     if "uncertainty_output" in outputs and "log_prob" in outputs["uncertainty_output"]:
         try:
             log_prob = (
@@ -307,8 +306,12 @@ def my_visualize_samples(
             )
         except Exception:
             log_prob = None
-    if metrics is not None and "pampjpe_samples_per_sample" in metrics:
-        pampjpe_samples = metrics["pampjpe_samples_per_sample"]
+    if metrics is not None:
+        pampjpe_samples = metrics.get("pampjpe_samples", None)
+        pampjpe_mean = metrics.get("pampjpe", None)
+        gt_logp = metrics.get("gt_residual_log_prob", None)
+        
+
     mhr_root_joint_samples = outputs["j3d_samples"][..., 1, :].cpu().detach().numpy()
 
     gt_verts = batch['gt_verts_w_transl'].cpu().detach().numpy()
@@ -458,6 +461,7 @@ def my_visualize_samples(
     img_mesh_list = np.concatenate(img_mesh_list, axis=axis)
     img_side_list = np.concatenate(img_side_list, axis=axis)
 
+    # ----------------------- Top-left -----------------------
     if overlay_gt:
         # Top-left panel: GT overlaid on mean prediction
         gt_base_img = renderer(
@@ -487,7 +491,7 @@ def my_visualize_samples(
         blended_pred_full = alpha * gt_base_rgb_full + (1.0 - alpha) * mean_pred_rgb_full
         gt_base_img = (blended_pred_full * 255.0).clip(0, 255).astype(np.uint8)
 
-        # Bottom-left panel: 90-deg rotated side views of mean prediction and GT on
+        # ----------------------- Bottom-left -----------------------
         white_bg = np.ones_like(img_mesh) * 255
         mean_pred_unc = renderer_side(
             mean_pred_verts - mean_pred_root_joint,
@@ -515,37 +519,31 @@ def my_visualize_samples(
         blended_unc = alpha_unc * gt_unc_rgb + (1.0 - alpha_unc) * mean_pred_unc_rgb
         mean_unc_panel = (blended_unc * 255.0).clip(0, 255).astype(np.uint8)
 
-        # Annotate first figure of second row with mean PA-MPJPE (in mm) and log p = '-'
-        if metrics is not None:
-            pa_mean = metrics.get("pampjpe", None)
-            if pa_mean is not None:
-                # detach scalar if tensor
-                if hasattr(pa_mean, "item"):
-                    pa_val = float(pa_mean.item())
-                else:
-                    pa_val = float(pa_mean)
-                text_pa = f"PA-MPJPE (mean): {pa_val:.1f} mm"
-                text_logp = "log p: na"
-                cv2.putText(
-                    mean_unc_panel,
-                    text_pa,
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 139, 0),
-                    2,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    mean_unc_panel,
-                    text_logp,
-                    (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 0, 139),
-                    2,
-                    cv2.LINE_AA,
-                )
+
+        if pampjpe_mean is not None:
+            text_pa = f"PA-MPJPE (mean): {pampjpe_mean[0].item():.1f} mm"
+            cv2.putText(
+                mean_unc_panel,
+                text_pa,
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 139, 0),
+                2,
+                cv2.LINE_AA,
+            )
+        if gt_logp is not None:
+            text_logp = f"log p(gt residual): {gt_logp[0].item():.1f}"
+            cv2.putText(
+                mean_unc_panel,
+                text_logp,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 139),
+                2,
+                cv2.LINE_AA,
+            )
 
         if affine is not None:
             gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)

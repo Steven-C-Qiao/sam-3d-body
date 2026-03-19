@@ -8,7 +8,7 @@ _C = CfgNode()
 
 _C.TRAIN = CfgNode()
 _C.TRAIN.MODEL_TYPE = "full"  # Options: "full" (SAM3DBody) or "toy" (ToyModel)
-_C.TRAIN.USE_FP16 = False # Cannot use low precision 
+_C.TRAIN.USE_FP16 = True 
 _C.TRAIN.FP16_TYPE = "high"
 _C.TRAIN.LR = 2e-5
 _C.TRAIN.NUM_EPOCHS = 50
