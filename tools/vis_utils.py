@@ -299,6 +299,7 @@ def my_visualize_samples(
     mhr_samples = outputs["verts_samples"].cpu().detach().numpy()
     
     log_prob, pampjpe_samples, pampjpe_mean, gt_logp = None, None, None, None
+    kp2d_visible_samples_px, spread_invisible_samples = None, None
     if "uncertainty_output" in outputs and "log_prob" in outputs["uncertainty_output"]:
         try:
             log_prob = (
@@ -310,6 +311,8 @@ def my_visualize_samples(
         pampjpe_samples = metrics.get("pampjpe_samples", None)
         pampjpe_mean = metrics.get("pampjpe", None)
         gt_logp = metrics.get("gt_residual_log_prob", None)
+        kp2d_visible_samples_px = metrics.get("kp2d_samples_pixel_error_visible", None)
+        spread_invisible_samples = metrics.get("spread_invisible_kp3d_samples", None)
         
 
     mhr_root_joint_samples = outputs["j3d_samples"][..., 1, :].cpu().detach().numpy()
@@ -397,6 +400,36 @@ def my_visualize_samples(
 
         if affine is not None:
             img_mesh = cv2.warpAffine(img_mesh, affine, img_size)
+
+        # Annotate each front-view sample with:
+        # 1) visible-keypoint 2D pixel error
+        # 2) invisible-keypoint 3D spread (in mm)
+        if kp2d_visible_samples_px is not None:
+            kp2d_vis_val = float(kp2d_visible_samples_px[0, i])
+            text_vis2d = f"2D err vis: {kp2d_vis_val:.1f}px"
+            cv2.putText(
+                img_mesh,
+                text_vis2d,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (100, 100, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        if spread_invisible_samples is not None:
+            spread_inv_mm = float(spread_invisible_samples[0, i]) * 1000.0
+            text_inv3d = f"3D dist to mean: {spread_inv_mm:.1f}mm"
+            cv2.putText(
+                img_mesh,
+                text_inv3d,
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 220, 100),
+                2,
+                cv2.LINE_AA,
+            )
 
         img_mesh_list.append(img_mesh)
 

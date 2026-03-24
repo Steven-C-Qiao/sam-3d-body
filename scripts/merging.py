@@ -35,7 +35,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
 
     cfg = get_config_defaults()
 
-    if load_path is not None:
+    if load_path is not None or resume_path is not None:
         config_yaml_path = Path(exp_dir) / "config.yaml"
         if config_yaml_path.exists():
             logger.info(f"Loading config overrides from {config_yaml_path}")
@@ -59,7 +59,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
         "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
     )
 
-    torch.set_float32_matmul_precision(cfg.TRAIN.FP16_TYPE)
+    # torch.set_float32_matmul_precision(cfg.TRAIN.FP16_TYPE)
 
     # Create directories
     model_save_dir = os.path.join(exp_dir, "saved_models")
@@ -94,16 +94,12 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
         missing_keys, unexpected_keys = trainer.model.load_state_dict(
             model_state_dict, strict=False
         )
-        loaded_keys = list(model_state_dict.keys())
         logger.info(f"Loaded {len(model_state_dict)} parameters from checkpoint")
-        print("Loaded parameter keys:")
-        # for k in loaded_keys:
-        #     print(k)
         if missing_keys:
-            logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys")
+            logger.warning(f"Missing keys (not loaded): {len(missing_keys)} keys: {missing_keys}")
         if unexpected_keys:
             logger.warning(
-                f"Unexpected keys (ignored): {len(unexpected_keys)} keys"
+                f"Unexpected keys (ignored): {len(unexpected_keys)} keys: {unexpected_keys}"
             )
         else:
             logger.warning("No model parameters found in checkpoint state_dict!")

@@ -9,7 +9,6 @@ from torch.utils.data import Dataset
 from torchvision.transforms import ToTensor
 from torch.utils.data import default_collate
 
-
 from .bedlam import constants
 from .bedlam.constants import NUM_JOINTS_SMPLX
 from .bedlam.utils.image_utils import random_crop, read_img
@@ -21,6 +20,20 @@ from ..configs.config import (
     SMPLX2SMPL,
 )
 from smplx import SMPL, SMPLX
+
+
+def bedlam_collate(batch):
+    """``default_collate`` except ``img_ori`` stays a Python list (variable H×W)."""
+    img_ori, mask_ori, rest = [], [], []
+    for s in batch:
+        s = dict(s)
+        img_ori.append(s.pop("img_ori"))
+        mask_ori.append(s.pop("mask_ori"))
+        rest.append(s)
+    out = default_collate(rest)
+    out["img_ori"] = img_ori
+    out["mask_ori"] = mask_ori
+    return out
 
 
 from sam_3d_body.data.transforms import (
@@ -189,31 +202,16 @@ class DatasetHMR(Dataset):
             print(E)
             logger.info(f"@{imgname}@ from {self.dataset}")
             cv_img = np.zeros((1280, 720, 3), dtype=np.uint8)
-
-        # Dataset-specific closeup rotation
         if "closeup" in self.dataset:
             cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
 
-        # Enforce a consistent orientation (H <= W) for all original images
-        # so DataLoader can stack img_ori across the batch.
-        if cv_img.shape[0] > cv_img.shape[1]:
-            cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
-
-        # Load mask without triggering OpenCV warnings when the file is missing
         if os.path.exists(maskname):
             masks = cv2.imread(maskname, 0)
+            if "closeup" in self.dataset:
+                masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
         else:
-            masks = None
-
-        # If mask missing or failed to load, create an all-zero mask
-        if masks is None:
             h, w = cv_img.shape[:2]
             masks = np.zeros((h, w), dtype=np.uint8)
-
-        # Make sure mask orientation/shape matches the image
-        if masks.shape[:2] != cv_img.shape[:2]:
-            masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
-
 
         item["img_ori"] = cv_img
         item["mask_ori"] = masks

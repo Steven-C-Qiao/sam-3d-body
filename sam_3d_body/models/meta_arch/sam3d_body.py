@@ -71,7 +71,7 @@ class SAM3DBody(BaseModel):
         )
 
         self.head_uncertainty = build_head(self.cfg, "uncertainty")
-        self.nf_head = build_head(self.cfg, "nf_ar")
+        self.nf_head = build_head(self.cfg, self.cfg.MODEL.HEAD_TYPE)
 
         # Initialize pose token with learnable params
         # Note: bias/initial value should be zero-pose in cont, not all-zeros
@@ -304,6 +304,7 @@ class SAM3DBody(BaseModel):
         prev_estimate: Optional[torch.Tensor] = None,
         condition_info: Optional[torch.Tensor] = None,
         batch=None,
+        num_samples: int = 0,
     ):
         """
         Args:
@@ -318,6 +319,7 @@ class SAM3DBody(BaseModel):
                 previous estimate for pose refinement.
             condition_info: optional condition information that is concatenated with
                 the input tokens, shape (B, c)
+            num_samples: NF samples per batch element; 0 means use head's cfg default.
         """
         batch_size = image_embeddings.shape[0]
 
@@ -513,7 +515,9 @@ class SAM3DBody(BaseModel):
             token = tokens[:, 0]
             uncertainty_output = self.head_uncertainty(token)
             if mean_pred is not None:
-                nf_output = self.nf_head(token, mean_pred, batch=batch)
+                nf_output = self.nf_head(
+                    token, mean_pred, num_samples=num_samples, batch=batch
+                )
                 return nf_output
             else:
                 return uncertainty_output
@@ -708,7 +712,7 @@ class SAM3DBody(BaseModel):
             batch["img"].dtype
         )  # This is B x num_person x 2 x H x W
 
-    def forward_pose_branch(self, batch: Dict) -> Dict:
+    def forward_pose_branch(self, batch: Dict, num_samples: int = 0) -> Dict:
         """Run a forward pass for the crop-image (pose) branch."""
         batch_size, num_person = batch["img"].shape[:2]
 
@@ -769,6 +773,7 @@ class SAM3DBody(BaseModel):
                 prev_estimate=None,
                 condition_info=condition_info[self.body_batch_idx],
                 batch=batch,
+                num_samples=num_samples,
             )
             all_pose_outputs = decoder_result["all_pose_outputs"]
             pose_output = all_pose_outputs[-1] if isinstance(all_pose_outputs, list) else all_pose_outputs
@@ -795,7 +800,7 @@ class SAM3DBody(BaseModel):
         self.hand_batch_idx = []
         self.body_batch_idx = list(range(B * N))
 
-        outputs = self.forward_pose_branch(batch)
+        outputs = self.forward_pose_branch(batch, num_samples=num_samples)
 
         # use_nf = "pose_samples" in outputs["uncertainty_output"]
         use_nf = True

@@ -25,6 +25,72 @@ class Loss(pl.LightningModule):
         hand_weight = getattr(self.cfg.LOSS, "HAND_WEIGHT", 0.1)
         self.hand_weight = hand_weight
 
+    def _compute_gt_residual_log_prob(self, true_residual, predictions):
+        head_type = self.cfg.MODEL.HEAD_TYPE
+        uncertainty_output = predictions["uncertainty_output"]
+
+        if head_type == "nf":
+            flow_context = uncertainty_output["flow_context"]
+            flow_log_prob, _ = self.nf_head.log_prob(true_residual, flow_context)
+            return flow_log_prob
+
+        if head_type == "nf_ar":
+            flow_context_raw = uncertainty_output["flow_context_raw"]
+            mean_pred = predictions["mhr"]
+
+            flow_context_shape_scale = self.nf_head.beta_context_proj(
+                torch.cat(
+                    [
+                        flow_context_raw,
+                        mean_pred["shape"],
+                        mean_pred["scale_68D"][..., scale_indices],
+                    ],
+                    dim=-1,
+                )
+            )
+
+            pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
+            pose_params = self.nf_head.convert_pose_cont_to_params_for_context(
+                pose_mean_cont
+            )
+            aa_3dofs = pose_params["aa_3dofs"]  # B, 39
+            params_1dofs = pose_params["params_1dofs"]  # B, 34
+
+            shape_scale_residual_true = true_residual[..., self.nf_head.pose_dim :]
+            shape_residual_true = shape_scale_residual_true[
+                ...,
+                : self.nf_head.num_shape_comps,
+            ]
+            scale_residual_true = shape_scale_residual_true[
+                ...,
+                self.nf_head.num_shape_comps :,
+            ]
+
+            shape_sample_true = mean_pred["shape"] + shape_residual_true
+            scale_sample_selected_true = (
+                mean_pred["scale_68D"][..., scale_indices] + scale_residual_true
+            )
+
+            flow_context_pose = self.nf_head.pose_context_proj(
+                torch.cat(
+                    [
+                        flow_context_raw,
+                        shape_sample_true,
+                        scale_sample_selected_true,
+                        aa_3dofs,
+                        params_1dofs,
+                    ],
+                    dim=-1,
+                )
+            )
+
+            flow_log_prob, _ = self.nf_head.log_prob(
+                true_residual, flow_context_shape_scale, flow_context_pose
+            )
+            return flow_log_prob
+
+        raise ValueError(f"Unsupported MODEL.HEAD_TYPE: {head_type}")
+
     def forward(self, predictions, batch):
         loss_dict = {}
 
@@ -112,58 +178,8 @@ class Loss(pl.LightningModule):
             uncertainty_output = predictions["uncertainty_output"]
             num_samples = uncertainty_output["samples"].shape[1]
 
-            # Stage-1 context depends only on (c, μβ).
-            flow_context_raw = uncertainty_output["flow_context_raw"]
-            mean_pred = predictions["mhr"]
-            flow_context_shape_scale = self.nf_head.context_shape_scale_proj(
-                torch.cat(
-                    [
-                        flow_context_raw,
-                        mean_pred["shape"],
-                        mean_pred["scale_68D"][..., scale_indices],
-                    ],
-                    dim=-1,
-                )
-            )
-
-            # Stage-2 context depends on Δβ (i.e. the shape+scale residual).
-            pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
-            pose_params = self.nf_head.convert_pose_cont_to_params_for_context(
-                pose_mean_cont
-            )
-            aa_3dofs = pose_params["aa_3dofs"]  # B, 39
-            params_1dofs = pose_params["params_1dofs"]  # B, 34
-
-            shape_scale_residual_true = true_residual[..., self.nf_head.pose_dim :]
-            shape_residual_true = shape_scale_residual_true[
-                ...,
-                : self.nf_head.num_shape_comps,
-            ]
-            scale_residual_true = shape_scale_residual_true[
-                ...,
-                self.nf_head.num_shape_comps :,
-            ]
-
-            shape_sample_true = mean_pred["shape"] + shape_residual_true
-            scale_sample_selected_true = (
-                mean_pred["scale_68D"][..., scale_indices] + scale_residual_true
-            )
-
-            flow_context_pose = self.nf_head.context_pose_proj(
-                torch.cat(
-                    [
-                        flow_context_raw,
-                        shape_sample_true,
-                        scale_sample_selected_true,
-                        aa_3dofs,
-                        params_1dofs,
-                    ],
-                    dim=-1,
-                )
-            )
-
-            flow_log_prob, z = self.nf_head.log_prob(
-                true_residual, flow_context_shape_scale, flow_context_pose
+            flow_log_prob = self._compute_gt_residual_log_prob(
+                true_residual, predictions
             )
             nll_loss = -flow_log_prob.mean()
 

@@ -28,11 +28,12 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
 
     cfg = get_config_defaults()
 
-    if load_path is not None:
+    if load_path is not None or resume_path is not None:
         config_yaml_path = Path(exp_dir) / "config.yaml"
         if config_yaml_path.exists():
             logger.info(f"Loading config overrides from {config_yaml_path}")
             cfg.merge_from_file(str(config_yaml_path))
+
 
     torch.set_float32_matmul_precision(cfg.TRAIN.FP16_TYPE)
 
@@ -81,16 +82,16 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
 
     # 2) Periodic step checkpointing (independent of validation metrics)
     #    Useful for long runs where you want snapshots even if val metrics don't improve.
-    step_checkpoint_kwargs = {
-        "dirpath": model_save_dir,
-        "filename": "train_step_{step:08d}",
-        "save_top_k": -1,  # save all checkpoints at this interval
-        "every_n_train_steps": 5000,
-        "save_last": False,
-        "verbose": True,
-        "monitor": None,
-    }
-    checkpoint_callbacks.append(ModelCheckpoint(**step_checkpoint_kwargs))
+    # step_checkpoint_kwargs = {
+    #     "dirpath": model_save_dir,
+    #     "filename": "train_step_{step:08d}",
+    #     "save_top_k": -1,  # save all checkpoints at this interval
+    #     "every_n_train_steps": 5000,
+    #     "save_last": False,
+    #     "verbose": True,
+    #     "monitor": None,
+    # }
+    # checkpoint_callbacks.append(ModelCheckpoint(**step_checkpoint_kwargs))
 
     tensorboard_logger = TensorBoardLogger(exp_dir, name="lightning_logs")
 
