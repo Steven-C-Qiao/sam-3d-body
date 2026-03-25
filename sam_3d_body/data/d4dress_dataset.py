@@ -191,7 +191,7 @@ class D4DressDataset(Dataset):
         # item["scan_ids"] = subject_id
 
         # Load MHR parameters
-        mhr_params = np.load(os.path.join(take_dir, "MHR_params.npz"))
+        mhr_params = np.load(os.path.join(take_dir, "MHR_params_fixed.npz"))
         mhr_shape = mhr_params["identity_coeffs_np"]
         mhr_pose = mhr_params["lbs_params_np"]
         mhr_expr = mhr_params["face_expr_coeffs_np"]
@@ -346,7 +346,7 @@ class MultiD4DressDataset(Dataset):
         item["take_dir"] = take_dir
         item["scan_ids"] = subject_id
 
-        mhr_params = np.load(os.path.join(take_dir, "MHR_params.npz"))
+        mhr_params = np.load(os.path.join(take_dir, "MHR_params_fixed.npz"))
         mhr_shape = mhr_params["identity_coeffs_np"]
         mhr_pose = mhr_params["lbs_params_np"]
         mhr_expr = mhr_params["face_expr_coeffs_np"]

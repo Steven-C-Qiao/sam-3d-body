@@ -408,6 +408,10 @@ def multiframe_metrics(
     )
     avg_pvetsc = avg_pvetsc.mean(axis=1)
 
+    # print(per_view_pvetsc)
+    # print(merged_pvetsc)
+    # import ipdb; ipdb.set_trace()
+
     print(f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {avg_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}")
     print(f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {avg_pve.mean():.4f}, merged: {merged_pve.mean():.4f}")
     print(f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {avg_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}")
@@ -433,7 +437,6 @@ def multiframe_metrics(
     all_metrics["avg_pvetsc"].append(avg_pvetsc)
     all_metrics["merged_pvetsc"].append(merged_pvetsc)
 
-    import ipdb; ipdb.set_trace()
 
     return all_metrics
 

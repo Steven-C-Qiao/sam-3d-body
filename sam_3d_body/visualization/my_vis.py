@@ -1,4 +1,6 @@
 import os
+import cv2 
+
 import torch
 import matplotlib
 import numpy as np
@@ -14,6 +16,98 @@ import pyrender
 import trimesh
 
 from sam_3d_body.metrics.metrics_tracker import scale_and_translation_transform_batch
+
+LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
+LIGHT_ORANGE = (1.0, 0.8, 0.5)
+BLUE   = (0.12156863, 0.46666667, 0.70588235)   
+ORANGE = (1.0,        0.49803922, 0.05490196)   
+GREEN = (0.2, 1.0, 0.2)
+
+def build_vertex_colors(
+    dists: np.ndarray,
+    *,
+    min_dist: float,
+    max_dist: float,
+    cmap: str = "inferno",
+) -> np.ndarray:
+    """
+    Map per-vertex distances to RGBA colors using a shared viridis scale.
+
+    Args:
+        dists: Per-vertex distances, shape (V,).
+        min_dist: Global minimum distance used for normalization.
+        max_dist: Global maximum distance used for normalization.
+        cmap: Matplotlib colormap name, e.g. ``"viridis"``, ``"magma"``.
+    """
+    # For error heatmaps, we always anchor the colormap at 0.
+    # `min_dist` is kept only for API compatibility.
+    effective_min_dist = 0.0
+    denom = max_dist - effective_min_dist
+    if denom <= 0:
+        denom = 1.0
+    normalized = (dists - effective_min_dist) / denom
+    normalized = np.clip(normalized, 0.0, 1.0)
+    colors_rgb = plt.get_cmap(cmap)(normalized)[..., :3]  # (V, 3)
+    vertex_colors = np.ones((colors_rgb.shape[0], 4), dtype=np.float32)
+    vertex_colors[:, :3] = colors_rgb
+    return vertex_colors
+
+
+def build_distance_colorbar_rgb(
+    *,
+    min_dist: float,
+    max_dist: float,
+    cmap: str = "inferno",
+    height: int,
+    width: int = 30,
+) -> np.ndarray:
+    """
+    Create a simple RGB colorbar image (gradient only) with numeric min/max.
+    """
+    # For error heatmaps, we always anchor the colorbar at 0.
+    effective_min_dist = 0.0
+    denom = max_dist - effective_min_dist
+    if denom <= 0:
+        denom = 1.0
+
+    # Top corresponds to max distance (so "bad" = top hot color).
+    values = np.linspace(max_dist, effective_min_dist, height, dtype=np.float32)
+    normalized = (values - effective_min_dist) / denom
+    normalized = np.clip(normalized, 0.0, 1.0)
+
+    colors = plt.get_cmap(cmap)(normalized)[..., :3]  # (H, 3), RGB in [0,1]
+    bar_rgb = (colors * 255.0).astype(np.uint8)  # (H, 3)
+    bar_rgb = np.repeat(bar_rgb[:, None, :], width, axis=1)  # (H, W, 3)
+
+    # Annotate min/max.
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.35, min(0.7, height / 700.0))
+    thickness = 1
+    color_text = (0, 0, 0)  # black
+
+    top_text = f"{max_dist:.1f}"
+    bot_text = f"{0.0:.1f}"
+    cv2.putText(
+        bar_rgb,
+        top_text,
+        (2, int(12 + font_scale * 10)),
+        font,
+        font_scale,
+        color_text,
+        thickness,
+        lineType=cv2.LINE_AA,
+    )
+    cv2.putText(
+        bar_rgb,
+        bot_text,
+        (2, height - int(6 + font_scale * 10)),
+        font,
+        font_scale,
+        color_text,
+        thickness,
+        lineType=cv2.LINE_AA,
+    )
+    return bar_rgb
 
 
 class Visualiser(pl.LightningModule):
@@ -1246,8 +1340,6 @@ class Visualiser(pl.LightningModule):
 ################################################################################
 # Multiview visualisations
 ################################################################################
-import cv2 
-LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
 
 def vis_predictions(
     input_dict,
@@ -1265,7 +1357,9 @@ def vis_predictions(
 
     outputs = input_dict["outputs"]
     batch = input_dict["batch"]
-    merged_verts = input_dict.get("verts_star", None)
+    # merged_verts = input_dict.get("verts_star", None)
+    merged_verts = input_dict.get("merged_verts", None)
+    merged_neutral_verts = input_dict.get("merged_neutral_verts", None)
 
     metrics = input_dict.get("metrics", {})
 
@@ -1284,47 +1378,39 @@ def vis_predictions(
     all_distances = []
     pred_vertex_dists = {}
     merged_vertex_dists = {}
+    gt_centered_for_side = {}
+    verts_centered_for_side = {}
+    merged_centered_for_side = {}
 
     for view in range(num_views):
+
         flat_idx = i * num_views + view
+        pred_verts = outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
+        gt_verts = batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
+        if not has_merged:
+            # `merged_verts` and `merged_neutral_verts` should both be provided for this visualization.
+            assert False
+        merged_verts_view = merged_verts[flat_idx].cpu().detach().numpy()
 
-        # verts = (
-        #     outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
-        # )
-        # gt_verts = (
-        #     batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
-        # )
-        # merged_verts = verts_star[flat_idx].cpu().detach().numpy()
+        if sc:
+            # PVETS-T-C: scale + translation normalize predicted vertices to GT.
+            pred_verts = scale_and_translation_transform_batch(
+                pred_verts[None, ...], gt_verts[None, ...]
+            )[0]
+            merged_verts_view = scale_and_translation_transform_batch(
+                merged_verts_view[None, ...], gt_verts[None, ...]
+            )[0]
 
-        # import matplotlib.pyplot as plt
-        # from mpl_toolkits.mplot3d import Axes3D
+        # Pre-compute centered coordinates for the side-view renderer.
+        # These match the centering logic that used to happen inside `plot_side`.
+        center = gt_verts.mean(axis=0, keepdims=True)
+        gt_centered_for_side[view] = gt_verts - center
+        verts_centered_for_side[view] = pred_verts - center
+        merged_centered_for_side[view] = merged_verts_view - center
 
-        # fig = plt.figure(figsize=(8, 6))
-        # ax = fig.add_subplot(111, projection='3d')
-
-        # ax.scatter(verts[:, 0], verts[:, 1], verts[:, 2], c='b', s=1, label='Pred. Verts')
-        # ax.scatter(gt_verts[:, 0], gt_verts[:, 1], gt_verts[:, 2], c='r', s=1, label='GT Verts')
-
-        # ax.set_title('3D Scatter: Predicted vs Ground Truth Vertices')
-        # ax.set_xlabel('X')
-        # ax.set_ylabel('Y')
-        # ax.set_zlabel('Z')
-        # ax.legend()
-        # plt.savefig('pred_vs_gt_verts.png')
-        # plt.close()
-        # import ipdb; ipdb.set_trace()
-
-        verts = (
-            input_dict["per_view_neutral_verts"][flat_idx].cpu().detach().numpy()
-        )
-        gt_verts = input_dict["gt_neutral_verts"][flat_idx].cpu().detach().numpy()
-        if has_merged:
-            merged_verts = merged_neutral_verts[flat_idx].cpu().detach().numpy()
-        else:
-            merged_verts = verts
-
-        pred_dist = np.linalg.norm(verts - gt_verts, axis=1)
-        merged_dist = np.linalg.norm(merged_verts - gt_verts, axis=1)
+        # Distances are in meters; convert to millimeters for visualization.
+        pred_dist = np.linalg.norm(pred_verts - gt_verts, axis=1) * 1000.0
+        merged_dist = np.linalg.norm(merged_verts_view - gt_verts, axis=1) * 1000.0
 
         pred_vertex_dists[view] = pred_dist
         merged_vertex_dists[view] = merged_dist
@@ -1335,20 +1421,6 @@ def vis_predictions(
     all_distances = np.concatenate(all_distances)
     min_dist = float(all_distances.min()) if all_distances.size > 0 else 0.0
     max_dist = float(all_distances.max()) if all_distances.size > 0 else 1.0
-
-    if max_dist > min_dist:
-        denom = max_dist - min_dist
-    else:
-        denom = 1.0
-
-    def build_vertex_colors(dists: np.ndarray) -> np.ndarray:
-        """Map distances to RGBA vertex colors using shared viridis scale."""
-        normalized = (dists - min_dist) / denom
-        normalized = np.clip(normalized, 0.0, 1.0)
-        colors_rgb = plt.cm.viridis(normalized)[..., :3]  # (V, 3)
-        vertex_colors = np.ones((colors_rgb.shape[0], 4), dtype=np.float32)
-        vertex_colors[:, :3] = colors_rgb
-        return vertex_colors
 
     # Second pass: render GT (solid color), and pred/merged with per-vertex viridis colors
     for view in range(num_views):
@@ -1369,9 +1441,9 @@ def vis_predictions(
             gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
 
         if has_merged:
-            merged_verts = merged_verts[flat_idx].cpu().detach().numpy()
+            merged_verts_view = merged_verts[flat_idx].cpu().detach().numpy()
         else:
-            merged_verts = verts
+            assert False
 
         # GT: keep fixed LIGHT_BLUE color
         gt_rendered_img = (
@@ -1390,7 +1462,9 @@ def vis_predictions(
         ).astype(np.uint8)
 
         # Predicted mesh: per-vertex viridis colors from distance to GT
-        pred_colors = build_vertex_colors(pred_vertex_dists[view])
+        pred_colors = build_vertex_colors(
+            pred_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
+        )
         rendered_img = (
             renderer(
                 verts,
@@ -1427,10 +1501,12 @@ def vis_predictions(
         rendered_img = (blended_pred * 255.0).clip(0, 255).astype(np.uint8)
 
         # Merged mesh: per-vertex viridis colors from distance to GT
-        merged_colors = build_vertex_colors(merged_vertex_dists[view])
+        merged_colors = build_vertex_colors(
+            merged_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
+        )
         rendered_merged_img = (
             renderer(
-                merged_verts,
+                merged_verts_view,
                 cam_t,
                 img_for_render.copy(),
                 mesh_base_color=(0.5, 1.0, 0.5),
@@ -1633,7 +1709,7 @@ def vis_predictions(
             merged_text_lines.append(
                 "merged shape var: " + " ".join(f"{v:.2f}" for v in merged_var[:5])
             )
-        if not has_merged:
+        if merged_verts is None:
             merged_text_lines.append("merged prediction unavailable")
         y_start_m = 10 + text_height + baseline + 10
         y_offset_m = y_start_m
@@ -1660,28 +1736,9 @@ def vis_predictions(
         if plot_side:
             white_bg = np.ones_like(gt_rendered_img) #np.ones_like(img_for_render) * 255
             generic_cam_t = np.array([0.0, -0.25, 2.5])
-
-            if sc:
-                verts_sn = scale_and_translation_transform_batch(
-                    verts[None, ...], gt_verts[None, ...]
-                )[0]
-                merged_sn = scale_and_translation_transform_batch(
-                    merged_verts[None, ...], gt_verts[None, ...]
-                )[0]
-
-                center = gt_verts.mean(axis=0, keepdims=True)
-                gt_centered = gt_verts - center
-                verts_centered = verts_sn - center
-                merged_centered = merged_sn - center
-            else:
-                verts_sn = verts
-                merged_sn = merged_verts
-
-                gt_centered = gt_verts - gt_verts.mean(axis=0, keepdims=True)
-                verts_centered = verts - verts.mean(axis=0, keepdims=True)
-                merged_centered = merged_verts - merged_verts.mean(
-                    axis=0, keepdims=True
-                )
+            gt_centered = gt_centered_for_side[view]
+            verts_centered = verts_centered_for_side[view]
+            merged_centered = merged_centered_for_side[view]
 
             # GT side view (for the GT column)
             gt_side = (
@@ -1790,6 +1847,17 @@ def vis_predictions(
         gallery_img_bgr, (w // 2, h // 2), interpolation=cv2.INTER_AREA
     )
 
+    # Append error-distance colorbar to the right.
+    colorbar_rgb = build_distance_colorbar_rgb(
+        min_dist=min_dist,
+        max_dist=max_dist,
+        cmap="inferno",
+        height=gallery_img_bgr.shape[0],
+        width=60,
+    )
+    colorbar_bgr = cv2.cvtColor(colorbar_rgb, cv2.COLOR_RGB2BGR)
+    gallery_img_bgr = np.concatenate([gallery_img_bgr, colorbar_bgr], axis=1)
+
     # save_dir = self.vis_save_dir if self.vis_save_dir else "."
     os.makedirs(save_dir, exist_ok=True)
     suffix = "_sc" if sc else ""
@@ -1804,94 +1872,88 @@ def vis_predictions(
     )
 
 def vis_neutral(
-    stuff_for_vis,
+    input_dict,
     save_dir: str = None,
     sc: bool = True,
 ):
-    neutral_renderer = stuff_for_vis["neutral_renderer"]
-    batch = stuff_for_vis["batch"]
-    gt_neutral_verts = stuff_for_vis["gt_neutral_verts"]
-    merged_neutral_verts = stuff_for_vis.get("merged_neutral_verts", None)
-    per_view_neutral_verts = stuff_for_vis["per_view_neutral_verts"]
-    num_views = stuff_for_vis["num_views"]
-    batch_idx = stuff_for_vis["batch_idx"]
-    bs = stuff_for_vis["bs"]
-
-    has_merged = merged_neutral_verts is not None
-
     generic_cam_t = np.array([0.0, 0.75, 2.5])
+    batch_idx = input_dict["batch_idx"]
+    num_views = input_dict["num_views"]
 
-    # ----- Prepare vertices (optionally scale-normalized) -----
-    # Work in the canonical (unflipped) coordinate frame for distances.
-    gt_neutral_verts_np = gt_neutral_verts.cpu().detach().numpy()
-    per_view_verts_np = per_view_neutral_verts.cpu().detach().numpy()
-    if has_merged:
-        merged_verts_np = merged_neutral_verts.cpu().detach().numpy()
-    else:
-        merged_verts_np = None
+    renderer = input_dict["neutral_renderer"]
+    
+    gt_verts = input_dict["gt_neutral_verts"].cpu().detach().numpy()
+    per_view_verts = input_dict["per_view_neutral_verts"].cpu().detach().numpy()
+    merged_verts = input_dict.get("merged_neutral_verts", None)
+    if merged_verts is not None:
+        merged_verts = merged_verts.cpu().detach().numpy()
 
-    # When sc=True, scale-normalize per-view and merged meshes to GT, similar to multiframe_metrics.
+    metrics = input_dict.get("metrics", {})
+    per_view_pvetsc = None
+    merged_pvetsc = None
+    if (
+        isinstance(metrics, dict)
+        and "per_view_pvetsc" in metrics
+        and len(metrics["per_view_pvetsc"]) > 0
+    ):
+        per_view_pvetsc = metrics["per_view_pvetsc"][-1]
+    if (
+        isinstance(metrics, dict)
+        and "merged_pvetsc" in metrics
+        and len(metrics["merged_pvetsc"]) > 0
+    ):
+        merged_pvetsc = metrics["merged_pvetsc"][-1]
+
     if sc:
-        from sam_3d_body.metrics.metrics_tracker import (
-            scale_and_translation_transform_batch,
+        per_view_verts = scale_and_translation_transform_batch(
+            per_view_verts, gt_verts
         )
-
-        per_view_verts_np = scale_and_translation_transform_batch(
-            per_view_verts_np, gt_neutral_verts_np
-        )
-        if has_merged:
-            merged_verts_np = scale_and_translation_transform_batch(
-                merged_verts_np, gt_neutral_verts_np
+        if merged_verts is not None:
+            merged_verts = scale_and_translation_transform_batch(
+                merged_verts, gt_verts
             )
 
-    # Use the last GT mesh as reference (consistent with previous vis2 behavior).
-    gt_ref = gt_neutral_verts_np[-1]
+    # ----------------- Get colors -----------------
+    gt_ref = gt_verts[-1]
 
     all_distances = []
     per_view_vertex_dists = {}
 
     for view in range(num_views):
-        pv_verts = per_view_verts_np[view]
-        dist_pv = np.linalg.norm(pv_verts - gt_ref, axis=1)
+        pv_verts = per_view_verts[view]
+        # Distances are in meters; convert to millimeters for visualization.
+        dist_pv = np.linalg.norm(pv_verts - gt_ref, axis=1) * 1000.0
         per_view_vertex_dists[view] = dist_pv
         all_distances.append(dist_pv)
 
-    if has_merged:
-        merged_verts_ref = merged_verts_np[0]
-        merged_vertex_dists = np.linalg.norm(merged_verts_ref - gt_ref, axis=1)
+    if merged_verts is not None:
+        merged_verts_ref = merged_verts[0]
+        merged_vertex_dists = (
+            np.linalg.norm(merged_verts_ref - gt_ref, axis=1) * 1000.0
+        )
         all_distances.append(merged_vertex_dists)
 
     all_distances = np.concatenate(all_distances)
     min_dist = float(all_distances.min()) if all_distances.size > 0 else 0.0
     max_dist = float(all_distances.max()) if all_distances.size > 0 else 1.0
 
-    if max_dist > min_dist:
-        denom = max_dist - min_dist
-    else:
-        denom = 1.0
+    # ----------------- GT -----------------
+    background = np.zeros((512, 512, 3)) * 255
 
-    def build_vertex_colors(dists: np.ndarray) -> np.ndarray:
-        """Map distances to RGBA vertex colors using shared viridis scale (as in vis1)."""
-        normalized = (dists - min_dist) / denom
-        normalized = np.clip(normalized, 0.0, 1.0)
-        colors_rgb = plt.cm.viridis(normalized)[..., :3]  # (V, 3)
-        vertex_colors = np.ones((colors_rgb.shape[0], 4), dtype=np.float32)
-        vertex_colors[:, :3] = colors_rgb
-        return vertex_colors
-
-    # ----- Render GT neutral mesh (solid color) -----
-    gt_neutral_verts_vis = gt_neutral_verts_np.copy()
-    gt_neutral_verts_vis[..., [1, 2]] *= -1
-    gt_neutral_rendered = (
-        neutral_renderer(
-            gt_neutral_verts_vis[-1],
-            generic_cam_t,
-            np.ones((512, 512, 3)) * 255,
-            mesh_base_color=LIGHT_BLUE,
-            scene_bg_color=(1, 1, 1),
-        )
-        * 255
-    ).astype(np.uint8)
+    gt_verts_vis = gt_verts.copy()
+    gt_verts_vis[..., [1, 2]] *= -1
+    
+    gt_rgba = renderer(
+        gt_verts_vis[-1],
+        generic_cam_t,
+        background.copy(),
+        mesh_base_color=LIGHT_BLUE,
+        scene_bg_color=(1, 1, 1),
+        return_rgba=True,
+    )
+    gt_alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
+    gt_rgb = gt_rgba[..., :3].astype(np.float32)
+    gt_front = (gt_rgb * 255.0).clip(0, 255).astype(np.uint8)
 
     (text_width, text_height), baseline = cv2.getTextSize(
         "GT", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2
@@ -1901,218 +1963,170 @@ def vis_neutral(
         "org": (12, 10 + text_height),
         "fontFace": cv2.FONT_HERSHEY_SIMPLEX,
         "fontScale": 1.0,
-        "color": (0, 0, 0),
+        "color": (255, 255, 255),
         "thickness": 2,
     }
     cv2.putText(
-        gt_neutral_rendered,
+        gt_front,
         "GT",
         **text_config,
     )
 
-    # Side view of GT neutral mesh on white background
-    white_bg = np.ones((512, 512, 3)) * 255
-    gt_neutral_side = (
-        neutral_renderer(
-            gt_neutral_verts_vis[-1],
-            generic_cam_t,
-            white_bg.copy(),
-            mesh_base_color=LIGHT_BLUE,
-            scene_bg_color=(1, 1, 1),
-            side_view=True,
-            rot_angle=90,
-        )
-        * 255
-    ).astype(np.uint8)
 
-    # Side-view GT overlay (light orange) for second-row views
-    gt_neutral_side_rgba = neutral_renderer(
-        gt_neutral_verts_vis[-1],
+    gt_side_rgba = renderer(
+        gt_verts_vis[-1],
         generic_cam_t,
-        white_bg.copy(),
-        mesh_base_color=(1.0, 0.8, 0.5),
+        background.copy(),
+        mesh_base_color=LIGHT_BLUE,
         scene_bg_color=(1, 1, 1),
         side_view=True,
         rot_angle=90,
         return_rgba=True,
     )
-    gt_side_alpha = gt_neutral_side_rgba[..., 3:4].astype(np.float32) * 0.5
-    gt_side_rgb = gt_neutral_side_rgba[..., :3].astype(np.float32)
+    gt_side_alpha = gt_side_rgba[..., 3:4].astype(np.float32) * 0.5
+    gt_side_rgb = gt_side_rgba[..., :3].astype(np.float32)
+    gt_side = (gt_side_rgb * 255.0).clip(0, 255).astype(np.uint8)
 
-    # Pre-compute semi-transparent GT overlay (RGBA) for neutral views (light orange)
-    gt_neutral_rgba = neutral_renderer(
-        gt_neutral_verts_vis[-1],
-        generic_cam_t,
-        np.ones((512, 512, 3)) * 255,
-        mesh_base_color=(1.0, 0.8, 0.5),
-        scene_bg_color=(1, 1, 1),
-        return_rgba=True,
-    )
-    gt_alpha = gt_neutral_rgba[..., 3:4].astype(np.float32) * 0.5
-    gt_rgb = gt_neutral_rgba[..., :3].astype(np.float32)
-
-    # ----- Render per-view neutral meshes with per-vertex colors -----
-    per_view_rendered_front = []
-    per_view_rendered_side = []
-    per_view_verts_vis = per_view_verts_np.copy()
+    # ----------------- Per-view -----------------
+    per_view_front = []
+    per_view_side = []
+    per_view_verts_vis = per_view_verts.copy()
     per_view_verts_vis[..., [1, 2]] *= -1
 
     for view in range(num_views):
-        vertex_colors = build_vertex_colors(per_view_vertex_dists[view])
-        rendered = (
-            neutral_renderer(
-                per_view_verts_vis[view],
-                generic_cam_t,
-                np.ones((512, 512, 3)) * 255,
-                mesh_base_color=(1.0, 0.8, 0.5),  # unused when vertex_colors is set
-                scene_bg_color=(1, 1, 1),
-                vertex_colors=vertex_colors,
-            )
-            * 255
-        ).astype(np.uint8)
-        per_view_rendered_front.append(rendered)
-
-        # Overlay semi-transparent GT neutral mesh on top
-        pv_rgb = rendered.astype(np.float32) / 255.0
+        vertex_colors = build_vertex_colors(
+            per_view_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
+        )
+        front_render = renderer(
+            per_view_verts_vis[view],
+            generic_cam_t,
+            background.copy(),
+            mesh_base_color=(1.0, 0.8, 0.5), 
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vertex_colors,
+        )
+        pv_rgb = front_render.astype(np.float32)
         blended_pv = gt_alpha * gt_rgb + (1.0 - gt_alpha) * pv_rgb
-        rendered = (blended_pv * 255.0).clip(0, 255).astype(np.uint8)
-        per_view_rendered_front[-1] = rendered
+        front_render = (blended_pv * 255.0).clip(0, 255).astype(np.uint8)
+        per_view_front.append(front_render)
 
         cv2.putText(
-            rendered,
+            front_render,
             f"View {view}",
             **text_config,
         )
 
-        # Side view for this per-view neutral mesh (with GT overlay, white background)
-        rendered_side = (
-            neutral_renderer(
-                per_view_verts_vis[view],
-                generic_cam_t,
-                white_bg.copy(),
-                mesh_base_color=(1.0, 0.8, 0.5),
-                scene_bg_color=(1, 1, 1),
-                vertex_colors=vertex_colors,
-                side_view=True,
-                rot_angle=90,
-            )
-            * 255
-        ).astype(np.uint8)
-        pv_side_rgb = rendered_side.astype(np.float32) / 255.0
-        blended_side = (
-            gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * pv_side_rgb
+        side_render = renderer(
+            per_view_verts_vis[view],
+            generic_cam_t,
+            background.copy(),
+            mesh_base_color=(1.0, 0.8, 0.5),
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vertex_colors,
+            side_view=True,
+            rot_angle=90,
         )
-        rendered_side = (blended_side * 255.0).clip(0, 255).astype(np.uint8)
-        per_view_rendered_side.append(rendered_side)
+        pv_side_rgb = side_render.astype(np.float32)
+        blended_side = gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * pv_side_rgb
+        side_render = (blended_side * 255.0).clip(0, 255).astype(np.uint8)
 
-    # ----- Render merged neutral mesh with per-vertex colors (skip if merged not given) -----
-    if has_merged:
+        if per_view_pvetsc is not None:
+            metric_config_side_view = {
+                "org": (12, 10 + 2 * text_height + baseline),
+                "fontFace": cv2.FONT_HERSHEY_SIMPLEX,
+                "fontScale": 0.75,
+                "color": (255, 255, 255),
+                "thickness": 2,
+            }
+            cv2.putText(
+                side_render,
+                f"PVE-T-SC: {float(per_view_pvetsc[view]) * 1000.0:.1f} mm",
+                **metric_config_side_view,
+            )
+        per_view_side.append(side_render)
+
+    # ----------------- Merged -----------------
+    if merged_verts is not None:
         merged_verts_vis = merged_verts_ref.copy()
         merged_verts_vis[..., [1, 2]] *= -1
-        merged_vertex_colors = build_vertex_colors(merged_vertex_dists)
-        merged_neutral_rendered = (
-            neutral_renderer(
-                merged_verts_vis,
-                generic_cam_t,
-                np.ones((512, 512, 3)) * 255,
-                mesh_base_color=(0.5, 1.0, 0.5),  # unused when vertex_colors is set
-                scene_bg_color=(1, 1, 1),
-                vertex_colors=merged_vertex_colors,
-            )
-            * 255
-        ).astype(np.uint8)
-
-        # Overlay semi-transparent GT neutral mesh on top of merged neutral mesh
-        merged_rgb = merged_neutral_rendered.astype(np.float32) / 255.0
-        blended_merged = gt_alpha * gt_rgb + (1.0 - gt_alpha) * merged_rgb
-        merged_neutral_rendered = (
-            (blended_merged * 255.0).clip(0, 255).astype(np.uint8)
+        merged_vertex_colors = build_vertex_colors(
+            merged_vertex_dists, min_dist=min_dist, max_dist=max_dist
         )
 
+        merged_front_render = renderer(
+            merged_verts_vis,
+            generic_cam_t,
+            background.copy(),
+            mesh_base_color=(0.5, 1.0, 0.5), 
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=merged_vertex_colors,
+        )
+        merged_rgb = merged_front_render.astype(np.float32)
+        blended_merged = gt_alpha * gt_rgb + (1.0 - gt_alpha) * merged_rgb
+        merged_front_render = (blended_merged * 255.0).clip(0, 255).astype(np.uint8)
+
         cv2.putText(
-            merged_neutral_rendered,
+            merged_front_render,
             "Merged",
             **text_config,
         )
 
-        # Side view for merged neutral mesh (with GT overlay, white background)
-        merged_neutral_side = (
-            neutral_renderer(
-                merged_verts_vis,
-                generic_cam_t,
-                white_bg.copy(),
-                mesh_base_color=(0.5, 1.0, 0.5),
-                scene_bg_color=(1, 1, 1),
-                vertex_colors=merged_vertex_colors,
-                side_view=True,
-                rot_angle=90,
+        merged_side = renderer(
+            merged_verts_vis,
+            generic_cam_t,
+            background.copy(),
+            mesh_base_color=(0.5, 1.0, 0.5),
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=merged_vertex_colors,
+            side_view=True,
+            rot_angle=90,
+        )
+        merged_side_rgb = merged_side.astype(np.float32)
+        blended_merged_side = gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * merged_side_rgb
+        merged_side = (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
+
+        if merged_pvetsc is not None:
+            metric_config_merged_side = {
+                "org": (12, 10 + 2 * text_height + baseline),
+                "fontFace": cv2.FONT_HERSHEY_SIMPLEX,
+                "fontScale": 0.75,
+                "color": (255, 255, 255),
+                "thickness": 2,
+            }
+            cv2.putText(
+                merged_side,
+                f"PVE-T-SC: {float(merged_pvetsc[0]) * 1000.0:.1f} mm",
+                **metric_config_merged_side,
             )
-            * 255
-        ).astype(np.uint8)
-        merged_side_rgb = merged_neutral_side.astype(np.float32) / 255.0
-        blended_merged_side = (
-            gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * merged_side_rgb
-        )
-        merged_neutral_side = (
-            (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
-        )
 
     # Assemble gallery: top = front views (GT, [merged], per-view), bottom = side views
-    top_row_images = [gt_neutral_rendered]
-    bottom_row_images = [gt_neutral_side]
-    if has_merged:
-        top_row_images.append(merged_neutral_rendered)
-        bottom_row_images.append(merged_neutral_side)
+    top_row_images = [gt_front]
+    bottom_row_images = [gt_side]
+    if merged_verts is not None:
+        top_row_images.append(merged_front_render)
+        bottom_row_images.append(merged_side)
     for view in range(num_views):
-        top_row_images.append(per_view_rendered_front[view])
-        bottom_row_images.append(per_view_rendered_side[view])
+        top_row_images.append(per_view_front[view])
+        bottom_row_images.append(per_view_side[view])
 
     top_row = np.concatenate(top_row_images, axis=1)
     bottom_row = np.concatenate(bottom_row_images, axis=1)
 
-    # Third row: blank for GT and merged, then per-view input images
-    # Keep original aspect ratio for input images, but align widths with first two rows
-    # tile_h, tile_w = gt_neutral_rendered.shape[:2]
-    # blank = np.ones((tile_h, tile_w, 3), dtype=np.uint8) * 255
-    # third_row_images = [blank.copy(), blank.copy()]
-
-    # for view in range(num_views):
-    #     # Use cropped input image instead of full image
-    #     img_t = batch["img"][view].cpu().detach()
-    #     img = img_t.numpy()
-    #     # Convert from CHW to HWC if needed
-    #     if img.ndim == 3 and img.shape[0] == 3:
-    #         img = np.transpose(img, (1, 2, 0))
-    #     # Denormalize to [0, 255] and convert to uint8
-    #     img = (img * 255.0).clip(0, 255).astype(np.uint8)
-
-    #     ih, iw = img.shape[:2]
-    #     # Compute scale to fit inside (tile_h, tile_w) while preserving aspect ratio
-    #     scale = min(tile_w / iw, tile_h / ih)
-    #     new_w = max(1, int(round(iw * scale)))
-    #     new_h = max(1, int(round(ih * scale)))
-
-    #     img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-    #     # Paste resized image into centered white tile
-    #     canvas = blank.copy()
-    #     y_off = (tile_h - new_h) // 2
-    #     x_off = (tile_w - new_w) // 2
-    #     canvas[y_off : y_off + new_h, x_off : x_off + new_w] = img_resized
-    #     third_row_images.append(canvas)
-
-    # third_row = np.concatenate(third_row_images, axis=1)
 
     gallery_img = np.concatenate([top_row, bottom_row], axis=0)
     gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
-    # Downscale final image by factor 2 before saving
-    # h, w = gallery_img_bgr.shape[:2]
-    # gallery_img_bgr = cv2.resize(
-    #     gallery_img_bgr, (w // 2, h // 2), interpolation=cv2.INTER_AREA
-    # )
 
-    # save_dir = self.vis_save_dir if self.vis_save_dir else "."
-    os.makedirs(save_dir, exist_ok=True)
+    # Append error-distance colorbar to the right.
+    colorbar_rgb = build_distance_colorbar_rgb(
+        min_dist=min_dist,
+        max_dist=max_dist,
+        cmap="inferno",
+        height=gallery_img_bgr.shape[0],
+        width=60,
+    )
+    colorbar_bgr = cv2.cvtColor(colorbar_rgb, cv2.COLOR_RGB2BGR)
+    gallery_img_bgr = np.concatenate([gallery_img_bgr, colorbar_bgr], axis=1)
+
     suffix = "_sc" if sc else ""
     save_path = os.path.join(
         save_dir,
@@ -2122,37 +2136,37 @@ def vis_neutral(
     logger.info(f"Saved neutral meshes gallery: {save_path}")
 
 
-def _count_params(self):
-    # Count and print trainable vs frozen parameters
-    trainable_params = sum(
-        p.numel() for p in self.model.parameters() if p.requires_grad
-    )
-    frozen_params = sum(
-        p.numel() for p in self.model.parameters() if not p.requires_grad
-    )
-    decoder_params = sum(p.numel() for p in self.model.decoder.parameters())
-    if self.use_lora:
-        decoder_lora_params = sum(
-            p.numel() for p in self.model.decoder.lora_layers.parameters()
-        )
-    total_params = trainable_params + frozen_params
+# def _count_params(self):
+#     # Count and print trainable vs frozen parameters
+#     trainable_params = sum(
+#         p.numel() for p in self.model.parameters() if p.requires_grad
+#     )
+#     frozen_params = sum(
+#         p.numel() for p in self.model.parameters() if not p.requires_grad
+#     )
+#     decoder_params = sum(p.numel() for p in self.model.decoder.parameters())
+#     if self.use_lora:
+#         decoder_lora_params = sum(
+#             p.numel() for p in self.model.decoder.lora_layers.parameters()
+#         )
+#     total_params = trainable_params + frozen_params
 
-    logger.info("=" * 60)
-    logger.info("Parameter Statistics:")
-    logger.info("=" * 60)
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(
-        f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)"
-    )
-    logger.info(
-        f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.2f}%)"
-    )
-    logger.info(
-        f"Decoder parameters: {decoder_params:,} ({100 * decoder_params / total_params:.2f}%)"
-    )
-    if self.use_lora:
-        logger.info(
-            f"LoRA decoder parameters: {decoder_lora_params:,} ({100 * decoder_lora_params / total_params:.2f}%)"
-        )
-        # logger.info(f"LoRA trainable parameters: {lora_param_count:,}")
-    logger.info("=" * 60)
+#     logger.info("=" * 60)
+#     logger.info("Parameter Statistics:")
+#     logger.info("=" * 60)
+#     logger.info(f"Total parameters: {total_params:,}")
+#     logger.info(
+#         f"Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)"
+#     )
+#     logger.info(
+#         f"Frozen parameters: {frozen_params:,} ({100 * frozen_params / total_params:.2f}%)"
+#     )
+#     logger.info(
+#         f"Decoder parameters: {decoder_params:,} ({100 * decoder_params / total_params:.2f}%)"
+#     )
+#     if self.use_lora:
+#         logger.info(
+#             f"LoRA decoder parameters: {decoder_lora_params:,} ({100 * decoder_lora_params / total_params:.2f}%)"
+#         )
+#         # logger.info(f"LoRA trainable parameters: {lora_param_count:,}")
+#     logger.info("=" * 60)

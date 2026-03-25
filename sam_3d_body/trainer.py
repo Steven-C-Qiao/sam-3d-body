@@ -699,9 +699,9 @@ class Trainer(BaseLightningModule):
             )
 
             vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
-
             vis_neutral(outs, sc=True, save_dir=self.vis_save_dir)
+
+            # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir)
 
             # # ---------------------- Cross-view shape visualization ----------------------
@@ -725,6 +725,50 @@ class Trainer(BaseLightningModule):
             #     cross_view_gallery_bgr,
             # )
 
+
         mean_metrics = print_multiview_metrics(all_metrics, self.vis_save_dir)
 
         return None
+
+
+
+# ============================================================
+# Average Metrics:
+# ============================================================
+# per_view_mpjpe: 0.0240
+# best_per_view_mpjpe: 0.0217
+# avg_mpjpe: 0.0236
+# merged_mpjpe: 0.0199
+# per_view_pve: 0.0255
+# best_per_view_pve: 0.0230
+# avg_pve: 0.0251
+# merged_pve: 0.0209
+# per_view_pampjpe: 0.0193
+# best_per_view_pampjpe: 0.0175
+# avg_pampjpe: 0.0193
+# merged_pampjpe: 0.0102
+# per_view_pvetsc: 0.0185
+# best_per_view_pvetsc: 0.0170
+# avg_pvetsc: 0.0184
+# merged_pvetsc: 0.0112
+# ============================================================
+
+
+# ============================================================
+# per_view_mpjpe: 0.0240
+# best_per_view_mpjpe: 0.0217
+# avg_mpjpe: 0.0236
+# merged_mpjpe: 0.0206
+# per_view_pve: 0.0255
+# best_per_view_pve: 0.0229
+# avg_pve: 0.0251
+# merged_pve: 0.0219
+# per_view_pampjpe: 0.0194
+# best_per_view_pampjpe: 0.0175
+# avg_pampjpe: 0.0193
+# merged_pampjpe: 0.0105
+# per_view_pvetsc: 0.0186
+# best_per_view_pvetsc: 0.0171
+# avg_pvetsc: 0.0184
+# merged_pvetsc: 0.0110
+# ============================================================

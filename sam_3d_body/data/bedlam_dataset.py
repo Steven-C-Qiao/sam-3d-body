@@ -80,9 +80,9 @@ class DatasetHMR(Dataset):
             .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
-        self.visibility = np.load(
-            DATASET_FILES[is_train][dataset][:-4] + "_visibility_308.npz"
-        )["visibility_308"]
+        
+        visibility_path = DATASET_FILES[is_train][dataset].replace('all_npz_12_training_mhr_fixed', 'visibility_labels')
+        self.visibility = np.load(visibility_path[:-4] + "_visibility_308.npz")["visibility_308"]
         # self.visibility = np.ones((self.data["imgname"].shape[0], 1))
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format

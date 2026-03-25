@@ -43,7 +43,7 @@ class SSP3DDataset(Dataset):
         self.images_dir = os.path.join(ssp3d_dir_path, "images")
         self.silhouettes_dir = os.path.join(ssp3d_dir_path, "silhouettes")
 
-        data = np.load(os.path.join(ssp3d_dir_path, "labels_mhr.npz"))
+        data = np.load(os.path.join(ssp3d_dir_path, "labels_mhr_fixed.npz"))
 
         self.image_fnames = data["fnames"]
         self.body_shapes = data["shapes"]
