@@ -23,6 +23,70 @@ BLUE   = (0.12156863, 0.46666667, 0.70588235)
 ORANGE = (1.0,        0.49803922, 0.05490196)   
 GREEN = (0.2, 1.0, 0.2)
 
+
+def vis_histogram(
+    merged_dists: np.ndarray,
+    pred_dists: np.ndarray,
+    *,
+    batch_idx: int,
+    save_dir: str,
+) -> None:
+    """
+    Plot one merged distance histogram and one histogram per predicted view.
+
+    Args:
+        merged_dists: Shape (B, V) array, usually B=1 in multiview eval.
+        pred_dists: Shape (N_view, V) array of per-view distances.
+        batch_idx: Batch index used for file naming.
+        save_dir: Directory to save the histogram image.
+    """
+    all_dists_for_color = np.concatenate([merged_dists.reshape(-1), pred_dists.reshape(-1)])
+    max_dist = float(all_dists_for_color.max()) if all_dists_for_color.size > 0 else 0.1
+    if max_dist <= 0:
+        max_dist = 0.1
+
+    bins = np.linspace(0.0, max_dist, 51)
+    num_rows = 1 + pred_dists.shape[0]
+    fig, axs = plt.subplots(num_rows, 1, figsize=(6, 3 * num_rows), sharex=True)
+    if num_rows == 1:
+        axs = [axs]
+
+    def plot_hist_inferno(ax, data, *, title: str, alpha: float = 0.7):
+        counts, edges = np.histogram(data, bins=bins)
+        bin_centers = 0.5 * (edges[:-1] + edges[1:])
+
+        # Anchor at 0, exactly matching mesh color normalization.
+        denom = max_dist - 0.0
+        if denom <= 0:
+            denom = 1.0
+        normalized = np.clip((bin_centers - 0.0) / denom, 0.0, 1.0)
+        cmap = plt.get_cmap("inferno")
+        rgba = cmap(normalized)  # (N, 4)
+
+        ax.bar(
+            edges[:-1],
+            counts,
+            width=np.diff(edges),
+            align="edge",
+            color=rgba,
+            alpha=alpha,
+            linewidth=0,
+        )
+        ax.set_title(title)
+        ax.set_ylabel("Frequency")
+        ax.grid(True)
+
+    plot_hist_inferno(axs[0], merged_dists[0], title="merged_sc")
+    for i in range(pred_dists.shape[0]):
+        plot_hist_inferno(axs[i + 1], pred_dists[i], title=f"pred_sc{i}")
+
+    axs[-1].set_xlabel("Distance")
+    plt.tight_layout()
+    hist_path = os.path.join(save_dir, f"b{batch_idx:03d}_error_hist.png")
+    plt.savefig(hist_path)
+    print(f"Saved histogram column to {hist_path}")
+    plt.close()
+
 def build_vertex_colors(
     dists: np.ndarray,
     *,
@@ -1875,6 +1939,7 @@ def vis_neutral(
     input_dict,
     save_dir: str = None,
     sc: bool = True,
+    plot_hist: bool = True,
 ):
     generic_cam_t = np.array([0.0, 0.75, 2.5])
     batch_idx = input_dict["batch_idx"]
@@ -2099,21 +2164,71 @@ def vis_neutral(
                 **metric_config_merged_side,
             )
 
-    # Assemble gallery: top = front views (GT, [merged], per-view), bottom = side views
+    def _hist_image(data: np.ndarray, title: str, target_hw: tuple[int, int]) -> np.ndarray:
+        h, w = target_hw
+        fig, ax = plt.subplots(figsize=(w / 100.0, h / 100.0), dpi=100)
+        bins = np.linspace(0.0, max_dist, 51)
+        counts, edges = np.histogram(data, bins=bins)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        denom = max_dist - 0.0
+        if denom <= 0:
+            denom = 1.0
+        normalized = np.clip((centers - 0.0) / denom, 0.0, 1.0)
+        rgba = plt.get_cmap("inferno")(normalized)
+        ax.bar(
+            edges[:-1],
+            counts,
+            width=np.diff(edges),
+            align="edge",
+            color=rgba,
+            linewidth=0,
+        )
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("Distance (mm)", fontsize=9)
+        ax.set_ylabel("Freq", fontsize=9)
+        ax.grid(True, alpha=0.35)
+        fig.tight_layout()
+        fig.canvas.draw()
+        hist_rgba = np.asarray(fig.canvas.renderer.buffer_rgba())
+        plt.close(fig)
+        hist_rgb = cv2.cvtColor(hist_rgba, cv2.COLOR_RGBA2RGB)
+        return cv2.resize(hist_rgb, (w, h), interpolation=cv2.INTER_AREA)
+
+    # Assemble gallery: top = front views (GT, [merged], per-view),
+    # middle = side views, bottom = error histograms (optional).
     top_row_images = [gt_front]
     bottom_row_images = [gt_side]
+    hist_row_images = [np.full_like(gt_front, 255)] if plot_hist else None
     if merged_verts is not None:
         top_row_images.append(merged_front_render)
         bottom_row_images.append(merged_side)
+        if plot_hist:
+            hist_row_images.append(
+                _hist_image(
+                    merged_vertex_dists,
+                    title="Merged hist",
+                    target_hw=merged_side.shape[:2],
+                )
+            )
     for view in range(num_views):
         top_row_images.append(per_view_front[view])
         bottom_row_images.append(per_view_side[view])
+        if plot_hist:
+            hist_row_images.append(
+                _hist_image(
+                    per_view_vertex_dists[view],
+                    title=f"View {view} hist",
+                    target_hw=per_view_side[view].shape[:2],
+                )
+            )
 
     top_row = np.concatenate(top_row_images, axis=1)
     bottom_row = np.concatenate(bottom_row_images, axis=1)
-
-
-    gallery_img = np.concatenate([top_row, bottom_row], axis=0)
+    if plot_hist:
+        hist_row = np.concatenate(hist_row_images, axis=1)
+        gallery_img = np.concatenate([top_row, bottom_row, hist_row], axis=0)
+    else:
+        gallery_img = np.concatenate([top_row, bottom_row], axis=0)
     gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
 
     # Append error-distance colorbar to the right.

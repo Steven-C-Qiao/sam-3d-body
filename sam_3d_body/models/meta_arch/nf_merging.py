@@ -10,6 +10,7 @@ def merge_params_nf(
     num_views,
     num_samples,
 ):
+    
     """
     Importance-sampling merge of multiview shape/scale predictions using NF stage-1 likelihoods.
 
@@ -23,6 +24,9 @@ def merge_params_nf(
     pred_scale_params = mhr_out["scale"].unflatten(0, (bs, num_views))
 
     beta_context = uncertainty_out["flow_context_shape_scale"].unflatten(0, (bs, num_views))
+    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))
+    flow_samples = uncertainty_out["samples"].unflatten(0, (bs, num_views))
+    beta_residual_samples = flow_samples[..., -nf_head.shape_scale_dim :]
     shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
     scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
 
@@ -43,11 +47,33 @@ def merge_params_nf(
                 dim=-1,
             )  # [S, 55]
 
+            # # Debug self-consistency:
+            # # Use the exact sampled stage-1 residuals from uncertainty_out["samples"].
+            # # This avoids reconstruction mismatch from absolute samples and means.
+            # residual_i = beta_residual_samples[b, i]  # [S, 55]
+            # context_i = beta_context[b, i].unsqueeze(0).expand(S, -1)  # [S, 2048]
+            # logp_i_recomputed, _ = nf_head.flow_shape_scale.log_prob(
+            #     inputs=residual_i, context=context_i
+            # )
+            # logp_i_ref = beta_log_prob_ref[b, i]  # [S]
+            # max_abs_diff = (logp_i_recomputed - logp_i_ref).abs().max()
+            # if max_abs_diff > 1e-5:
+            #     diff = logp_i_recomputed - logp_i_ref
+            #     print(
+            #         "NF stage-1 log-prob mismatch for self-view. "
+            #         f"b={b}, i={i}, S={S}, "
+            #         f"max_abs_diff={float(max_abs_diff):.6e}, "
+            #         f"mean_abs_diff={float(diff.abs().mean()):.6e}, "
+            #         f"recomputed[min,max]=({float(logp_i_recomputed.min()):.6e}, {float(logp_i_recomputed.max()):.6e}), "
+            #         f"ref[min,max]=({float(logp_i_ref.min()):.6e}, {float(logp_i_ref.max()):.6e})"
+            #     )
+            #     import ipdb; ipdb.set_trace()
+
             # Eq. 18 generalised to multi-view: w ~ Π_{j != i} p(beta | I_j).
             logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
             for j in range(num_views):
-                if j == i:
-                    continue
+                # if j == i:
+                    # continue
                 mean_beta_j = torch.cat(
                     [
                         pred_shape[b, j],  # [45]
@@ -60,17 +86,26 @@ def merge_params_nf(
                 logp_j, _ = nf_head.flow_shape_scale.log_prob(
                     inputs=residual_j, context=context_j
                 )
+
                 logw_i = logw_i + logp_j
+
+                # print(i, j, logp_j)
+            
 
             candidate_beta.append(beta_i)
             candidate_logw.append(logw_i)
 
+            # import ipdb; ipdb.set_trace()
+
         candidate_beta = torch.cat(candidate_beta, dim=0)  # [V*S, 55]
         candidate_logw = torch.cat(candidate_logw, dim=0)  # [V*S]
+
         candidate_w = torch.softmax(candidate_logw, dim=0)  # normalized importance weights
 
         merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)  # [55]
         merged_shape.append(merged_beta[: nf_head.num_shape_comps])
+
+
 
         scale68_merged = pred_scale68[b].mean(dim=0)
         scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]

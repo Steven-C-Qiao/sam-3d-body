@@ -74,7 +74,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         "every_n_epochs": 1,  # Save checkpoint every 5 epochs
         "save_last": True,
         "verbose": True,
-        "monitor": "val_total_loss/dataloader_idx_2",
+        "monitor": "val_total_loss/dataloader_idx_0",
         "mode": "min",
     }
     # 1) Metric-based checkpointing (existing behavior)
@@ -145,7 +145,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         strategy="auto",
         callbacks=checkpoint_callbacks,
         logger=tensorboard_logger,
-        num_sanity_val_steps=num_sanity_val_steps,
+        num_sanity_val_steps=0,
         # precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
         # profiler='simple',
     )

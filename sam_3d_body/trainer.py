@@ -21,7 +21,10 @@ from .data.bedlam_dataset import DatasetHMR as BEDLAMDataset
 from .data.bedlam_dataset import bedlam_collate
 from .data.bedlam_dataset import MultiViewEvaluationDataset
 from .metrics.metrics_tracker import Metrics
-from .metrics.metrics_tracker import multiframe_metrics, print_multiview_metrics
+from .metrics.metrics_tracker import (
+    multiframe_metrics,
+    print_multiview_metrics,
+)
 from .visualization.my_vis import Visualiser, vis_predictions, vis_neutral
 from .visualization.renderer import Renderer
 
@@ -149,6 +152,25 @@ class Trainer(BaseLightningModule):
         loss_dict = self.criterion(outputs, batch)
 
         metrics = self.metrics(outputs, batch)
+
+        # print(outputs["mhr"]["scale_68D"][0])
+        # print(torch.mean(torch.abs(outputs["mhr"]["scale_68D"]), dim=0))
+        # print(torch.std(torch.abs(outputs["mhr"]["scale_68D"]), dim=0))
+
+        # print(torch.mean(torch.abs(batch["scale_params"]), dim=0))
+        # print(torch.std(torch.abs(batch["scale_params"]), dim=0))
+        # print(batch["scale_params"][0])
+
+        # for i in range(68):
+        #     print(i)
+        #     print(self.scale_comps[:,i])
+        # import ipdb; ipdb.set_trace()
+
+        """
+        Actually sam3 original prediction for scale zeros out index 16, or -52
+        We've generated the ground truth with zeroed out index 15 or -53
+        So sam3 allows leg inward bending, but it is small. If we allow this to vary during gt generation, we get too much bending.
+        """
 
         self.log_and_visualise(
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
@@ -628,6 +650,8 @@ class Trainer(BaseLightningModule):
             dataset_name=dataset_name,
         )
 
+        self.model.eval()
+
         all_metrics = defaultdict(list)
 
         for batch_idx, batch in enumerate(dataloader):
@@ -671,9 +695,11 @@ class Trainer(BaseLightningModule):
                 num_views=num_views,
             )
 
-            multiframe_metrics(
+            all_metrics = multiframe_metrics(
                 all_metrics, 
-                outs
+                outs,
+                batch_idx=batch_idx,
+                save_dir=self.vis_save_dir
             )
 
             renderer = Renderer(
@@ -698,11 +724,16 @@ class Trainer(BaseLightningModule):
                 }
             )
 
+            # if batch_idx == 3:
+            #     for k, v in outs['metrics'].items():
+            #         print(k, v)
+            #     import ipdb; ipdb.set_trace()
+
             vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
             vis_neutral(outs, sc=True, save_dir=self.vis_save_dir)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
-            # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir)
+            # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)
 
             # # ---------------------- Cross-view shape visualization ----------------------
             # # Get affine and img_size for cropping (first batch element = first num_views entries)
@@ -729,46 +760,3 @@ class Trainer(BaseLightningModule):
         mean_metrics = print_multiview_metrics(all_metrics, self.vis_save_dir)
 
         return None
-
-
-
-# ============================================================
-# Average Metrics:
-# ============================================================
-# per_view_mpjpe: 0.0240
-# best_per_view_mpjpe: 0.0217
-# avg_mpjpe: 0.0236
-# merged_mpjpe: 0.0199
-# per_view_pve: 0.0255
-# best_per_view_pve: 0.0230
-# avg_pve: 0.0251
-# merged_pve: 0.0209
-# per_view_pampjpe: 0.0193
-# best_per_view_pampjpe: 0.0175
-# avg_pampjpe: 0.0193
-# merged_pampjpe: 0.0102
-# per_view_pvetsc: 0.0185
-# best_per_view_pvetsc: 0.0170
-# avg_pvetsc: 0.0184
-# merged_pvetsc: 0.0112
-# ============================================================
-
-
-# ============================================================
-# per_view_mpjpe: 0.0240
-# best_per_view_mpjpe: 0.0217
-# avg_mpjpe: 0.0236
-# merged_mpjpe: 0.0206
-# per_view_pve: 0.0255
-# best_per_view_pve: 0.0229
-# avg_pve: 0.0251
-# merged_pve: 0.0219
-# per_view_pampjpe: 0.0194
-# best_per_view_pampjpe: 0.0175
-# avg_pampjpe: 0.0193
-# merged_pampjpe: 0.0105
-# per_view_pvetsc: 0.0186
-# best_per_view_pvetsc: 0.0171
-# avg_pvetsc: 0.0184
-# merged_pvetsc: 0.0110
-# ============================================================

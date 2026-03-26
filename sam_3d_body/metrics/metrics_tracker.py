@@ -340,7 +340,9 @@ class Metrics(pl.LightningModule):
 
 def multiframe_metrics(
     all_metrics, 
-    mhr_dict
+    mhr_dict,
+    batch_idx=None,
+    save_dir=None
 ):
     gt_neutral_jcoords = mhr_dict["gt_neutral_jcoords"]
     per_view_neutral_jcoords = mhr_dict["per_view_neutral_jcoords"]
@@ -436,6 +438,61 @@ def multiframe_metrics(
     all_metrics["best_per_view_pvetsc"].append(per_view_pvetsc.min().item())
     all_metrics["avg_pvetsc"].append(avg_pvetsc)
     all_metrics["merged_pvetsc"].append(merged_pvetsc)
+
+    # if batch_idx == 3:
+    #     for k, v in all_metrics.items():
+    #         print(k, v)
+
+    # x = np.linalg.norm(merged_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1) # (B, 18439)
+    # y = np.linalg.norm(pred_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1) # (B, 18439)
+
+    # import matplotlib.pyplot as plt
+    # all_dists_for_color = np.concatenate([x.reshape(-1), y.reshape(-1)])
+    # max_dist = float(all_dists_for_color.max()) if all_dists_for_color.size > 0 else 0.1
+    # if max_dist <= 0:
+    #     max_dist = 0.1
+
+    # bins = np.linspace(0.0, max_dist, 51)
+    # fig, axs = plt.subplots(5, 1, figsize=(6, 15), sharex=True)
+
+    # def plot_hist_inferno(ax, data, *, title: str, alpha: float = 0.7):
+    #     counts, edges = np.histogram(data, bins=bins)
+    #     bin_centers = 0.5 * (edges[:-1] + edges[1:])
+
+    #     # Anchor at 0, exactly matching mesh color normalization.
+    #     denom = max_dist - 0.0
+    #     if denom <= 0:
+    #         denom = 1.0
+    #     normalized = np.clip((bin_centers - 0.0) / denom, 0.0, 1.0)
+    #     cmap = plt.get_cmap("inferno")
+    #     rgba = cmap(normalized)  # (N,4)
+
+    #     ax.bar(
+    #         edges[:-1],
+    #         counts,
+    #         width=np.diff(edges),
+    #         align="edge",
+    #         color=rgba,
+    #         alpha=alpha,
+    #         linewidth=0,
+    #     )
+    #     ax.set_title(title)
+    #     ax.set_ylabel("Frequency")
+    #     ax.grid(True)
+
+    # plot_hist_inferno(axs[0], x[0], title="merged_sc")
+    # for i in range(4):
+    #     plot_hist_inferno(axs[i + 1], y[i], title=f"pred_sc{i}")
+
+    # axs[-1].set_xlabel("Distance")
+    # plt.tight_layout()
+    # hist_path = os.path.join(save_dir, f"b{batch_idx:03d}_error_hist.png")
+    # plt.savefig(hist_path)
+    # print(f"Saved histogram column to {hist_path}")
+    # plt.close()
+
+    # # print(x.shape, y.shape)
+    # # import ipdb; ipdb.set_trace()
 
 
     return all_metrics
