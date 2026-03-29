@@ -194,9 +194,14 @@ if __name__ == "__main__":
 
     if args.plot:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        os.environ["EGL_DEVICE_ID"] = "0"
     if args.gpus is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
         device_ids = list(map(int, args.gpus.split(",")))
+        # EGL (used by pyrender) selects its GPU via EGL_DEVICE_ID, which is
+        # independent of CUDA_VISIBLE_DEVICES and defaults to physical device 0.
+        # Set it explicitly to keep the renderer on the same GPU as training.
+        os.environ["EGL_DEVICE_ID"] = str(device_ids[0])
         logger.info(f"Using GPUs: {args.gpus} (Device IDs: {device_ids})")
 
     run_train(
