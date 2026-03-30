@@ -34,7 +34,6 @@ except:
     MOMENTUM_ENABLED = False
     warnings.warn("Momentum is not enabled")
 
-
 class MHRHead(nn.Module):
     # fmt: off
     def __init__(

@@ -2,7 +2,7 @@
 import numpy as np
 import cv2
 from sam_3d_body.visualization.renderer import Renderer
-from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
+# from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
 
 # Base pastel mesh color (kept for backward compatibility)
@@ -12,8 +12,8 @@ LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
 BLUE = (0.12156863, 0.46666667, 0.70588235)   # strong blue
 ORANGE = (1.0,        0.49803922, 0.05490196) # strong orange
 
-visualizer = SkeletonVisualizer(line_width=2, radius=5)
-visualizer.set_pose_meta(mhr70_pose_info)
+# visualizer = SkeletonVisualizer(line_width=2, radius=5)
+# visualizer.set_pose_meta(mhr70_pose_info)
 
 
 def visualize_sample(img_cv2, outputs, faces):

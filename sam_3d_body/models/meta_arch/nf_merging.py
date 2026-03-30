@@ -1,6 +1,272 @@
+import math
+
 import torch
 
 from sam_3d_body.models.modules.mhr_utils import scale_indices
+
+
+def _psis_smooth_log_weights(log_w: torch.Tensor):
+    """
+    Pareto-Smoothed Importance Sampling (Vehtari et al. 2017).
+
+    Fits a Generalised Pareto Distribution (GPD) to the upper tail of the
+    log-weight distribution, then replaces the tail values with smoothed GPD
+    quantile estimates.  This reduces the variance of IS without changing the
+    point the weights are centred on.
+
+    Args:
+        log_w: 1-D tensor of unnormalised log importance weights [N].
+
+    Returns:
+        log_w_smooth: Smoothed log-weights, same shape as log_w.  Safe to pass
+                      directly to softmax (max-shifted for numerical stability).
+        k: Pareto shape diagnostic (ξ).
+           k < 0.5  → IS reliable
+           0.5–0.7  → marginal; results usable but interpret with care
+           k > 0.7  → IS unreliable; switch to merge_params_nf_gaussian
+    """
+    S = log_w.shape[0]
+    log_w = log_w - log_w.max()  # shift; doesn't affect softmax but aids float32
+
+    # Number of tail samples to fit (Vehtari's recommended heuristic)
+    M = min(int(math.ceil(0.2 * S)), int(math.ceil(3.0 * math.sqrt(S))))
+    M = max(M, 5)  # need enough points for moment matching
+
+    sorted_idx = torch.argsort(log_w)           # ascending
+    u = log_w[sorted_idx[-M]].item()            # threshold = min of top-M
+    z = log_w[sorted_idx[-M:]] - u             # exceedances ≥ 0, shape [M]
+
+    z_bar = z.mean().item()
+    s2 = z.var().item()
+
+    if s2 < 1e-12 or z_bar < 1e-12:
+        # Degenerate tail — cannot fit GPD; return unchanged, signal via k=inf
+        return log_w, float("inf")
+
+    # GPD parameter estimation via method of moments
+    k = 0.5 * (1.0 - z_bar ** 2 / s2)          # shape ξ (= Pareto k diagnostic)
+    sigma = z_bar * (1.0 - k)                   # scale σ
+
+    # Evaluate GPD quantile function at plotting positions p_r = (r-0.5)/M
+    r = torch.arange(1, M + 1, dtype=log_w.dtype, device=log_w.device)
+    p_r = (r - 0.5) / M
+
+    if abs(k) < 1e-6:
+        quantiles = u + sigma * (-torch.log1p(-p_r))          # exponential limit
+    else:
+        quantiles = u + (sigma / k) * (torch.pow(1.0 - p_r, -k) - 1.0)
+
+    # Cap: no smoothed weight should be able to dominate alone (log(S) cap)
+    quantiles = quantiles.clamp(max=math.log(S))
+
+    # Write smoothed values back in the same ascending sorted order
+    log_w_smooth = log_w.clone()
+    log_w_smooth[sorted_idx[-M:]] = quantiles
+
+    return log_w_smooth, k
+
+
+def merge_params_nf_psis(
+    nf_head,
+    mhr_out,
+    uncertainty_out,
+    bs,
+    num_views,
+    num_samples,
+):
+    """
+    IS merge with Pareto-Smoothed Importance Sampling (PSIS; Vehtari et al. 2017).
+
+    Candidate generation is identical to merge_params_nf_is: for each view i,
+    draw samples beta_i^k ~ p(beta|I_i) and compute log-weights
+        log w_i^k = Σ_{j≠i} log p(beta_i^k | I_j).
+
+    Before softmax, the upper tail of the pooled log-weight distribution is
+    replaced by smoothed GPD quantile estimates via _psis_smooth_log_weights.
+    This reduces the variance that causes weight collapse in high dimensions
+    while preserving the IS point estimate.
+
+    A Pareto k diagnostic is computed per batch element and printed when k > 0.5.
+    If k > 0.7 consistently, consider switching to merge_params_nf_gaussian.
+    """
+    S = num_samples
+
+    pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))
+    pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))
+
+    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))
+    shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
+    scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
+    beta_context = uncertainty_out["flow_context_shape_scale"].unflatten(0, (bs, num_views))
+
+    merged_shape = []
+    merged_scale68 = []
+
+    for b in range(bs):
+        candidate_beta = []
+        candidate_logw = []
+
+        for i in range(num_views):
+            beta_i = torch.cat(
+                [shape_samples[b, i], scale68_samples[b, i, :, scale_indices]], dim=-1
+            )  # [S, 55]
+
+            logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
+            for j in range(num_views):
+                if j == i:
+                    continue
+                mean_beta_j = torch.cat(
+                    [pred_shape[b, j], pred_scale68[b, j, scale_indices]], dim=-1
+                )  # [55]
+                residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
+                context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)  # [S, 2048]
+                logp_j, _ = nf_head.flow_shape_scale.log_prob(inputs=residual_j, context=context_j)
+                logw_i = logw_i + logp_j
+
+            candidate_beta.append(beta_i)
+            candidate_logw.append(logw_i)
+
+        candidate_beta = torch.cat(candidate_beta, dim=0)   # [V*S, 55]
+        candidate_logw = torch.cat(candidate_logw, dim=0)   # [V*S]
+
+        # PSIS: smooth the tail before normalising
+        candidate_logw_smooth, k = _psis_smooth_log_weights(candidate_logw)
+        if k > 0.7:
+            print(f"[PSIS] b={b}: k={k:.3f} > 0.7 — IS unreliable; consider merge_params_nf_gaussian")
+        elif k > 0.5:
+            print(f"[PSIS] b={b}: k={k:.3f} > 0.5 — IS marginal")
+
+        candidate_w = torch.softmax(candidate_logw_smooth, dim=0)
+        merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)  # [55]
+
+        merged_shape.append(merged_beta[: nf_head.num_shape_comps])
+        scale68_merged = pred_scale68[b].mean(dim=0).clone()
+        scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        merged_scale68.append(scale68_merged)
+
+    shape_mu_star = torch.stack(merged_shape, dim=0)     # [B, 45]
+    scale_mu_star_full = torch.stack(merged_scale68, dim=0)  # [B, 68]
+
+    shape_avg = pred_shape.mean(dim=1)
+    scale_avg = pred_scale68.mean(dim=1)
+
+    # ------------- per-view best sample (for visualization) -------------
+    best_sample_idx = beta_log_prob_ref.argmax(dim=-1)   # [B, V]
+    idx_shape = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, shape_samples.shape[-1]
+    )
+    idx_scale = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, scale68_samples.shape[-1]
+    )
+    best_shape_per_view = torch.gather(shape_samples, 2, idx_shape).squeeze(2)
+    best_scale_per_view_68D = torch.gather(scale68_samples, 2, idx_scale).squeeze(2)
+
+    return {
+        "avg_shape": shape_avg,
+        "avg_scale": scale_avg,
+        "merged_shape": shape_mu_star,
+        "merged_scale": scale_mu_star_full,
+        "best_logprob_sample_shape": best_shape_per_view,
+        "best_logprob_sample_scale_68D": best_scale_per_view_68D,
+    }
+
+
+def merge_params_nf_tempered(
+    nf_head,
+    mhr_out,
+    uncertainty_out,
+    bs,
+    num_views,
+    num_samples,
+    temperature=None,
+):
+    """
+    IS merge with temperature-scaled log-weights.
+
+    Divides log-weights by `temperature` (default: shape_scale_dim = 55) before
+    softmax.  This is equivalent to weighting by p(beta|I)^{1/T} rather than
+    p(beta|I), which flattens the weight distribution and prevents collapse in
+    high-dimensional spaces.  The per-dimension geometric-mean interpretation
+    (T = D) is the most natural choice.
+
+    A temperature of 1.0 reduces to standard IS (merge_params_nf_is).
+    """
+    T = temperature if temperature is not None else float(nf_head.shape_scale_dim)
+    S = num_samples
+
+    T = 10.0
+
+    pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))
+    pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))
+
+    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))
+    shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
+    scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
+    beta_context = uncertainty_out["flow_context_shape_scale"].unflatten(0, (bs, num_views))
+
+    merged_shape = []
+    merged_scale68 = []
+
+    for b in range(bs):
+        candidate_beta = []
+        candidate_logw = []
+
+        for i in range(num_views):
+            beta_i = torch.cat(
+                [shape_samples[b, i], scale68_samples[b, i, :, scale_indices]], dim=-1
+            )  # [S, 55]
+
+            logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
+            for j in range(num_views):
+                if j == i:
+                    continue
+                mean_beta_j = torch.cat(
+                    [pred_shape[b, j], pred_scale68[b, j, scale_indices]], dim=-1
+                )  # [55]
+                residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
+                context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)
+                logp_j, _ = nf_head.flow_shape_scale.log_prob(inputs=residual_j, context=context_j)
+                logw_i = logw_i + logp_j
+
+            candidate_beta.append(beta_i)
+            candidate_logw.append(logw_i / T)  # temperature scaling
+
+        candidate_beta = torch.cat(candidate_beta, dim=0)   # [V*S, 55]
+        candidate_logw = torch.cat(candidate_logw, dim=0)   # [V*S]
+
+        candidate_w = torch.softmax(candidate_logw, dim=0)
+        merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)
+
+        merged_shape.append(merged_beta[: nf_head.num_shape_comps])
+        scale68_merged = pred_scale68[b].mean(dim=0).clone()
+        scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        merged_scale68.append(scale68_merged)
+
+    shape_mu_star = torch.stack(merged_shape, dim=0)
+    scale_mu_star_full = torch.stack(merged_scale68, dim=0)
+
+    shape_avg = pred_shape.mean(dim=1)
+    scale_avg = pred_scale68.mean(dim=1)
+
+    # ------------- per-view best sample (for visualization) -------------
+    best_sample_idx = beta_log_prob_ref.argmax(dim=-1)
+    idx_shape = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, shape_samples.shape[-1]
+    )
+    idx_scale = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, scale68_samples.shape[-1]
+    )
+    best_shape_per_view = torch.gather(shape_samples, 2, idx_shape).squeeze(2)
+    best_scale_per_view_68D = torch.gather(scale68_samples, 2, idx_scale).squeeze(2)
+
+    return {
+        "avg_shape": shape_avg,
+        "avg_scale": scale_avg,
+        "merged_shape": shape_mu_star,
+        "merged_scale": scale_mu_star_full,
+        "best_logprob_sample_shape": best_shape_per_view,
+        "best_logprob_sample_scale_68D": best_scale_per_view_68D,
+    }
 
 
 def merge_params_nf_is(
@@ -215,6 +481,9 @@ def merge_params_nf_gaussian(
     }
 
 
+_MERGE_METHODS = ("psis", "tempered", "is", "gaussian")
+
+
 def merge_params_nf(
     nf_head,
     mhr_out,
@@ -222,15 +491,28 @@ def merge_params_nf(
     bs,
     num_views,
     num_samples,
+    method: str = "psis",
 ):
-    """Default merge strategy: precision-weighted Gaussian product (see merge_params_nf_gaussian)."""
-    # return merge_params_nf_gaussian(
-    #     nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples
-    # )
+    """
+    Multi-view shape/scale fusion dispatcher.
 
-    return merge_params_nf_is(
-        nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples
-    )
+    Args:
+        method: One of:
+            "psis"     — Pareto-Smoothed IS (default; self-diagnosing, robust)
+            "tempered" — Temperature-scaled IS (T = shape_scale_dim; simple, stable)
+            "gaussian" — Precision-weighted Gaussian product (fastest, no NF calls)
+            "is"       — Raw IS (reference; collapses in practice for D=55)
+    """
+    if method == "psis":
+        return merge_params_nf_psis(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
+    elif method == "tempered":
+        return merge_params_nf_tempered(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
+    elif method == "gaussian":
+        return merge_params_nf_gaussian(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
+    elif method == "is":
+        return merge_params_nf_is(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
+    else:
+        raise ValueError(f"Unknown merge method {method!r}. Choose from {_MERGE_METHODS}.")
 
 
 def get_mhr_outputs(

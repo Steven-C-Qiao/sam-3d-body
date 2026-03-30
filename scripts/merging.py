@@ -30,7 +30,7 @@ CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 CONFIG_PATH = "checkpoints/sam-3d-body-dinov3/model_config.yaml"
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered"):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
@@ -105,7 +105,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
             logger.warning("No model parameters found in checkpoint state_dict!")
             assert False
 
-    results = trainer.run_multiview_prediction(num_view=4, max_batches=20, dataset_name=dataset_name)
+    results = trainer.run_multiview_prediction(num_view=4, max_batches=20, dataset_name=dataset_name, merge_method=merge_method)
 
 
 if __name__ == "__main__":
@@ -145,6 +145,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dev", action="store_true")
     parser.add_argument("--plot", action="store_true")
+    parser.add_argument(
+        "--method",
+        "-M",
+        type=str,
+        default="tempered",
+        help="Merge method: psis (default), tempered, gaussian, is",
+    )
     args = parser.parse_args()
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -164,4 +171,5 @@ if __name__ == "__main__":
         load_path=args.load_from_ckpt,
         dev=args.dev,
         dataset_name=args.dataset_name,
+        merge_method=args.method,
     )

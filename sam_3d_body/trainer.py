@@ -24,6 +24,7 @@ from .metrics.metrics_tracker import Metrics
 from .metrics.metrics_tracker import (
     multiframe_metrics,
     print_multiview_metrics,
+    scale_and_translation_transform_batch,
 )
 from .visualization.my_vis import Visualiser, vis_predictions, vis_neutral
 from .visualization.renderer import Renderer
@@ -41,6 +42,40 @@ if str(project_root) not in sys.path:
 from tools.vis_utils import my_visualize
 from tools.vis_utils import my_visualize_samples
 from tools.vis_utils import view_one_in_another
+
+
+def _write_obj(path, verts, faces):
+    """Write a single mesh to a Wavefront OBJ file (faces are 0-indexed numpy arrays)."""
+    with open(path, "w") as f:
+        for v in verts:
+            f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+        for face in faces:
+            f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+
+
+def export_meshes_for_blender(outs, faces, save_dir, tag="b002"):
+    """
+    Save GT, merged, and per-view-mean-prediction neutral meshes as OBJ files.
+    All prediction meshes are scale-normalised (scale+translation) to match the GT mesh.
+    GT is saved in its original scale as the reference frame.
+    Files are written to save_dir with names: <tag>_gt.obj, <tag>_merged.obj, <tag>_view00.obj, ...
+    """
+    gt_np = outs["gt_neutral_verts"].cpu().numpy()          # [B*V, n_verts, 3]
+    pred_np = outs["per_view_neutral_verts"].cpu().numpy()  # [B*V, n_verts, 3]
+    merged_np = outs["merged_neutral_verts"].cpu().numpy()  # [B*V, n_verts, 3]
+
+    pred_sc = scale_and_translation_transform_batch(pred_np, gt_np)
+    merged_sc = scale_and_translation_transform_batch(merged_np, gt_np)
+
+    # GT: one mesh, same for all views — save view 0
+    _write_obj(os.path.join(save_dir, f"{tag}_gt.obj"), gt_np[0], faces)
+    # Merged: one mesh, same for all views — save view 0
+    _write_obj(os.path.join(save_dir, f"{tag}_merged.obj"), merged_sc[0], faces)
+    # Per-view mean predictions
+    for i in range(pred_sc.shape[0]):
+        _write_obj(os.path.join(save_dir, f"{tag}_view{i:02d}.obj"), pred_sc[i], faces)
+
+    print(f"Saved Blender meshes to {save_dir} (tag={tag})")
 
 
 class Trainer(BaseLightningModule):
@@ -628,6 +663,7 @@ class Trainer(BaseLightningModule):
         num_samples: int = 100,
         max_batches: Optional[int] = 2,
         dataset_name: str = "4d-dress",
+        merge_method: str = "psis",
     ):
         """
         Run MHR predictions for each view loaded by MultiViewEvaluationDataset.
@@ -684,6 +720,7 @@ class Trainer(BaseLightningModule):
                 bs,
                 num_views,
                 num_samples,
+                method=merge_method,
             )
 
             outs = get_mhr_outputs(
@@ -725,13 +762,16 @@ class Trainer(BaseLightningModule):
                 }
             )
 
+            
+            export_meshes_for_blender(outs, self.faces, self.vis_save_dir, tag=f"b{batch_idx:03d}")
+
             # if batch_idx == 3:
             #     for k, v in outs['metrics'].items():
             #         print(k, v)
             #     import ipdb; ipdb.set_trace()
 
-            # vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            # vis_neutral(outs, sc=True, save_dir=self.vis_save_dir)
+            vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
+            vis_neutral(outs, sc=True, save_dir=self.vis_save_dir)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)
