@@ -81,36 +81,54 @@ class NFARHead(nn.Module):
 
         # Stage 1 context: [flow_context, shape_mean, scale_mean_selected]
         context_shape_scale_dim = 1024 + 45 + 10
-        self.context_shape_scale_proj = nn.Linear(context_shape_scale_dim, 2048)
+        self.beta_context_proj = nn.Linear(context_shape_scale_dim, 2048)
 
         # Stage 2 context: [flow_context, shape_sample, scale_sample_selected, aa_3dofs, params_1dofs]
         context_pose_dim = 1024 + 45 + 10 + 39 + 34
-        self.context_pose_proj = nn.Linear(context_pose_dim, 2048)
+        self.pose_context_proj = nn.Linear(context_pose_dim, 2048)
 
         self.register_buffer("initialized_shape_scale", torch.tensor(False))
         self.register_buffer("initialized_pose", torch.tensor(False))
 
     def initialize_actnorm(self, batch: Dict, mean_pred: Dict, flow_context: torch.Tensor):
-        model_params = batch["model_params"]
-        shape_params = batch["shape_params"]
-        flow_params_full = convert_mhr_params_to_flow_params(
-            model_params,
-            shape_params,
+        # Compute GT flow params.
+        gt_flow_params = convert_mhr_params_to_flow_params(
+            batch["model_params"],
+            batch["shape_params"],
             include_global_rot=self.model_glob_rot,
             include_shape=self.model_shape,
             include_scale=self.model_scale,
         )
 
-        # Build mean-based contexts for initialising actnorm.
+        # Compute mean-prediction flow params (mirrors nf_loss.py).
+        mean_pred_flow_params = convert_mhr_params_to_flow_params(
+            torch.cat(
+                [
+                    torch.zeros_like(mean_pred["body_pose"][..., :6]),  # dummy global
+                    mean_pred["body_pose"][..., :130],  # body pose without jaw
+                    mean_pred["scale_68D"],
+                ],
+                dim=-1,
+            ),
+            mean_pred["shape"],
+            include_global_rot=self.model_glob_rot,
+            include_shape=self.model_shape,
+            include_scale=self.model_scale,
+        )
+
+        # Flows are trained on residuals, so initialise with residuals.
+        true_residual = gt_flow_params - mean_pred_flow_params
+        pose_residual = true_residual[..., : self.pose_dim]
+        shape_scale_residual = true_residual[..., self.pose_dim :]
+
         shape_mean = mean_pred["shape"]
         scale_mean = mean_pred["scale_68D"]
         pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
-
         pose_params = self.convert_pose_cont_to_params_for_context(pose_mean_cont)
         aa_3dofs = pose_params["aa_3dofs"]
         params_1dofs = pose_params["params_1dofs"]
 
-        context_shape_scale = self.context_shape_scale_proj(
+        context_shape_scale = self.beta_context_proj(
             torch.cat(
                 [
                     flow_context,
@@ -121,12 +139,18 @@ class NFARHead(nn.Module):
             )
         )
 
-        context_pose = self.context_pose_proj(
+        # Pose context uses GT shape (teacher forcing), mirroring nf_loss.py.
+        shape_residual_true = shape_scale_residual[..., : self.num_shape_comps]
+        scale_residual_true = shape_scale_residual[..., self.num_shape_comps :]
+        shape_sample_true = shape_mean + shape_residual_true
+        scale_sample_selected_true = scale_mean[..., scale_indices] + scale_residual_true
+
+        context_pose = self.pose_context_proj(
             torch.cat(
                 [
                     flow_context,
-                    shape_mean,
-                    scale_mean[..., scale_indices],
+                    shape_sample_true,
+                    scale_sample_selected_true,
                     aa_3dofs,
                     params_1dofs,
                 ],
@@ -134,23 +158,13 @@ class NFARHead(nn.Module):
             )
         )
 
-        # Split flow params for the two flows.
-        shape_scale_params = flow_params_full[..., -self.shape_scale_dim :]
-
-        if self.model_glob_rot:
-            pose_params_flow = flow_params_full[
-                ..., : self.num_glob_rot_comps + self.num_3dof_comps + self.num_1dof_comps
-            ]
-        else:
-            pose_params_flow = flow_params_full[
-                ..., : self.num_3dof_comps + self.num_1dof_comps
-            ]
-
         with torch.no_grad():
-            _, _ = self.flow_shape_scale.log_prob(shape_scale_params, context_shape_scale)
-            _, _ = self.flow_pose.log_prob(pose_params_flow, context_pose)
+            _, _ = self.flow_shape_scale.log_prob(shape_scale_residual, context_shape_scale)
+            _, _ = self.flow_pose.log_prob(pose_residual, context_pose)
             self.initialized_shape_scale |= True
             self.initialized_pose |= True
+
+        print('initialized actnorm')
 
     @autocast("cuda", enabled=False)
     def log_prob(
@@ -207,10 +221,6 @@ class NFARHead(nn.Module):
         """
         Given context and mean predictions, compute residual uncertainty by NF
         sampling needs to be handled here, instead of in model forward
-
-        Args:
-            mean_pred:
-
         """
         if num_samples <= 0:
             num_samples = self.num_samples
@@ -220,9 +230,7 @@ class NFARHead(nn.Module):
         shape_mean = mean_pred["shape"]  # B, 45
         scale_mean = mean_pred["scale_68D"]  # B, 68
 
-        pose_mean_cont = mean_pred["pred_pose_raw"][
-            :, 6:
-        ]  # first 6 are global transl and rot
+        pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:] # glob 
 
         pose_params_mhr = compact_cont_to_model_params_body(pose_mean_cont)
 
@@ -231,7 +239,7 @@ class NFARHead(nn.Module):
         params_1dofs = pose_params["params_1dofs"]  # B, 34
 
         # Stage 1: p(Δβ | c, μβ) — shape+scale residuals.
-        context_shape_scale = self.context_shape_scale_proj(
+        beta_context = self.beta_context_proj(
             torch.cat(
                 [
                     flow_context,
@@ -246,14 +254,40 @@ class NFARHead(nn.Module):
             self.initialize_actnorm(batch, mean_pred=mean_pred, flow_context=flow_context)
             print("Initialised ActNorm")
 
-        shape_scale_samples, log_prob_shape_scale, z_shape_scale = self.flow_shape_scale.sample_and_log_prob(
+        beta_samples, beta_log_prob, beta_z = self.flow_shape_scale.sample_and_log_prob(
             N,
-            context=context_shape_scale,
+            context=beta_context,
         )
 
+        # log_p_recomputed, _ = self.flow_shape_scale.log_prob(
+        #     beta_samples.flatten(0, 1), 
+        #     beta_context.repeat_interleave(N, dim=0))
+        # print(log_p_recomputed[:10])
+        # print(beta_log_prob.flatten(0, 1)[:10])
+
+        # self.eval()
+        # log_p_recomputed, _ = self.flow_shape_scale.log_prob(
+        #     beta_samples.flatten(0, 1), 
+        #     beta_context.repeat_interleave(N, dim=0))
+        # print(log_p_recomputed[:10])
+
+        # print('new samples ')
+
+        # beta_samples, beta_log_prob, beta_z = self.flow_shape_scale.sample_and_log_prob(
+        #     N,
+        #     context=beta_context,
+        # )
+        # log_p_recomputed, _ = self.flow_shape_scale.log_prob(
+        #     beta_samples.flatten(0, 1), 
+        #     beta_context.repeat_interleave(N, dim=0))
+        # print(log_p_recomputed[:10])
+        # print(beta_log_prob.flatten(0, 1)[:10])
+        # import ipdb; ipdb.set_trace()
+        
+
         # shape_scale_samples: [B, N, shape_scale_dim]
-        shape_residual_samples = shape_scale_samples[..., : self.num_shape_comps]
-        scale_residual_samples = shape_scale_samples[..., self.num_shape_comps :]
+        shape_residual_samples = beta_samples[..., : self.num_shape_comps]
+        scale_residual_samples = beta_samples[..., self.num_shape_comps :]
 
         shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1)
         if self.num_shape_comps > 0:
@@ -270,7 +304,7 @@ class NFARHead(nn.Module):
         aa_3dofs_expanded = aa_3dofs.unsqueeze(1).repeat(1, N, 1)
         params_1dofs_expanded = params_1dofs.unsqueeze(1).repeat(1, N, 1)
 
-        context_pose = self.context_pose_proj(
+        context_pose = self.pose_context_proj(
             torch.cat(
                 [
                     flow_context_expanded,
@@ -283,14 +317,14 @@ class NFARHead(nn.Module):
             ).reshape(B * N, -1)
         )
 
-        pose_samples_flat, log_prob_pose_flat, z_pose_flat = self.flow_pose.sample_and_log_prob(
+        pose_samples_flat, pose_log_prob_flat, pose_z_flat = self.flow_pose.sample_and_log_prob(
             1,
             context=context_pose,
         )
 
         # pose_samples_flat: [B * N, 1, pose_dim]
         pose_samples_residual = pose_samples_flat.squeeze(1).reshape(B, N, self.pose_dim)
-        log_prob_pose = log_prob_pose_flat.squeeze(1).reshape(B, N)
+        pose_log_prob = pose_log_prob_flat.squeeze(1).reshape(B, N)
 
         offset = self.num_glob_rot_comps
         pose_3dof_residual_samples = pose_samples_residual[
@@ -315,22 +349,22 @@ class NFARHead(nn.Module):
             aa_3dof_samples, params_1dofs_samples, pose_params_mhr
         )
 
-        log_prob_shape_scale = log_prob_shape_scale.reshape(B, N)
-        log_prob = log_prob_shape_scale + log_prob_pose
+        beta_log_prob = beta_log_prob.reshape(B, N)
+        log_prob = beta_log_prob + pose_log_prob
 
         # Full residual vector in the same ordering as `convert_mhr_params_to_flow_params`.
         # Ordering: [pose_part (glob? + 3dof + 1dof), shape(45), scale(10)].
-        samples = torch.cat([pose_samples_residual, shape_scale_samples], dim=-1)
+        samples = torch.cat([pose_samples_residual, beta_samples], dim=-1)
 
         ret = {
             "log_prob": log_prob,
-            "log_prob_shape_scale": log_prob_shape_scale,
-            "log_prob_pose": log_prob_pose,
+            "log_prob_shape_scale": beta_log_prob,
+            "log_prob_pose": pose_log_prob,
             "samples": samples,
             "shape_samples": shape_samples,
             "scale_samples": scale_samples_68D,
             "pose_samples": pose_samples,
-            "flow_context_shape_scale": context_shape_scale,
+            "flow_context_shape_scale": beta_context,
             "flow_context_pose": context_pose.reshape(B, N, -1),
             "flow_context_raw": flow_context,
         }
