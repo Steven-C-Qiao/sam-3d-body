@@ -1940,6 +1940,7 @@ def vis_neutral(
     save_dir: str = None,
     sc: bool = True,
     plot_hist: bool = True,
+    use_best_by_log_prob: bool = True,
 ):
     generic_cam_t = np.array([0.0, 0.75, 2.5])
     batch_idx = input_dict["batch_idx"]
@@ -1948,7 +1949,15 @@ def vis_neutral(
     renderer = input_dict["neutral_renderer"]
     
     gt_verts = input_dict["gt_neutral_verts"].cpu().detach().numpy()
-    per_view_verts = input_dict["per_view_neutral_verts"].cpu().detach().numpy()
+    using_best_per_view = use_best_by_log_prob and (
+        "per_view_neutral_verts_best" in input_dict
+    )
+    per_view_verts_key = (
+        "per_view_neutral_verts_best"
+        if using_best_per_view
+        else "per_view_neutral_verts"
+    )
+    per_view_verts = input_dict[per_view_verts_key].cpu().detach().numpy()
     merged_verts = input_dict.get("merged_neutral_verts", None)
     if merged_verts is not None:
         merged_verts = merged_verts.cpu().detach().numpy()
@@ -1968,6 +1977,8 @@ def vis_neutral(
         and len(metrics["merged_pvetsc"]) > 0
     ):
         merged_pvetsc = metrics["merged_pvetsc"][-1]
+
+    per_view_pvetsc_render = per_view_pvetsc
 
     if sc:
         per_view_verts = scale_and_translation_transform_batch(
@@ -1990,6 +2001,13 @@ def vis_neutral(
         dist_pv = np.linalg.norm(pv_verts - gt_ref, axis=1) * 1000.0
         per_view_vertex_dists[view] = dist_pv
         all_distances.append(dist_pv)
+
+    if using_best_per_view and per_view_pvetsc_render is not None:
+        # PVETSC is mean L2 distance over vertices (meters). Our distances are in mm.
+        per_view_pvetsc_render = np.array(
+            [per_view_vertex_dists[v].mean() / 1000.0 for v in range(num_views)],
+            dtype=np.float32,
+        )
 
     if merged_verts is not None:
         merged_verts_ref = merged_verts[0]
@@ -2095,7 +2113,7 @@ def vis_neutral(
         blended_side = gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * pv_side_rgb
         side_render = (blended_side * 255.0).clip(0, 255).astype(np.uint8)
 
-        if per_view_pvetsc is not None:
+        if per_view_pvetsc_render is not None:
             metric_config_side_view = {
                 "org": (12, 10 + 2 * text_height + baseline),
                 "fontFace": cv2.FONT_HERSHEY_SIMPLEX,
@@ -2105,7 +2123,7 @@ def vis_neutral(
             }
             cv2.putText(
                 side_render,
-                f"PVE-T-SC: {float(per_view_pvetsc[view]) * 1000.0:.1f} mm",
+                f"PVE-T-SC: {float(per_view_pvetsc_render[view]) * 1000.0:.1f} mm",
                 **metric_config_side_view,
             )
         per_view_side.append(side_render)
