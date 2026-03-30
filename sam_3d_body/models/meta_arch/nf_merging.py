@@ -72,8 +72,8 @@ def merge_params_nf(
             # Eq. 18 generalised to multi-view: w ~ Π_{j != i} p(beta | I_j).
             logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
             for j in range(num_views):
-                # if j == i:
-                    # continue
+                if j == i:
+                    continue
                 mean_beta_j = torch.cat(
                     [
                         pred_shape[b, j],  # [45]
@@ -117,11 +117,29 @@ def merge_params_nf(
     shape_avg = pred_shape.mean(dim=1)
     scale_avg = pred_scale68.mean(dim=1)
 
+    # ------------- per-view best sample (for visualization) -------------
+    # Select the single sample with the highest shape+scale NF log prob per view.
+    # For neutral vertices, this stage-1 shape/scale sample is the relevant uncertainty.
+    best_sample_idx = beta_log_prob_ref.argmax(dim=-1)  # [B, N_view]
+    # Gather the corresponding shape/scale samples (shape/scale samples already include residuals).
+    idx_shape = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, shape_samples.shape[-1]
+    )  # [B, N_view, 1, 45]
+    idx_scale = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, scale68_samples.shape[-1]
+    )  # [B, N_view, 1, 68]
+    best_shape_per_view = torch.gather(shape_samples, 2, idx_shape).squeeze(2)  # [B, N_view, 45]
+    best_scale_per_view_68D = (
+        torch.gather(scale68_samples, 2, idx_scale).squeeze(2)
+    )  # [B, N_view, 68]
+
     return {
         "avg_shape": shape_avg,
         "avg_scale": scale_avg,
         "merged_shape": shape_mu_star,
         "merged_scale": scale_mu_star_full,
+        "best_per_view_shape": best_shape_per_view,
+        "best_per_view_scale_68D": best_scale_per_view_68D,
     }
 
 
@@ -275,6 +293,26 @@ def get_mhr_outputs(
     ret["per_view_neutral_verts"] = per_view_neutral_verts
     ret["per_view_neutral_kp3d"] = per_view_neutral_kp3d
     ret["per_view_neutral_jcoords"] = per_view_neutral_jcoords
+
+    # Also compute per-view "best" neutral prediction based on NF log-prob argmax.
+    # This is meant for visualization only; metrics should still use the mean/regular outputs above.
+    best_per_view_shape = param_dict.get("best_per_view_shape", None)
+    best_per_view_scale_68D = param_dict.get("best_per_view_scale_68D", None)
+    if best_per_view_shape is not None and best_per_view_scale_68D is not None:
+        best_shape_flat = best_per_view_shape.reshape(bs * num_views, -1)
+        best_scale_flat = best_per_view_scale_68D.reshape(bs * num_views, -1)
+        per_view_neutral_best_mhr_output = mhr_head.mhr_forward(
+            shape_params=best_shape_flat,
+            scale_offsets=best_scale_flat,
+            **mhr_zero_inputs,
+            **mhr_output_config,
+        )
+        per_view_neutral_best_verts, per_view_neutral_best_kp3d, per_view_neutral_best_jcoords, _, _ = (
+            per_view_neutral_best_mhr_output
+        )
+        ret["per_view_neutral_verts_best"] = per_view_neutral_best_verts
+        ret["per_view_neutral_kp3d_best"] = per_view_neutral_best_kp3d
+        ret["per_view_neutral_jcoords_best"] = per_view_neutral_best_jcoords
 
     # for k, v in ret.items():
     #     print(k, v.shape)
