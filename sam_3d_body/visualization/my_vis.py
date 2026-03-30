@@ -1950,10 +1950,10 @@ def vis_neutral(
     
     gt_verts = input_dict["gt_neutral_verts"].cpu().detach().numpy()
     using_best_per_view = use_best_by_log_prob and (
-        "per_view_neutral_verts_best" in input_dict
+        "best_logprob_sample_neutral_verts" in input_dict
     )
     per_view_verts_key = (
-        "per_view_neutral_verts_best"
+        "best_logprob_sample_neutral_verts"
         if using_best_per_view
         else "per_view_neutral_verts"
     )

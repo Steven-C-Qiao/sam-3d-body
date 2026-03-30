@@ -2,7 +2,8 @@ import torch
 
 from sam_3d_body.models.modules.mhr_utils import scale_indices
 
-def merge_params_nf(
+
+def merge_params_nf_is(
     nf_head,
     mhr_out,
     uncertainty_out,
@@ -10,12 +11,16 @@ def merge_params_nf(
     num_views,
     num_samples,
 ):
-    
     """
     Importance-sampling merge of multiview shape/scale predictions using NF stage-1 likelihoods.
 
     For proposal view i with samples beta_i^k ~ p(beta|I_i), weight each sample by
     product_{j != i} p(beta_i^k | I_j), and pool over all proposals.
+
+    NOTE: This approach suffers from weight collapse in practice. In the 55D
+    shape+scale space, NF log-probs vary by 100+ nats across samples, so
+    softmax degenerates to one-hot regardless of the number of samples.
+    See merge_params_nf_gaussian for a robust alternative.
     """
     S = num_samples
 
@@ -89,13 +94,8 @@ def merge_params_nf(
 
                 logw_i = logw_i + logp_j
 
-                # print(i, j, logp_j)
-            
-
             candidate_beta.append(beta_i)
             candidate_logw.append(logw_i)
-
-            # import ipdb; ipdb.set_trace()
 
         candidate_beta = torch.cat(candidate_beta, dim=0)  # [V*S, 55]
         candidate_logw = torch.cat(candidate_logw, dim=0)  # [V*S]
@@ -104,8 +104,6 @@ def merge_params_nf(
 
         merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)  # [55]
         merged_shape.append(merged_beta[: nf_head.num_shape_comps])
-
-
 
         scale68_merged = pred_scale68[b].mean(dim=0)
         scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]
@@ -118,10 +116,7 @@ def merge_params_nf(
     scale_avg = pred_scale68.mean(dim=1)
 
     # ------------- per-view best sample (for visualization) -------------
-    # Select the single sample with the highest shape+scale NF log prob per view.
-    # For neutral vertices, this stage-1 shape/scale sample is the relevant uncertainty.
     best_sample_idx = beta_log_prob_ref.argmax(dim=-1)  # [B, N_view]
-    # Gather the corresponding shape/scale samples (shape/scale samples already include residuals).
     idx_shape = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
         bs, num_views, 1, shape_samples.shape[-1]
     )  # [B, N_view, 1, 45]
@@ -138,11 +133,104 @@ def merge_params_nf(
         "avg_scale": scale_avg,
         "merged_shape": shape_mu_star,
         "merged_scale": scale_mu_star_full,
-        "best_per_view_shape": best_shape_per_view,
-        "best_per_view_scale_68D": best_scale_per_view_68D,
+        "best_logprob_sample_shape": best_shape_per_view,
+        "best_logprob_sample_scale_68D": best_scale_per_view_68D,
     }
 
 
+def merge_params_nf_gaussian(
+    nf_head,
+    mhr_out,
+    uncertainty_out,
+    bs,
+    num_views,
+    num_samples,
+):
+    """
+    Multi-view shape/scale fusion via precision-weighted Gaussian product.
+
+    For each view i, the NF samples give an empirical estimate of per-dimension
+    uncertainty (sample variance σ²_ij along each shape/scale dim j).  The fused
+    estimate is the precision-weighted mean:
+
+        μ*_j = (Σ_i σ⁻²_ij · μ_ij) / (Σ_i σ⁻²_ij)
+
+    Views with low variance in a dimension (high certainty about it) contribute
+    more to that dimension's merged value.  This captures the intuition that a
+    frontal image is certain about width but uncertain about depth-related shape
+    parameters, while a side image is complementary.
+
+    This is exact for Gaussian posteriors and avoids the IS weight collapse that
+    occurs in the 55D shape+scale space (see merge_params_nf_is).
+    """
+    S = num_samples
+
+    pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))           # [B, V, 45]
+    pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))     # [B, V, 68]
+
+    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))  # [B, V, S]
+    shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))             # [B, V, S, 45]
+    scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))           # [B, V, S, 68]
+
+    # ---- Precision-weighted Gaussian product ----
+    shape_mu = shape_samples.mean(dim=2)                              # [B, V, 45]
+    shape_var = shape_samples.var(dim=2)                              # [B, V, 45]
+
+    scale_selected_samples = scale68_samples[..., scale_indices]     # [B, V, S, 10]
+    scale_mu = scale_selected_samples.mean(dim=2)                    # [B, V, 10]
+    scale_var = scale_selected_samples.var(dim=2)                    # [B, V, 10]
+
+    shape_prec = 1.0 / (shape_var + 1e-6)                           # [B, V, 45]
+    scale_prec = 1.0 / (scale_var + 1e-6)                           # [B, V, 10]
+
+    shape_mu_star = (shape_prec * shape_mu).sum(dim=1) / shape_prec.sum(dim=1)   # [B, 45]
+    scale_mu_star = (scale_prec * scale_mu).sum(dim=1) / scale_prec.sum(dim=1)  # [B, 10]
+
+    scale_mu_star_full = pred_scale68.mean(dim=1).clone()            # [B, 68]
+    scale_mu_star_full[:, scale_indices] = scale_mu_star
+
+    shape_avg = pred_shape.mean(dim=1)
+    scale_avg = pred_scale68.mean(dim=1)
+
+    # ------------- per-view best sample (for visualization) -------------
+    best_sample_idx = beta_log_prob_ref.argmax(dim=-1)  # [B, N_view]
+    idx_shape = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, shape_samples.shape[-1]
+    )  # [B, N_view, 1, 45]
+    idx_scale = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, scale68_samples.shape[-1]
+    )  # [B, N_view, 1, 68]
+    best_shape_per_view = torch.gather(shape_samples, 2, idx_shape).squeeze(2)  # [B, N_view, 45]
+    best_scale_per_view_68D = (
+        torch.gather(scale68_samples, 2, idx_scale).squeeze(2)
+    )  # [B, N_view, 68]
+
+    return {
+        "avg_shape": shape_avg,
+        "avg_scale": scale_avg,
+        "merged_shape": shape_mu_star,
+        "merged_scale": scale_mu_star_full,
+        "best_logprob_sample_shape": best_shape_per_view,
+        "best_logprob_sample_scale_68D": best_scale_per_view_68D,
+    }
+
+
+def merge_params_nf(
+    nf_head,
+    mhr_out,
+    uncertainty_out,
+    bs,
+    num_views,
+    num_samples,
+):
+    """Default merge strategy: precision-weighted Gaussian product (see merge_params_nf_gaussian)."""
+    # return merge_params_nf_gaussian(
+    #     nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples
+    # )
+
+    return merge_params_nf_is(
+        nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples
+    )
 
 
 def get_mhr_outputs(
@@ -152,6 +240,7 @@ def get_mhr_outputs(
     param_dict,
     bs,
     num_views,
+    uncertainty_out=None,
 ):
     ret = {}
 
@@ -296,23 +385,43 @@ def get_mhr_outputs(
 
     # Also compute per-view "best" neutral prediction based on NF log-prob argmax.
     # This is meant for visualization only; metrics should still use the mean/regular outputs above.
-    best_per_view_shape = param_dict.get("best_per_view_shape", None)
-    best_per_view_scale_68D = param_dict.get("best_per_view_scale_68D", None)
-    if best_per_view_shape is not None and best_per_view_scale_68D is not None:
-        best_shape_flat = best_per_view_shape.reshape(bs * num_views, -1)
-        best_scale_flat = best_per_view_scale_68D.reshape(bs * num_views, -1)
-        per_view_neutral_best_mhr_output = mhr_head.mhr_forward(
+    best_logprob_sample_shape = param_dict.get("best_logprob_sample_shape", None)
+    best_logprob_sample_scale_68D = param_dict.get("best_logprob_sample_scale_68D", None)
+    if best_logprob_sample_shape is not None and best_logprob_sample_scale_68D is not None:
+        best_shape_flat = best_logprob_sample_shape.reshape(bs * num_views, -1)
+        best_scale_flat = best_logprob_sample_scale_68D.reshape(bs * num_views, -1)
+        best_logprob_neutral_out = mhr_head.mhr_forward(
             shape_params=best_shape_flat,
             scale_offsets=best_scale_flat,
             **mhr_zero_inputs,
             **mhr_output_config,
         )
-        per_view_neutral_best_verts, per_view_neutral_best_kp3d, per_view_neutral_best_jcoords, _, _ = (
-            per_view_neutral_best_mhr_output
+        best_logprob_neutral_verts, best_logprob_neutral_kp3d, best_logprob_neutral_jcoords, _, _ = (
+            best_logprob_neutral_out
         )
-        ret["per_view_neutral_verts_best"] = per_view_neutral_best_verts
-        ret["per_view_neutral_kp3d_best"] = per_view_neutral_best_kp3d
-        ret["per_view_neutral_jcoords_best"] = per_view_neutral_best_jcoords
+        ret["best_logprob_sample_neutral_verts"] = best_logprob_neutral_verts
+        ret["best_logprob_sample_neutral_kp3d"] = best_logprob_neutral_kp3d
+        ret["best_logprob_sample_neutral_jcoords"] = best_logprob_neutral_jcoords
+
+    # ------------- neutral samples (all S samples per view) -------------
+    if uncertainty_out is not None:
+        shape_s = uncertainty_out["shape_samples"]   # [B*V, S, 45]
+        scale_s = uncertainty_out["scale_samples"]   # [B*V, S, 68]
+        BV, S, _ = shape_s.shape
+
+        shape_s_flat = shape_s.flatten(0, 1)         # [B*V*S, 45]
+        scale_s_flat = scale_s.flatten(0, 1)         # [B*V*S, 68]
+        mhr_zero_inputs_s = {k: v.repeat_interleave(S, dim=0) for k, v in mhr_zero_inputs.items()}
+
+        sample_neutral_out = mhr_head.mhr_forward(
+            shape_params=shape_s_flat,
+            scale_offsets=scale_s_flat,
+            **mhr_zero_inputs_s,
+            **mhr_output_config,
+        )
+        sample_neutral_verts, _, sample_neutral_jcoords, _, _ = sample_neutral_out
+        ret["sample_neutral_verts"] = sample_neutral_verts.reshape(BV, S, *sample_neutral_verts.shape[1:])
+        ret["sample_neutral_jcoords"] = sample_neutral_jcoords.reshape(BV, S, *sample_neutral_jcoords.shape[1:])
 
     # for k, v in ret.items():
     #     print(k, v.shape)

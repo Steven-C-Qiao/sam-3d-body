@@ -414,6 +414,73 @@ def multiframe_metrics(
     # print(merged_pvetsc)
     # import ipdb; ipdb.set_trace()
 
+    # ---------------- best NF sample by log-prob (per-view argmax of stage-1 log-prob) ----------------
+    best_logprob_sample_mpjpe = best_logprob_sample_pve = best_logprob_sample_pampjpe = best_logprob_sample_pvetsc = None
+    if "best_logprob_sample_neutral_verts" in mhr_dict:
+        best_logprob_neutral_verts = mhr_dict["best_logprob_sample_neutral_verts"]
+        best_logprob_neutral_jcoords = mhr_dict["best_logprob_sample_neutral_jcoords"]
+
+        best_logprob_sample_mpjpe = torch.sqrt(((best_logprob_neutral_jcoords - gt_neutral_jcoords) ** 2).sum(dim=-1)).mean(dim=1)
+        best_logprob_sample_pve = torch.sqrt(((best_logprob_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)).mean(dim=1)
+
+        best_logprob_sample_pampjpe, _ = reconstruction_error(
+            best_logprob_neutral_jcoords.cpu().detach().numpy(),
+            gt_neutral_jcoords.cpu().detach().numpy(),
+            reduction="none",
+        )
+        best_logprob_sample_pampjpe = best_logprob_sample_pampjpe.mean(axis=-1)
+
+        best_logprob_sc = scale_and_translation_transform_batch(
+            best_logprob_neutral_verts.cpu().detach().numpy(),
+            gt_neutral_verts.cpu().detach().numpy(),
+        )
+        best_logprob_sample_pvetsc = np.linalg.norm(
+            best_logprob_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+        ).mean(axis=1)
+
+    # ---------------- avg / oracle-best over all NF samples ----------------
+    avg_sample_mpjpe = avg_sample_pve = avg_sample_pampjpe = avg_sample_pvetsc = None
+    best_metric_sample_mpjpe = best_metric_sample_pve = best_metric_sample_pampjpe = best_metric_sample_pvetsc = None
+    if "sample_neutral_verts" in mhr_dict:
+        sample_verts = mhr_dict["sample_neutral_verts"]    # [B*V, S, n_verts, 3]
+        sample_jcoords = mhr_dict["sample_neutral_jcoords"] # [B*V, S, n_joints, 3]
+        BV, S = sample_verts.shape[:2]
+
+        gt_verts_exp = gt_neutral_verts.unsqueeze(1)        # [B*V, 1, n_verts, 3]
+        gt_jcoords_exp = gt_neutral_jcoords.unsqueeze(1)    # [B*V, 1, n_joints, 3]
+
+        # per-sample pve/mpjpe: [B*V, S]
+        sample_pve_per_s = torch.sqrt(((sample_verts - gt_verts_exp) ** 2).sum(dim=-1)).mean(dim=2)
+        sample_mpjpe_per_s = torch.sqrt(((sample_jcoords - gt_jcoords_exp) ** 2).sum(dim=-1)).mean(dim=2)
+        avg_sample_pve = sample_pve_per_s.mean(dim=1)
+        avg_sample_mpjpe = sample_mpjpe_per_s.mean(dim=1)
+        best_metric_sample_pve = sample_pve_per_s.min(dim=1).values
+        best_metric_sample_mpjpe = sample_mpjpe_per_s.min(dim=1).values
+
+        sample_verts_flat = sample_verts.reshape(BV * S, *sample_verts.shape[2:])
+        sample_jcoords_flat = sample_jcoords.reshape(BV * S, *sample_jcoords.shape[2:])
+        gt_verts_tiled = gt_neutral_verts.unsqueeze(1).expand(-1, S, -1, -1).reshape(BV * S, *gt_neutral_verts.shape[1:])
+        gt_jcoords_tiled = gt_neutral_jcoords.unsqueeze(1).expand(-1, S, -1, -1).reshape(BV * S, *gt_neutral_jcoords.shape[1:])
+
+        sample_pampjpe_flat, _ = reconstruction_error(
+            sample_jcoords_flat.cpu().detach().numpy(),
+            gt_jcoords_tiled.cpu().detach().numpy(),
+            reduction="none",
+        )
+        sample_pampjpe_per_s = sample_pampjpe_flat.mean(axis=-1).reshape(BV, S)
+        avg_sample_pampjpe = sample_pampjpe_per_s.mean(axis=1)
+        best_metric_sample_pampjpe = sample_pampjpe_per_s.min(axis=1)
+
+        sample_sc_flat = scale_and_translation_transform_batch(
+            sample_verts_flat.cpu().detach().numpy(),
+            gt_verts_tiled.cpu().detach().numpy(),
+        )
+        sample_pvetsc_per_s = np.linalg.norm(
+            sample_sc_flat - gt_verts_tiled.cpu().detach().numpy(), axis=-1
+        ).mean(axis=1).reshape(BV, S)
+        avg_sample_pvetsc = sample_pvetsc_per_s.mean(axis=1)
+        best_metric_sample_pvetsc = sample_pvetsc_per_s.min(axis=1)
+
     print(f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {avg_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}")
     print(f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {avg_pve.mean():.4f}, merged: {merged_pve.mean():.4f}")
     print(f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {avg_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}")
@@ -438,6 +505,22 @@ def multiframe_metrics(
     all_metrics["best_per_view_pvetsc"].append(per_view_pvetsc.min().item())
     all_metrics["avg_pvetsc"].append(avg_pvetsc)
     all_metrics["merged_pvetsc"].append(merged_pvetsc)
+
+    if best_logprob_sample_mpjpe is not None:
+        all_metrics["best_logprob_sample_mpjpe"].append(best_logprob_sample_mpjpe)
+        all_metrics["best_logprob_sample_pve"].append(best_logprob_sample_pve)
+        all_metrics["best_logprob_sample_pampjpe"].append(best_logprob_sample_pampjpe)
+        all_metrics["best_logprob_sample_pvetsc"].append(best_logprob_sample_pvetsc)
+
+    if avg_sample_mpjpe is not None:
+        all_metrics["avg_sample_mpjpe"].append(avg_sample_mpjpe)
+        all_metrics["avg_sample_pve"].append(avg_sample_pve)
+        all_metrics["avg_sample_pampjpe"].append(avg_sample_pampjpe)
+        all_metrics["avg_sample_pvetsc"].append(avg_sample_pvetsc)
+        all_metrics["best_pve_sample_pve"].append(best_metric_sample_pve)
+        all_metrics["best_mpjpe_sample_mpjpe"].append(best_metric_sample_mpjpe)
+        all_metrics["best_pampjpe_sample_pampjpe"].append(best_metric_sample_pampjpe)
+        all_metrics["best_pvetsc_sample_pvetsc"].append(best_metric_sample_pvetsc)
 
     # if batch_idx == 3:
     #     for k, v in all_metrics.items():

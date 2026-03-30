@@ -693,6 +693,7 @@ class Trainer(BaseLightningModule):
                 batch=batch,
                 bs=bs,
                 num_views=num_views,
+                uncertainty_out=uncertainty_out,
             )
 
             all_metrics = multiframe_metrics(
@@ -729,8 +730,8 @@ class Trainer(BaseLightningModule):
             #         print(k, v)
             #     import ipdb; ipdb.set_trace()
 
-            vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            vis_neutral(outs, sc=True, save_dir=self.vis_save_dir)
+            # vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
+            # vis_neutral(outs, sc=True, save_dir=self.vis_save_dir)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)

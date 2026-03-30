@@ -10,6 +10,18 @@ source /home/mifs/cq244/miniconda3/etc/profile.d/conda.sh && conda activate proh
 
 **Why `source ~/.bashrc` doesn't work:** `.bashrc` exits early for non-interactive shells (line 6-9 `case $-`), so conda never gets initialised. Source `conda.sh` directly instead.
 
+
+To run a test training experiment:
+```
+python scripts/train.py -E exp/exp_claude_test --gpus 0 --dev
+```
+
+To run a test merging experiment:
+```
+python scripts/merging.py -E exp/exp_claude_merge --gpus 0 -D 4d-dress -L exp/exp_040_ar_fix_legs/saved_models/val_loss_epoch=021.ckpt
+```
+
+
 ## GPU Usage
 
 This is a shared cluster. Always prioritise GPUs 0 and 1 for any runs. Set this via:
