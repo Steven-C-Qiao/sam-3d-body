@@ -182,7 +182,7 @@ class Trainer(BaseLightningModule):
         self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
 
     def training_step(self, batch: Dict, batch_idx: int):
-        torch.autograd.set_detect_anomaly(True)
+        
         batch = self.preprocess(batch)
 
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
@@ -191,32 +191,13 @@ class Trainer(BaseLightningModule):
 
         metrics = self.metrics(outputs, batch)
 
-        # print(outputs["mhr"]["scale_68D"][0])
-        # print(torch.mean(torch.abs(outputs["mhr"]["scale_68D"]), dim=0))
-        # print(torch.std(torch.abs(outputs["mhr"]["scale_68D"]), dim=0))
-
-        # print(torch.mean(torch.abs(batch["scale_params"]), dim=0))
-        # print(torch.std(torch.abs(batch["scale_params"]), dim=0))
-        # print(batch["scale_params"][0])
-
-        # for i in range(68):
-        #     print(i)
-        #     print(self.scale_comps[:,i])
-        # import ipdb; ipdb.set_trace()
-
-        """
-        Actually sam3 original prediction for scale zeros out index 16, or -52
-        We've generated the ground truth with zeroed out index 15 or -53
-        So sam3 allows leg inward bending, but it is small. If we allow this to vary during gt generation, we get too much bending.
-        """
-
         self.log_and_visualise(
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
         )
 
-        for k, v in loss_dict.items():
-            print(f"{k}: {v.item():.3f}", end=" ")
-        print("")
+        # for k, v in loss_dict.items():
+        #     print(f"{k}: {v.item():.3f}", end=" ")
+        # print("")
         # for k, v in metrics.items():
         #     print(f"{k}: {v:.4f}", end=" ")
         # print("")

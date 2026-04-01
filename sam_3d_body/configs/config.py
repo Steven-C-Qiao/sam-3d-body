@@ -31,6 +31,7 @@ _C.MODEL.MODEL_SHAPE = True
 _C.MODEL.MODEL_SCALE = True
 _C.MODEL.NUM_SAMPLES = 10
 _C.MODEL.HEAD_TYPE = "nf_ar"
+_C.MODEL.FLOW_COUPLING = "additive"
 
 
 _C.LOSS = CfgNode()
