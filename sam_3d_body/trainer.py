@@ -214,9 +214,9 @@ class Trainer(BaseLightningModule):
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
         )
 
-        # for k, v in loss_dict.items():
-        #     print(f"{k}: {v.item():.3f}", end=" ")
-        # print("")
+        for k, v in loss_dict.items():
+            print(f"{k}: {v.item():.3f}", end=" ")
+        print("")
         # for k, v in metrics.items():
         #     print(f"{k}: {v:.4f}", end=" ")
         # print("")

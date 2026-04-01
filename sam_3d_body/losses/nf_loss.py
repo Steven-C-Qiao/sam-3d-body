@@ -111,13 +111,17 @@ class Loss(pl.LightningModule):
             kp2d_loss = kp2d_loss * visibility
             # kp2d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
 
-            loss_kp2d_samples = kp2d_loss.mean()
+            if getattr(self.cfg.LOSS, "KP2D_BEST_OF_N", False):
+                # Penalise only the closest sample to GT; allow others to be diverse
+                loss_kp2d_samples = kp2d_loss.mean(dim=-1).min(dim=1)[0].mean()
+            else:
+                loss_kp2d_samples = kp2d_loss.mean()
 
             loss_dict["loss_kp2d_samples"] = (
                 self.cfg.LOSS.KP2D_WEIGHT * loss_kp2d_samples
             )
 
-        if self.cfg.LOSS.KP3D_WEIGHT > 0:
+        if self.cfg.LOSS.KP3D_WEIGHT > 0 and getattr(self.cfg.LOSS, "KP3D_ON_SAMPLES", True):
             pred_kp3d_samples = predictions["kp3d_samples"]
             num_samples = pred_kp3d_samples.shape[1]
 
@@ -186,6 +190,13 @@ class Loss(pl.LightningModule):
             # Keep the GT-residual log probability for visualization/analysis.
             # This is the log p(gt_residual | context) before weighting.
             loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
+
+        entropy_weight = getattr(self.cfg.LOSS, "ENTROPY_WEIGHT", 0.0)
+        if entropy_weight > 0:
+            # Reward diversity by maximising variance of samples in parameter space
+            samples = predictions["uncertainty_output"]["samples"]  # [B, N, D]
+            entropy_bonus = samples.var(dim=1).mean()
+            loss_dict["loss_entropy"] = -entropy_weight * entropy_bonus
 
         if self.cfg.LOSS.PARAM_L2_WEIGHT > 0:
             param_l2_loss = self.mse_loss(

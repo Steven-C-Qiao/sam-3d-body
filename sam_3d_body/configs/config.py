@@ -39,10 +39,14 @@ _C.LOSS.SCALE_PARAM_WEIGHT = 0.0
 _C.LOSS.POSE_PARAM_WEIGHT = 0.0
 _C.LOSS.JOINTS_3D_WEIGHT = 0.0
 _C.LOSS.JOINTS_2D_WEIGHT = 0.0
-_C.LOSS.KP2D_WEIGHT = 0.0 # 200.0
-_C.LOSS.KP3D_WEIGHT = 0.0 # 50.0
+_C.LOSS.KP2D_WEIGHT = 200.0
+_C.LOSS.KP3D_WEIGHT = 0.1
 _C.LOSS.PARAM_NLL_WEIGHT = 0.005
 _C.LOSS.PARAM_L2_WEIGHT = 0.0
+# Diversity options (all default to existing behaviour when off)
+_C.LOSS.KP3D_ON_SAMPLES = True    # False: skip KP3D loss on NF samples entirely
+_C.LOSS.KP2D_BEST_OF_N = True    # True: penalise only the closest sample to GT (min-over-N)
+_C.LOSS.ENTROPY_WEIGHT = 0.01      # >0: add sample-variance entropy bonus to encourage diversity
 
 # Dataset hparams
 _C.DATASET = CfgNode()

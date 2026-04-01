@@ -10,17 +10,17 @@ source /home/mifs/cq244/miniconda3/etc/profile.d/conda.sh && conda activate proh
 
 **Why `source ~/.bashrc` doesn't work:** `.bashrc` exits early for non-interactive shells (line 6-9 `case $-`), so conda never gets initialised. Source `conda.sh` directly instead.
 
-
 To run a test training experiment:
+
 ```
 python scripts/train.py -E exp/exp_claude_test --gpus 0 --dev
 ```
 
 To run a test merging experiment:
-```
-python scripts/merging.py -E exp/exp_claude_merge --gpus 0 -D 4d-dress -L exp/exp_040_ar_fix_legs/saved_models/val_loss_epoch=021.ckpt
-```
 
+```
+python scripts/merging.py -E exp/<exp_test> --gpus 0 -D 4d-dress -L exp/<EXP_NAME>/saved_models/last.ckpt
+```
 
 ## GPU Usage
 
@@ -37,6 +37,7 @@ SAM 3D Body reconstructs full 3D human body meshes (pose, shape, camera) from a 
 ## Research Focus: Probabilistic Uncertainty via Normalising Flows
 
 The core research extends SAM 3D Body with a **conditional normalising flow** that models uncertainty over MHR body parameters. This enables:
+
 1. Per-image probability distributions over pose and shape (not just point estimates)
 2. Multi-view fusion via importance sampling
 
@@ -45,11 +46,13 @@ The core research extends SAM 3D Body with a **conditional normalising flow** th
 The flow (`NFARHead`) operates on **residuals** (GT minus mean prediction) and is factorised into two sequential stages:
 
 **Stage 1 — Shape & Scale:** `p(Δβ | c, μβ)`
+
 - Models residuals over 45 shape + 10 scale parameters
 - Context: `[flow_context (1024D), shape_mean (45D), scale_mean_selected (10D)]` → projected to 2048D via `beta_context_proj`
 - Flow: `ConditionalGlow` with 4 layers, 1024 hidden features
 
 **Stage 2 — Pose (autoregressive on shape):** `p(Δθ | c, μθ, Δβ)`
+
 - Models residuals over 39 3-DOF joint angles + 34 1-DOF joint angles (hands excluded)
 - Context: `[flow_context, shape_sample, scale_sample, aa_3dofs, params_1dofs]` → projected to 2048D via `pose_context_proj`
 - Conditioned on the *sampled* shape from stage 1, capturing shape-pose correlation
@@ -69,26 +72,32 @@ For the `nf_ar` head type, the true shape residual is used to build the stage-2 
 At test time with multiple views of the same subject, shape/scale predictions are fused using the NF stage-1 likelihoods as importance weights:
 
 For each view `i`, draw samples `β_i^k ~ p(β | I_i)`. Weight by likelihood under all other views:
+
 ```
 w_i^k ∝ ∏_{j ≠ i} p(β_i^k | I_j)
 ```
+
 Merged shape `β*` = importance-weighted mean over all `V × S` candidates (softmax weights).
 
 **Only shape and scale are merged** — pose is view-dependent and kept per-view.
 
 ### Key Design Choices
+
 - Flows operate on **residuals from the mean prediction**, not absolute parameters — keeps the flow's job tractable
 - Shape/scale factored before pose — shape is view-invariant, pose is not
 - `EGL_DEVICE_ID` must match `CUDA_VISIBLE_DEVICES` (set in `scripts/train.py`) to keep pyrender on the training GPU
 
 ## Key Files
 
-| File | Role |
-|------|------|
-| `sam_3d_body/models/heads/prohmr_ar_head.py` | Factorised autoregressive NF head (NFARHead) |
-| `sam_3d_body/models/meta_arch/nf_merging.py` | Multi-view IS merging + MHR output computation |
-| `sam_3d_body/losses/nf_loss.py` | NLL training loss for the NF head |
-| `sam_3d_body/trainer.py` | PyTorch Lightning training loop, visualisation, multi-view eval |
-| `sam_3d_body/models/meta_arch/sam3d_body.py` | Core model architecture |
-| `sam_3d_body/visualization/renderer.py` | pyrender-based mesh renderer (EGL offscreen) |
-| `scripts/train.py` | Training entry point (`--gpus`, `--dev`, `--plot` flags) |
+
+| File                                         | Role                                                            |
+| -------------------------------------------- | --------------------------------------------------------------- |
+| `sam_3d_body/models/heads/prohmr_ar_head.py` | Factorised autoregressive NF head (NFARHead)                    |
+| `sam_3d_body/models/meta_arch/nf_merging.py` | Multi-view IS merging + MHR output computation                  |
+| `sam_3d_body/losses/nf_loss.py`              | NLL training loss for the NF head                               |
+| `sam_3d_body/trainer.py`                     | PyTorch Lightning training loop, visualisation, multi-view eval |
+| `sam_3d_body/models/meta_arch/sam3d_body.py` | Core model architecture                                         |
+| `sam_3d_body/visualization/renderer.py`      | pyrender-based mesh renderer (EGL offscreen)                    |
+| `scripts/train.py`                           | Training entry point (`--gpus`, `--dev`, `--plot` flags)        |
+
+

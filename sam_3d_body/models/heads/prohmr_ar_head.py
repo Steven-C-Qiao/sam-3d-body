@@ -259,31 +259,6 @@ class NFARHead(nn.Module):
             context=beta_context,
         )
 
-        # log_p_recomputed, _ = self.flow_shape_scale.log_prob(
-        #     beta_samples.flatten(0, 1), 
-        #     beta_context.repeat_interleave(N, dim=0))
-        # print(log_p_recomputed[:10])
-        # print(beta_log_prob.flatten(0, 1)[:10])
-
-        # self.eval()
-        # log_p_recomputed, _ = self.flow_shape_scale.log_prob(
-        #     beta_samples.flatten(0, 1), 
-        #     beta_context.repeat_interleave(N, dim=0))
-        # print(log_p_recomputed[:10])
-
-        # print('new samples ')
-
-        # beta_samples, beta_log_prob, beta_z = self.flow_shape_scale.sample_and_log_prob(
-        #     N,
-        #     context=beta_context,
-        # )
-        # log_p_recomputed, _ = self.flow_shape_scale.log_prob(
-        #     beta_samples.flatten(0, 1), 
-        #     beta_context.repeat_interleave(N, dim=0))
-        # print(log_p_recomputed[:10])
-        # print(beta_log_prob.flatten(0, 1)[:10])
-        # import ipdb; ipdb.set_trace()
-        
 
         # shape_scale_samples: [B, N, shape_scale_dim]
         shape_residual_samples = beta_samples[..., : self.num_shape_comps]
