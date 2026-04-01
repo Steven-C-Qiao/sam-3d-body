@@ -316,7 +316,7 @@ class MultiViewEvaluationDataset(Dataset):
         full_joints = self.data["gtkps"]
         self.keypoints = full_joints[:, :24]
 
-        self.mhr_keypoints_2d = self.data["mhr_keypoints_2d"]
+        # self.mhr_keypoints_2d = self.data["mhr_keypoints_2d"]
 
         # Setup transforms (no augmentation for evaluation)
         input_size = self.options.IMAGE_SIZE
@@ -434,27 +434,47 @@ class MultiViewEvaluationDataset(Dataset):
         scale = self.scale[index].copy()
         center = self.center[index].copy()
         keypoints = self.keypoints[index].copy()
-        mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
-        mhr_keypoints_2d_orig = self.mhr_keypoints_2d[index].copy()
+        # mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
+        # mhr_keypoints_2d_orig = self.mhr_keypoints_2d[index].copy()
 
         sc = 1.0  # No augmentation for evaluation
 
         imgname = os.path.join(self.img_dir, self.imgname[index])
         maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + "_env.png")
+        # try:
+        #     cv_img = read_img(imgname)
+        #     masks = cv2.imread(maskname, 0)
+        # except Exception as E:
+        #     print(E)
+        #     logger.info(f"@{imgname}@ from {self.dataset}")
+        #     # Return None to indicate failure
+        #     return None
+
+        # item["img_ori"] = cv_img
+        # item["mask_ori"] = masks
+        # if "closeup" in self.dataset:
+        #     cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
+        #     masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
+
         try:
             cv_img = read_img(imgname)
-            masks = cv2.imread(maskname, 0)
         except Exception as E:
             print(E)
             logger.info(f"@{imgname}@ from {self.dataset}")
-            # Return None to indicate failure
-            return None
+            cv_img = np.zeros((1280, 720, 3), dtype=np.uint8)
+        if "closeup" in self.dataset:
+            cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
+
+        if os.path.exists(maskname):
+            masks = cv2.imread(maskname, 0)
+            if "closeup" in self.dataset:
+                masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
+        else:
+            h, w = cv_img.shape[:2]
+            masks = np.zeros((h, w), dtype=np.uint8)
 
         item["img_ori"] = cv_img
         item["mask_ori"] = masks
-        if "closeup" in self.dataset:
-            cv_img = cv2.rotate(cv_img, cv2.ROTATE_90_CLOCKWISE)
-            masks = cv2.rotate(masks, cv2.ROTATE_90_CLOCKWISE)
 
         orig_shape = np.array(cv_img.shape)[:2]
         pose = self.pose_cam[index].copy()
@@ -466,7 +486,7 @@ class MultiViewEvaluationDataset(Dataset):
             center=center,
             scale=float(sc * scale),
             bbox_format="xyxy",
-            keypoints_2d=mhr_keypoints_2d,
+            # keypoints_2d=mhr_keypoints_2d,
             mask=masks,
         )
 
@@ -476,30 +496,30 @@ class MultiViewEvaluationDataset(Dataset):
 
         # Extract transformed image and keypoints
         img = data["img"]
-        transformed_keypoints_2d = data["keypoints_2d"]
+        # transformed_keypoints_2d = data["keypoints_2d"]
 
         # Normalize keypoints to [-1, 1]
-        topdown_affine = self.transform.transforms[1]
-        input_size = topdown_affine.input_size
-        if isinstance(input_size, tuple):
-            img_w, img_h = input_size
-        else:
-            img_w = img_h = input_size
+        # topdown_affine = self.transform.transforms[1]
+        # input_size = topdown_affine.input_size
+        # if isinstance(input_size, tuple):
+        #     img_w, img_h = input_size
+        # else:
+        #     img_w = img_h = input_size
 
-        normalized_keypoints = transformed_keypoints_2d.clone()
-        normalized_keypoints[:, 0] = 2.0 * normalized_keypoints[:, 0] / img_w - 1.0
-        normalized_keypoints[:, 1] = 2.0 * normalized_keypoints[:, 1] / img_h - 1.0
+        # normalized_keypoints = transformed_keypoints_2d.clone()
+        # normalized_keypoints[:, 0] = 2.0 * normalized_keypoints[:, 0] / img_w - 1.0
+        # normalized_keypoints[:, 1] = 2.0 * normalized_keypoints[:, 1] / img_h - 1.0
 
-        keypoints_vis = (
-            keypoints[:, 2:3]
-            if keypoints.shape[1] > 2
-            else np.ones((keypoints.shape[0], 1))
-        )
-        if normalized_keypoints.shape[1] == 2:
-            normalized_keypoints = np.hstack(
-                [normalized_keypoints.cpu().numpy(), keypoints_vis]
-            )
-            normalized_keypoints = torch.from_numpy(normalized_keypoints).float()
+        # keypoints_vis = (
+        #     keypoints[:, 2:3]
+        #     if keypoints.shape[1] > 2
+        #     else np.ones((keypoints.shape[0], 1))
+        # )
+        # if normalized_keypoints.shape[1] == 2:
+        #     normalized_keypoints = np.hstack(
+        #         [normalized_keypoints.cpu().numpy(), keypoints_vis]
+        #     )
+        #     normalized_keypoints = torch.from_numpy(normalized_keypoints).float()
 
         item["person_valid"] = torch.ones((1, 1))
 
@@ -533,8 +553,8 @@ class MultiViewEvaluationDataset(Dataset):
 
         item["trans_cam"] = torch.from_numpy(self.trans_cam[index]).float()
         item["cam_ext"] = torch.from_numpy(self.cam_ext[index]).float()
-        item["keypoints_orig"] = torch.from_numpy(mhr_keypoints_2d_orig).float()
-        item["keypoints"] = normalized_keypoints.float()
+        # item["keypoints_orig"] = torch.from_numpy(mhr_keypoints_2d_orig).float()
+        # item["keypoints"] = normalized_keypoints.float()
         item["scale"] = float(sc * scale)
         item["center"] = center.astype(np.float32)
         item["orig_shape"] = orig_shape

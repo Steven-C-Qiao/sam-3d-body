@@ -107,7 +107,8 @@ class PromptableDecoder(nn.Module):
         self._lora_alpha = lora_alpha
         self._lora_dropout = lora_dropout
         self._lora_target_modules = lora_target_modules
-        self._create_lora_layers()
+        if use_lora:
+            self._create_lora_layers()
 
     def forward(
         self,

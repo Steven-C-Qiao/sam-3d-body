@@ -25,7 +25,7 @@ from ..modules import rot6d_to_rotmat
 
 from .base_model import BaseModel
 
-from sam_3d_body.models.sampling import gen_samples
+# from sam_3d_body.models.sampling import gen_samples
 
 logger = get_pylogger(__name__)
 
@@ -70,7 +70,7 @@ class SAM3DBody(BaseModel):
             torch.eye(54).to(self.head_pose.hand_pose_comps.data).float()
         )
 
-        self.head_uncertainty = build_head(self.cfg, "uncertainty")
+        # self.head_uncertainty = build_head(self.cfg, "uncertainty")
         self.nf_head = build_head(self.cfg, self.cfg.MODEL.HEAD_TYPE)
 
         # Initialize pose token with learnable params
@@ -513,14 +513,14 @@ class SAM3DBody(BaseModel):
 
         def token_to_uncertainty_output_fn(tokens, mean_pred=None):
             token = tokens[:, 0]
-            uncertainty_output = self.head_uncertainty(token)
+            # uncertainty_output = self.head_uncertainty(token)
             if mean_pred is not None:
                 nf_output = self.nf_head(
                     token, mean_pred, num_samples=num_samples, batch=batch
                 )
                 return nf_output
             else:
-                return uncertainty_output
+                return None # uncertainty_output
 
 
         kp_token_update_fn = self.keypoint_token_update_fn
@@ -689,7 +689,7 @@ class SAM3DBody(BaseModel):
                 torch.meshgrid(torch.arange(H), torch.arange(W), indexing="xy"), dim=2
             )[None, None, :, :, :]
             .repeat(B, N, 1, 1, 1)
-            .cuda()
+            .to(batch["img"].device)
         )  # B x N x H x W x 2
         meshgrid_xy = (
             meshgrid_xy / batch["affine_trans"][:, :, None, None, [0, 1], [0, 1]]

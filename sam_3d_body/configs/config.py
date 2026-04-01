@@ -55,14 +55,14 @@ _C.DATASET.CROP_FACTOR = 0.0
 _C.DATASET.PIN_MEMORY = True
 _C.DATASET.SHUFFLE_TRAIN = True
 _C.DATASET.TRAIN_DS = 'all'
-_C.DATASET.VAL_DS = 'orbit-archviz-15_static-hdri-bmi'
+_C.DATASET.VAL_DS = 'closeup-suburbb' #'orbit-archviz-15_static-hdri-bmi'
 _C.DATASET.MESH_COLOR = 'pinkish'
 _C.DATASET.DATASETS_AND_RATIOS_FULL = 'static-hdri_agora-bfh_agora-body_zoom-suburbd_closeup-suburba_closeup-suburbb_closeup-suburbc_closeup-suburbd_closeup-gym_zoom-gym_static-gym_static-office_orbit-office_static-hdri-zoomed_pitchup-stadium_pitchdown-stadium_static-hdri-bmi_closeup-suburbb-bmi_closeup-suburbc-bmi_static-suburbd-bmi_zoom-gym-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-15_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
 _C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_agora-bfh_agora-body_zoom-suburbd_closeup-suburba_closeup-suburbb_closeup-suburbc_closeup-suburbd_closeup-gym_zoom-gym_static-gym_static-office_orbit-office_static-hdri-zoomed_pitchup-stadium_pitchdown-stadium_closeup-suburbb-bmi_closeup-suburbc-bmi_static-suburbd-bmi_zoom-gym-bmi_static-office-hair_zoom-suburbd-hair_static-gym-hair_orbit-archviz-19_orbit-archviz-12_orbit-archviz-10'
 # _C.DATASET.DATASETS_AND_RATIOS = 'closeup-suburba_closeup-suburbb_closeup-suburbc_closeup-suburbd_closeup-gym_closeup-suburbb-bmi_closeup-suburbc-bmi'
 
 _C.DATASET.CROP_PERCENT = 0.8
-_C.DATASET.ALB = True
+_C.DATASET.ALB = False #True
 _C.DATASET.ALB_PROB = 0.5
 _C.DATASET.proj_verts = False
 _C.DATASET.FOCAL_LENGTH = 5000
@@ -217,7 +217,7 @@ DATASET_FOLDERS = {
 }
 
 
-# all_npz_12_training_mhr_fixed to all_npz_12_training_mhr_fixed
+# all_npz_12_training_mhr_fixed to all_npz_12_training_mhr_fixed to all_npz_12_training_mhr_fixed
 DATASET_FILES = [
     {
         '3dpw-test-cam': os.path.join(PATH, 'data/eval_data_parsed/3dpw_test.npz'),

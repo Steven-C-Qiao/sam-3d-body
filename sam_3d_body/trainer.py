@@ -140,6 +140,8 @@ class Trainer(BaseLightningModule):
                 # Freeze all parameters first
                 for param in self.model.parameters():
                     param.requires_grad = False
+            else:
+                assert False 
 
             # Unfreeze LoRA parameters if LoRA is enabled
             lora_param_count = 0
@@ -159,7 +161,7 @@ class Trainer(BaseLightningModule):
 
             # Unfreeze uncertainty parameters
             for param in [
-                self.model.head_uncertainty,
+                # self.model.head_uncertainty,
                 self.model.nf_head,
             ]:
                 for p in param.parameters():
@@ -180,6 +182,7 @@ class Trainer(BaseLightningModule):
         self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
 
     def training_step(self, batch: Dict, batch_idx: int):
+        torch.autograd.set_detect_anomaly(True)
         batch = self.preprocess(batch)
 
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
@@ -763,7 +766,7 @@ class Trainer(BaseLightningModule):
             )
 
             
-            export_meshes_for_blender(outs, self.faces, self.vis_save_dir, tag=f"b{batch_idx:03d}")
+            # export_meshes_for_blender(outs, self.faces, self.vis_save_dir, tag=f"b{batch_idx:03d}")
 
             # if batch_idx == 3:
             #     for k, v in outs['metrics'].items():
@@ -771,7 +774,7 @@ class Trainer(BaseLightningModule):
             #     import ipdb; ipdb.set_trace()
 
             vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            vis_neutral(outs, sc=True, save_dir=self.vis_save_dir)
+            vis_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)

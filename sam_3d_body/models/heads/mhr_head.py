@@ -3,7 +3,7 @@
 import os
 import warnings
 from typing import Optional
-
+from pathlib import Path
 import roma
 import torch
 import torch.nn as nn
@@ -20,19 +20,21 @@ from ..modules.mhr_utils import (
 
 from ..modules.transformer import FFN
 
-MOMENTUM_ENABLED = os.environ.get("MOMENTUM_ENABLED") is None
-try:
-    if MOMENTUM_ENABLED:
-        from mhr.mhr import MHR
+# MOMENTUM_ENABLED = os.environ.get("MOMENTUM_ENABLED") is None
+# try:
+#     if MOMENTUM_ENABLED:
+#         from mhr.mhr import MHR
 
-        MOMENTUM_ENABLED = True
-        warnings.warn("Momentum is enabled")
-    else:
-        warnings.warn("Momentum is not enabled")
-        raise ImportError
-except:
-    MOMENTUM_ENABLED = False
-    warnings.warn("Momentum is not enabled")
+#         MOMENTUM_ENABLED = True
+#         warnings.warn("Momentum is enabled")
+#     else:
+#         warnings.warn("Momentum is not enabled")
+#         raise ImportError
+# except:
+#     MOMENTUM_ENABLED = False
+#     warnings.warn("Momentum is not enabled")
+
+MOMENTUM_ENABLED = False
 
 class MHRHead(nn.Module):
     # fmt: off
@@ -108,6 +110,7 @@ class MHRHead(nn.Module):
         # Load MHR itself
         if MOMENTUM_ENABLED:
             self.mhr = MHR.from_files(
+                folder=Path("/scratch/cq244/MHR/assets"),
                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
                 lod=1,
             )
