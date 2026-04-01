@@ -25,13 +25,17 @@ _C.MODEL.SAMPLE_SHAPE = True
 _C.MODEL.SAMPLE_SCALE = True
 _C.MODEL.SAMPLE_POSE = True 
 _C.MODEL.FULL_COV = True
-_C.MODEL.DECODER.USE_LORA = True
 _C.MODEL.MODEL_GLOB_ROT = True
 _C.MODEL.MODEL_SHAPE = True
 _C.MODEL.MODEL_SCALE = True
+
+##########################################
+_C.MODEL.DECODER.USE_LORA = True
 _C.MODEL.NUM_SAMPLES = 10
 _C.MODEL.HEAD_TYPE = "nf_ar"
-_C.MODEL.FLOW_COUPLING = "additive"
+_C.MODEL.FLOW_COUPLING = "affine" # "additive"
+_C.MODEL.FLOW_NUM_LAYERS = 6 # 4
+_C.MODEL.FLOW_DROPOUT = 0.1 # 0.5
 
 
 _C.LOSS = CfgNode()
@@ -44,10 +48,12 @@ _C.LOSS.KP2D_WEIGHT = 200.0
 _C.LOSS.KP3D_WEIGHT = 0.1
 _C.LOSS.PARAM_NLL_WEIGHT = 0.005
 _C.LOSS.PARAM_L2_WEIGHT = 0.0
-# Diversity options (all default to existing behaviour when off)
+# Diversity options 
 _C.LOSS.KP3D_ON_SAMPLES = True    # False: skip KP3D loss on NF samples entirely
 _C.LOSS.KP2D_BEST_OF_N = True    # True: penalise only the closest sample to GT (min-over-N)
 _C.LOSS.ENTROPY_WEIGHT = 0.01      # >0: add sample-variance entropy bonus to encourage diversity
+##########################################
+
 
 # Dataset hparams
 _C.DATASET = CfgNode()

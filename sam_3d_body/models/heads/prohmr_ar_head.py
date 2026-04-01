@@ -112,20 +112,24 @@ class NFARHead(nn.Module):
         self.shape_scale_dim = self.num_shape_comps + self.num_scale_comps
         self.pose_dim = self.num_glob_rot_comps + self.num_3dof_comps + self.num_1dof_comps
         self.flow_dim = self.pose_dim + self.shape_scale_dim
+        flow_num_layers = cfg.MODEL.FLOW_NUM_LAYERS
+        flow_dropout = cfg.MODEL.FLOW_DROPOUT
 
         flow_config_shape_scale = {
             "flow_dim": self.shape_scale_dim,
-            "num_layers": 4,
+            "num_layers": flow_num_layers,
             "context_features": 2048,
             "layer_hidden_features": 1024,
             "layer_depth": 2,
+            "dropout_probability": flow_dropout,
         }
         flow_config_pose = {
             "flow_dim": self.pose_dim,
-            "num_layers": 4,
+            "num_layers": flow_num_layers,
             "context_features": 2048,
             "layer_hidden_features": 1024,
             "layer_depth": 2,
+            "dropout_probability": flow_dropout,
         }
 
         flow_coupling = getattr(cfg.MODEL, "FLOW_COUPLING", "additive").lower()
@@ -145,6 +149,7 @@ class NFARHead(nn.Module):
             flow_config_shape_scale["layer_hidden_features"],
             flow_config_shape_scale["num_layers"],
             flow_config_shape_scale["layer_depth"],
+            dropout_probability=flow_config_shape_scale["dropout_probability"],
             context_features=flow_config_shape_scale["context_features"],
         )
         self.flow_pose = flow_cls(
@@ -152,6 +157,7 @@ class NFARHead(nn.Module):
             flow_config_pose["layer_hidden_features"],
             flow_config_pose["num_layers"],
             flow_config_pose["layer_depth"],
+            dropout_probability=flow_config_pose["dropout_probability"],
             context_features=flow_config_pose["context_features"],
         )
         self.num_samples = cfg.MODEL.NUM_SAMPLES
