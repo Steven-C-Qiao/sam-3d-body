@@ -108,12 +108,17 @@ class Loss(pl.LightningModule):
 
             kp2d_loss = self.kp2d_loss(pred_kp2d_samples, gt_kp2d)
             kp2d_loss = kp2d_loss.mean(dim=-1)
-            kp2d_loss = kp2d_loss * visibility
+
+            if not getattr(self.cfg.LOSS, "BYPASS_VISIBILITY", False):
+                kp2d_loss = kp2d_loss * visibility
             # kp2d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
 
-            if getattr(self.cfg.LOSS, "KP2D_BEST_OF_N", False):
-                # Penalise only the closest sample to GT; allow others to be diverse
-                loss_kp2d_samples = kp2d_loss.mean(dim=-1).min(dim=1)[0].mean()
+            best_of_n = getattr(self.cfg.LOSS, "KP2D_BEST_OF_N", 0)
+            if best_of_n > 0:
+                # Penalise only the N closest samples to GT; allow others to be diverse
+                per_sample_loss = kp2d_loss.mean(dim=-1)  # (B, num_samples)
+                k = min(best_of_n, num_samples)
+                loss_kp2d_samples = torch.topk(per_sample_loss, k=k, dim=1, largest=False).values.mean()
             else:
                 loss_kp2d_samples = kp2d_loss.mean()
 
@@ -136,7 +141,9 @@ class Loss(pl.LightningModule):
 
             kp3d_loss = self.mse_loss(pred_kp3d_samples, gt_kp3d)
             kp3d_loss = kp3d_loss.mean(dim=-1)
-            kp3d_loss = kp3d_loss * visibility
+            
+            if not getattr(self.cfg.LOSS, "BYPASS_VISIBILITY", False):  
+                kp3d_loss = kp3d_loss * visibility
             # kp3d_loss[..., self.hand_keypoint_indices] *= self.hand_weight
 
             loss_kp3d_samples = kp3d_loss.mean()
@@ -144,7 +151,7 @@ class Loss(pl.LightningModule):
                 self.cfg.LOSS.KP3D_WEIGHT * loss_kp3d_samples
             )
 
-        if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0:
+        if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0 or self.cfg.LOSS.PARAM_L2_WEIGHT > 0:
             """
             Evaluate the gt residual NLL
             """
@@ -179,6 +186,7 @@ class Loss(pl.LightningModule):
 
             true_residual = gt_flow_params - mean_pred_flow_params
 
+        if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0:
             uncertainty_output = predictions["uncertainty_output"]
             num_samples = uncertainty_output["samples"].shape[1]
 
@@ -211,7 +219,7 @@ class Loss(pl.LightningModule):
             v for k, v in loss_dict.items() if k != "total_loss"
         )
         
-        loss_dict["gt_residual_log_prob"] = flow_log_prob.detach()
+        # loss_dict["gt_residual_log_prob"] = flow_log_prob.detach()
 
         if torch.isnan(loss_dict["total_loss"]):
             loss_dict["total_loss"] = torch.zeros_like(loss_dict["total_loss"])

@@ -81,7 +81,7 @@ class DatasetHMR(Dataset):
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
         
-        visibility_path = DATASET_FILES[is_train][dataset].replace('all_npz_12_training_mhr_fixed', 'visibility_labels')
+        visibility_path = DATASET_FILES[is_train][dataset].replace('all_npz_12_training_mhr_conditioned', 'visibility_labels')
         self.visibility = np.load(visibility_path[:-4] + "_visibility_308.npz")["visibility_308"]
         # self.visibility = np.ones((self.data["imgname"].shape[0], 1))
         self.imgname = self.data["imgname"]
@@ -275,7 +275,7 @@ class MultiViewEvaluationDataset(Dataset):
     """
 
     def __init__(
-        self, options, dataset, num_view=4, use_augmentation=False, is_train=False
+        self, options, dataset, num_view=2, use_augmentation=False, is_train=False
     ):
         super(MultiViewEvaluationDataset, self).__init__()
 

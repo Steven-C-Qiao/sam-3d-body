@@ -285,7 +285,7 @@ class D4DressDataset(Dataset):
 
 
 class MultiD4DressDataset(Dataset):
-    def __init__(self, ids=None, cfg=None):
+    def __init__(self, ids=None, cfg=None, num_views=3):
 
         if ids is None:
             ids = [
@@ -299,7 +299,8 @@ class MultiD4DressDataset(Dataset):
                 "00187", "00190",
             ]
         self.cfg = cfg
-        self.num_frames_pp = 4
+        self.num_frames_pp = num_views
+        
         self.lengthen_by = 1
 
         self.body_model = "smplx"
@@ -369,7 +370,7 @@ class MultiD4DressDataset(Dataset):
 
         # Sample cameras
         sampled_cameras = np.random.choice(
-            self.camera_ids, size=self.num_frames_pp, replace=False
+            self.camera_ids, size=self.num_frames_pp, replace=True
         )
 
         # Load camera params

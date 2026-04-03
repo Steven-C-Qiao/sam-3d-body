@@ -239,6 +239,13 @@ class Trainer(BaseLightningModule):
             prog_bar=(prefix == "train_"),
             logger=False,
         )
+        if f"{prefix}spread_invisible_kp3d_samples" in metrics:
+            self.log(
+                "sample_kp3d_diversity_invis",
+                metrics[f"{prefix}spread_invisible_kp3d_samples"],
+                prog_bar=(prefix == "train_"),
+                logger=False,
+            )
 
         self.log(f"{prefix}loss", loss_dict[f"{prefix}total_loss"], prog_bar=True)
         self.log_dict(metrics, sync_dist=True)
@@ -250,7 +257,7 @@ class Trainer(BaseLightningModule):
         if prefix == "train_":
             vis_step = int(self.global_step)
             should_visualize = self.always_visualise or (
-                vis_step in [2, 250, 500, 1000, 2000, 3000, 4000]
+                vis_step in [50, 250, 500, 1000, 2000, 3000, 4000]
                 or (vis_step > 4000 and vis_step % 5000 == 0)
             )
         else:
@@ -449,8 +456,6 @@ class Trainer(BaseLightningModule):
 
         global_rot = batch["model_params"][:, 3:6]
 
-
-
         global_rotmat = roma.euler_to_rotmat("xyz", global_rot)  # B x 3 x 3
         
         if batch["dataset_name"][0] == "4d-dress":
@@ -599,7 +604,7 @@ class Trainer(BaseLightningModule):
 
             logger.info(f"4D-DRESS dataset with num_view={num_view}")
 
-            return MultiD4DressDataset(ids=None, cfg=self.cfg)
+            return MultiD4DressDataset(ids=None, cfg=self.cfg, num_views=num_view)
 
         dataset_names = self.cfg.DATASET.VAL_DS.split("_")
         dataset_name = dataset_names[0]
@@ -754,8 +759,8 @@ class Trainer(BaseLightningModule):
             #         print(k, v)
             #     import ipdb; ipdb.set_trace()
 
-            vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            vis_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False)
+            # vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
+            # vis_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)

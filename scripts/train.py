@@ -71,27 +71,23 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         "dirpath": model_save_dir,
         "filename": "val_loss_{epoch:03d}",
         "save_top_k": 1,
-        "every_n_epochs": 1,  # Save checkpoint every 5 epochs
-        "save_last": True,
+        "every_n_epochs": 1,
+        "save_last": False,
         "verbose": True,
         "monitor": "val_total_loss/dataloader_idx_0",
         "mode": "min",
     }
-    # 1) Metric-based checkpointing (existing behavior)
     checkpoint_callbacks = [ModelCheckpoint(**checkpoint_kwargs)]
 
-    # 2) Periodic step checkpointing (independent of validation metrics)
-    #    Useful for long runs where you want snapshots even if val metrics don't improve.
-    # step_checkpoint_kwargs = {
-    #     "dirpath": model_save_dir,
-    #     "filename": "train_step_{step:08d}",
-    #     "save_top_k": -1,  # save all checkpoints at this interval
-    #     "every_n_train_steps": 5000,
-    #     "save_last": False,
-    #     "verbose": True,
-    #     "monitor": None,
-    # }
-    # checkpoint_callbacks.append(ModelCheckpoint(**step_checkpoint_kwargs))
+    checkpoint_callbacks.append(ModelCheckpoint(
+        dirpath=model_save_dir,
+        filename="last",
+        every_n_epochs=1,
+        save_top_k=1,
+        save_last=False,
+        monitor=None,
+        verbose=False,
+    ))
 
     tensorboard_logger = TensorBoardLogger(exp_dir, name="lightning_logs")
 
@@ -146,6 +142,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         callbacks=checkpoint_callbacks,
         logger=tensorboard_logger,
         num_sanity_val_steps=0,
+        gradient_clip_val=1.0,
         # precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
         # profiler='simple',
     )

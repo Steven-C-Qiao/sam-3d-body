@@ -175,26 +175,6 @@ def pvetsc(pred, gt):
         pred_tpose_vertices_sc - gt, axis=-1
     )  # (bs, 6890)
     
-    # import matplotlib.pyplot as plt
-    # from mpl_toolkits.mplot3d import Axes3D
-
-    # Only plot the first sample for visualization
-    # if pred.ndim == 3 and gt.ndim == 3:
-    #     pred_plot = pred[0]
-    #     gt_plot = gt[0]
-    # else:
-    #     pred_plot = pred
-    #     gt_plot = gt
-
-    # fig = plt.figure()
-    # ax = fig.add_subplot(111, projection='3d')
-    # ax.scatter(pred_plot[:, 0], pred_plot[:, 1], pred_plot[:, 2], c='r', label='pred', alpha=0.6)
-    # ax.scatter(gt_plot[:, 0], gt_plot[:, 1], gt_plot[:, 2], c='b', label='gt', alpha=0.6)
-    # ax.set_title("3D scatter of pred (red) and gt (blue)")
-    # ax.legend()
-    # plt.savefig('pvetsc.png')
-    # plt.close()
-    # import ipdb; ipdb.set_trace()
     return pvet_sc_batch.mean()
 
 
@@ -279,13 +259,13 @@ class Metrics(pl.LightningModule):
 
                 visible_mask = kp_visibility.float()
                 invisible_mask = (~kp_visibility).float()
-                metrics["spread_visible_kp3d"] = (
-                    (per_joint_spread * visible_mask).sum(dim=1) / visible_mask.sum(dim=1)
-                )
-                metrics["spread_invisible_kp3d"] = (
-                    (per_joint_spread * invisible_mask).sum(dim=1)
-                    / invisible_mask.sum(dim=1)
-                )
+                # metrics["spread_visible_kp3d"] = (
+                #     (per_joint_spread * visible_mask).sum(dim=1) / visible_mask.sum(dim=1)
+                # )
+                # metrics["spread_invisible_kp3d"] = (
+                #     (per_joint_spread * invisible_mask).sum(dim=1)
+                #     / invisible_mask.sum(dim=1)
+                # )
 
                 # Sample-wise spread over invisible joints: (B, N)
                 invisible_mask_samples = invisible_mask.unsqueeze(1).expand(-1, N, -1)
