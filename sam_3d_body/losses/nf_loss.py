@@ -199,12 +199,76 @@ class Loss(pl.LightningModule):
             # This is the log p(gt_residual | context) before weighting.
             loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
 
+        # DEPRECATED: raw parameter-space variance. Can be gamed by random noise.
+        # Prefer KP3D_INVISIBLE_SPREAD_WEIGHT instead.
         entropy_weight = getattr(self.cfg.LOSS, "ENTROPY_WEIGHT", 0.0)
         if entropy_weight > 0:
-            # Reward diversity by maximising variance of samples in parameter space
             samples = predictions["uncertainty_output"]["samples"]  # [B, N, D]
             entropy_bonus = samples.var(dim=1).mean()
             loss_dict["loss_entropy"] = -entropy_weight * entropy_bonus
+
+        # Principled diversity: maximise 3D keypoint spread over invisible/occluded joints
+        # only. Cannot be gamed by random noise — visible joints are already constrained
+        # by the 2D keypoint loss; only genuinely ambiguous joints are rewarded for spread.
+        kp3d_spread_weight = getattr(self.cfg.LOSS, "KP3D_INVISIBLE_SPREAD_WEIGHT", 0.0)
+        if kp3d_spread_weight > 0:
+            kp3d_samples = predictions["kp3d_samples"]   # (B, N, J, 3)
+            invisible_mask = (~batch["visibility"].bool()).float()  # (B, J)
+
+            if invisible_mask.sum() > 0:
+                _N = kp3d_samples.shape[1]
+                sample_mean = kp3d_samples.mean(dim=1, keepdim=True)     # (B, 1, J, 3)
+                centered = kp3d_samples - sample_mean                     # (B, N, J, 3)
+                # Squared L2 distances — no sqrt avoids gradient instability at zero
+                dists = (centered ** 2).sum(dim=-1)                       # (B, N, J)
+                invis_n = invisible_mask.unsqueeze(1).expand(-1, _N, -1)  # (B, N, J)
+                spread = (
+                    (dists * invis_n).sum(dim=-1)
+                    / invis_n.sum(dim=-1).clamp(min=1)
+                )  # (B, N)
+                loss_dict["loss_kp3d_invisible_spread"] = -kp3d_spread_weight * spread.mean()
+
+        # Ray-decomposed diversity for visible joints (mode-2 / single-view ambiguity).
+        # Samples are rewarded for spreading along the camera ray (depth direction) and
+        # penalised for spreading perpendicular to the ray (which violates 2D consistency).
+        along_ray_weight = getattr(self.cfg.LOSS, "KP3D_ALONG_RAY_WEIGHT", 0.0)
+        perp_ray_weight  = getattr(self.cfg.LOSS, "KP3D_PERP_RAY_WEIGHT",  0.0)
+        if along_ray_weight > 0 or perp_ray_weight > 0:
+            kp3d_samples = predictions["kp3d_samples"]   # (B, N, J, 3)
+            visible_mask = batch["visibility"].float()   # (B, J)
+
+            if visible_mask.sum() > 0:
+                # Camera translation in body frame — used to compute ray directions.
+                # P_cam = P_body + trans_cam, so the ray from camera to joint is
+                # normalize(gt_kp3d_body + trans_cam).
+                if "cam_ext" in batch:
+                    trans_cam = batch["cam_ext"][:, :3, 3]   # (B, 3) — BEDLAM / 4D-dress
+                else:
+                    trans_cam = batch["trans_cam"]            # (B, 3) — SSP-3D
+                gt_kp3d_cam = batch["keypoints_3d"] + trans_cam.unsqueeze(1)  # (B, J, 3)
+                ray = gt_kp3d_cam / (gt_kp3d_cam.norm(dim=-1, keepdim=True) + 1e-8)  # (B, J, 3)
+
+                _N = kp3d_samples.shape[1]
+                sample_mean = kp3d_samples.mean(dim=1, keepdim=True)   # (B, 1, J, 3)
+                centered = kp3d_samples - sample_mean                   # (B, N, J, 3)
+
+                ray_exp = ray.unsqueeze(1)                              # (B, 1, J, 3)
+                scalar_proj = (centered * ray_exp).sum(dim=-1)          # (B, N, J)
+                perp = centered - scalar_proj.unsqueeze(-1) * ray_exp  # (B, N, J, 3)
+
+                dist_along = scalar_proj ** 2                           # (B, N, J)
+                dist_perp  = (perp ** 2).sum(dim=-1)                    # (B, N, J)
+
+                vis_n = visible_mask.unsqueeze(1).expand(-1, _N, -1)    # (B, N, J)
+                denom = vis_n.sum(dim=-1).clamp(min=1)                  # (B, N)
+
+                if along_ray_weight > 0:
+                    spread_along = ((dist_along * vis_n).sum(dim=-1) / denom).mean()
+                    loss_dict["loss_kp3d_along_ray"] = -along_ray_weight * spread_along
+
+                if perp_ray_weight > 0:
+                    spread_perp = ((dist_perp * vis_n).sum(dim=-1) / denom).mean()
+                    loss_dict["loss_kp3d_perp_ray"] = perp_ray_weight * spread_perp
 
         if self.cfg.LOSS.PARAM_L2_WEIGHT > 0:
             param_l2_loss = self.mse_loss(

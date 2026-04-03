@@ -234,7 +234,151 @@ class Visualiser(pl.LightningModule):
         for k, v in batch.items():
             batch[k] = v.cpu().detach().numpy() if isinstance(v, torch.Tensor) else v
 
+        self.visualise_ray_debug(predictions, batch)
         self.visualise_full(predictions, batch)
+
+    def visualise_ray_debug(self, predictions, batch):
+        """
+        Debug plot: camera rays and NF keypoint samples in the (unflipped) body frame.
+
+        Called BEFORE visualise_full so the keypoints are still in their original
+        coordinate frame, consistent with batch["cam_ext"] / batch["trans_cam"].
+
+        Left panel — 3D scene:
+          • Camera centre (black star)
+          • GT keypoints: blue = visible, red = invisible
+          • Thin rays from camera centre through each visible GT keypoint
+          • NF samples per joint: orange = visible, salmon = invisible
+
+        Right panel — along-ray vs perp-ray scatter (visible joints only):
+          x-axis = along-ray displacement from sample mean  (depth diversity, want large)
+          y-axis = ⊥-ray displacement from sample mean    (2D inconsistency, want small)
+        """
+        if "kp3d_samples" not in predictions:
+            return
+
+        gt_kp3d = batch["keypoints_3d"][0]        # (J, 3) — unflipped body frame
+        visibility = batch["visibility"][0].astype(bool)  # (J,)
+        samples = predictions["kp3d_samples"][0]   # (N, J, 3)
+
+        if "cam_ext" in batch:
+            trans_cam = batch["cam_ext"][0, :3, 3]  # (3,)
+        elif "trans_cam" in batch:
+            trans_cam = batch["trans_cam"][0]        # (3,)
+        else:
+            return  # no camera info available
+
+        # Camera centre in body frame: P_cam = P_body + trans_cam → cam at -trans_cam
+        cam_center = -trans_cam  # (3,)
+
+        # Unit ray from camera centre through each GT joint (in body frame)
+        gt_kp3d_cam = gt_kp3d + trans_cam           # (J, 3) — camera-space coords
+        ray_norms = np.linalg.norm(gt_kp3d_cam, axis=-1, keepdims=True)
+        rays = gt_kp3d_cam / (ray_norms + 1e-8)     # (J, 3) unit vectors
+
+        N = samples.shape[0]
+
+        # Decompose sample spread into along-ray and perpendicular components
+        sample_mean = samples.mean(axis=0)           # (J, 3)
+        centered = samples - sample_mean[None]        # (N, J, 3)
+        scalar_proj = (centered * rays[None]).sum(axis=-1)          # (N, J)
+        perp_vec = centered - scalar_proj[:, :, None] * rays[None]  # (N, J, 3)
+        perp_mag = np.linalg.norm(perp_vec, axis=-1)                # (N, J)
+
+        fig = plt.figure(figsize=(18, 8))
+
+        # ---- LEFT: 3D scene ----
+        ax3d = fig.add_subplot(1, 2, 1, projection="3d")
+
+        # GT vertices as a faint grey body silhouette
+        if "vertices" in batch:
+            verts = batch["vertices"][0]  # (V, 3)
+            # Subsample for speed — 2000 points is plenty
+            idx = np.random.choice(len(verts), size=min(20000, len(verts)), replace=False)
+            vx = verts[idx]
+            ax3d.scatter(
+                vx[:, 0], vx[:, 1], vx[:, 2],
+                color="lightgray", s=1, alpha=0.15, zorder=1,
+            )
+
+        ax3d.scatter(*cam_center, color="black", s=200, marker="*", zorder=10)
+
+        for j in range(len(visibility)):
+            kp = gt_kp3d[j]
+            samps_j = samples[:, j, :]
+            if visibility[j]:
+                ax3d.scatter(*kp, color="blue", s=25, alpha=0.9, zorder=5)
+                # Ray from camera through GT joint, extended 15 % beyond
+                t = np.linspace(0.0, 1.15, 25)
+                ray_pts = cam_center + np.outer(t, kp - cam_center)
+                ax3d.plot(
+                    ray_pts[:, 0], ray_pts[:, 1], ray_pts[:, 2],
+                    color="cornflowerblue", alpha=0.2, linewidth=0.6,
+                )
+                ax3d.scatter(
+                    samps_j[:, 0], samps_j[:, 1], samps_j[:, 2],
+                    color="orange", s=4, alpha=0.25,
+                )
+            else:
+                ax3d.scatter(*kp, color="red", s=25, alpha=0.9, zorder=5)
+                ax3d.scatter(
+                    samps_j[:, 0], samps_j[:, 1], samps_j[:, 2],
+                    color="salmon", s=4, alpha=0.25,
+                )
+
+        # Legend proxies
+        ax3d.scatter([], [], color="black", s=80, marker="*", label="Camera")
+        ax3d.scatter([], [], color="lightgray", s=20, label="GT vertices")
+        ax3d.scatter([], [], color="blue", s=20, label="GT visible")
+        ax3d.scatter([], [], color="red", s=20, label="GT invisible")
+        ax3d.scatter([], [], color="orange", s=15, label="Samples (vis. joint)")
+        ax3d.scatter([], [], color="salmon", s=15, label="Samples (invis. joint)")
+        ax3d.plot([], [], color="cornflowerblue", linewidth=1, label="Camera ray")
+        ax3d.legend(fontsize=7)
+        ax3d.set_xlabel("X")
+        ax3d.set_ylabel("Y")
+        ax3d.set_zlabel("Z")
+        ax3d.set_title("Camera rays & NF samples (body frame)")
+        ax3d.view_init(elev=-5, azim=10 + 180, vertical_axis="y")
+
+        # Fit view to the human body only (not the distant camera centre).
+        # Rays are clipped naturally at the axis limits.
+        body_pts = gt_kp3d
+        mid = (body_pts.max(axis=0) + body_pts.min(axis=0)) / 2.0
+        half = (body_pts.max(axis=0) - body_pts.min(axis=0)).max() / 2.0 + 0.3
+        ax3d.set_xlim(mid[0] - half, mid[0] + half)
+        ax3d.set_ylim(mid[1] - half, mid[1] + half)
+        ax3d.set_zlim(mid[2] - half, mid[2] + half)
+        ax3d.invert_yaxis()
+
+        # ---- RIGHT: along-ray vs perp scatter ----
+        ax2d = fig.add_subplot(1, 2, 2)
+        vis_indices = np.where(visibility)[0]
+        cmap_tab = plt.get_cmap("tab20")
+
+        for ci, j in enumerate(vis_indices):
+            ax2d.scatter(
+                scalar_proj[:, j],
+                perp_mag[:, j],
+                color=cmap_tab(ci % 20),
+                s=10,
+                alpha=0.5,
+                label=f"j{j}",
+            )
+
+        ax2d.axvline(0, color="gray", linewidth=0.5, linestyle="--")
+        ax2d.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+        ax2d.set_xlabel("Along-ray displacement  (depth diversity  ↔  want large)")
+        ax2d.set_ylabel("⊥-ray displacement  (2D inconsistency  ↑  want small)")
+        ax2d.set_title("Sample spread decomposition — visible joints")
+        if len(vis_indices) <= 15:
+            ax2d.legend(fontsize=6, ncol=2)
+
+        plt.tight_layout()
+        filename = self._get_filename("_ray_debug")
+        os.makedirs(self.save_dir, exist_ok=True)
+        plt.savefig(os.path.join(self.save_dir, filename), dpi=120, bbox_inches="tight")
+        plt.close()
 
     def visualise_full(self, predictions, batch):
         batch["keypoints_3d"][..., [1, 2]] *= -1

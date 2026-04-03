@@ -49,11 +49,13 @@ _C.LOSS.KP3D_WEIGHT = 0.01
 _C.LOSS.PARAM_NLL_WEIGHT = 0.0
 _C.LOSS.PARAM_L2_WEIGHT = 0.0
 # Diversity options 
-_C.LOSS.BYPASS_VISIBILITY = True
+_C.LOSS.BYPASS_VISIBILITY = False
 _C.LOSS.KP3D_ON_SAMPLES = True    # Default: True,  False: skip KP3D loss on NF samples entirely
 _C.LOSS.KP2D_BEST_OF_N = False    # Default: False, True: penalise only the closest sample to GT (min-over-N)
-_C.LOSS.ENTROPY_WEIGHT = 1.0      # Default: 0.0,   >0: add sample-variance entropy bonus (DEPRECATED: use KP3D_INVISIBLE_SPREAD_WEIGHT)
-_C.LOSS.KP3D_INVISIBLE_SPREAD_WEIGHT = 0.0  # >0: maximise 3D keypoint spread over invisible joints only
+_C.LOSS.ENTROPY_WEIGHT = 0.0      # Default: 0.0,   >0: add sample-variance entropy bonus (DEPRECATED: use KP3D_INVISIBLE_SPREAD_WEIGHT)
+_C.LOSS.KP3D_INVISIBLE_SPREAD_WEIGHT = 10.0  # >0: maximise 3D keypoint spread over invisible joints only
+_C.LOSS.KP3D_ALONG_RAY_WEIGHT = 200.0   # >0: reward sample spread along camera ray (depth diversity for visible joints)
+_C.LOSS.KP3D_PERP_RAY_WEIGHT  = 200.0   # >0: penalise sample spread perpendicular to ray (explicit 2D consistency)
 ##########################################
 
 

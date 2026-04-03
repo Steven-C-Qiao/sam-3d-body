@@ -195,9 +195,9 @@ class Trainer(BaseLightningModule):
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
         )
 
-        # for k, v in loss_dict.items():
-        #     print(f"{k}: {v.item():.3f}", end=" ")
-        # print("")
+        for k, v in loss_dict.items():
+            print(f"{k}: {v.item():.3f}", end=" ")
+        print("")
         # for k, v in metrics.items():
         #     print(f"{k}: {v:.4f}", end=" ")
         # print("")
@@ -257,7 +257,7 @@ class Trainer(BaseLightningModule):
         if prefix == "train_":
             vis_step = int(self.global_step)
             should_visualize = self.always_visualise or (
-                vis_step in [50, 250, 500, 1000, 2000, 3000, 4000]
+                vis_step in [2, 50, 250, 500, 1000, 2000, 3000, 4000]
                 or (vis_step > 4000 and vis_step % 5000 == 0)
             )
         else:
