@@ -815,6 +815,7 @@ class SAM3DBody(BaseModel):
                 num_samples, dim=0
             )
             global_trans = torch.zeros_like(global_rot_euler_mean)
+            global_rot_euler = global_rot_euler_mean  # default: use mean
 
             if use_nf:
                 samples_dict = outputs["uncertainty_output"]
@@ -842,11 +843,16 @@ class SAM3DBody(BaseModel):
                 -1, samples_dict["pose_samples"].shape[-1]
             )
 
+            # Use sampled global rotation when the flow models it.
+            glob_rot_samples = samples_dict.get("global_rot_samples")
+            if glob_rot_samples is not None:
+                global_rot_euler = glob_rot_samples.reshape(-1, 3)
+
             mhr_output = self.head_pose.mhr_forward(
                 scale_params=torch.zeros_like(scale_samples),
                 shape_params=shape_samples,
                 global_trans=global_trans,
-                global_rot=global_rot_euler_mean,
+                global_rot=global_rot_euler,
                 body_pose_params=pose_samples,
                 hand_pose_params=output_mhr["hand"].repeat_interleave(
                     num_samples, dim=0

@@ -1,3 +1,4 @@
+import roma
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -438,6 +439,14 @@ class NFARHead(nn.Module):
             aa_3dof_samples, params_1dofs_samples, pose_params_mhr
         )
 
+        # Global rotation samples: convert sampled axis-angle to XYZ Euler.
+        if self.model_glob_rot:
+            glob_rot_aa_samples = pose_samples_residual[..., : self.num_glob_rot_comps]  # (B, N, 3)
+            glob_rot_mat_samples = axis_angle_to_matrix(glob_rot_aa_samples)  # (B, N, 3, 3)
+            glob_rot_euler_samples = roma.rotmat_to_euler("ZYX", glob_rot_mat_samples)  # (B, N, 3)
+        else:
+            glob_rot_euler_samples = None
+
         beta_log_prob = beta_log_prob.reshape(B, N)
         log_prob = beta_log_prob + pose_log_prob
 
@@ -496,6 +505,7 @@ class NFARHead(nn.Module):
             "shape_samples": shape_samples,
             "scale_samples": scale_samples_68D,
             "pose_samples": pose_samples,
+            "global_rot_samples": glob_rot_euler_samples,
             "flow_context_shape_scale": beta_context,
             "flow_context_pose": context_pose.reshape(B, N, -1),
             "flow_context_raw": flow_context,
