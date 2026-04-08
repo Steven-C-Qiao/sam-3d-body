@@ -161,6 +161,19 @@ class NFARHead(nn.Module):
             context_features=flow_config_pose["context_features"],
         )
         self.num_samples = cfg.MODEL.NUM_SAMPLES
+        self.shape_perturb_scale = cfg.MODEL.SHAPE_PERTURB_SCALE
+        self.scale_perturb_scale = cfg.MODEL.SCALE_PERTURB_SCALE
+        self.beta_perturb_detach = cfg.MODEL.BETA_PERTURB_DETACH
+
+        # Per-dimension GT std for mode-2 perturbation (shape: 45D, scale: 10D selected).
+        # Loaded once at init; used as noise scale multiplied by the respective perturb scale.
+        if self.shape_perturb_scale > 0 or self.scale_perturb_scale > 0:
+            stats = torch.load(cfg.MODEL.BETA_PERTURB_STATS_PATH, map_location="cpu", weights_only=True)
+            self.register_buffer("_shape_perturb_std", stats["shape_std"].float())  # (45,)
+            self.register_buffer("_scale_perturb_std", stats["scale_std"].float())  # (10,)
+        else:
+            self._shape_perturb_std = None
+            self._scale_perturb_std = None
 
         # Stage 1 context: [flow_context, shape_mean, scale_mean_selected]
         context_shape_scale_dim = 1024 + 45 + 10
@@ -343,9 +356,27 @@ class NFARHead(nn.Module):
         )
 
 
+        # Mode-2: perturb stage-1 beta samples before conditioning stage-2.
+        # Shape noise: all 45 components. Scale noise: only the selected 10 indices
+        # (beta_samples[..., num_shape_comps:] already contains only those 10).
+        # Noise std = per-dim GT std * perturb_scale, so scale=1.0 matches data spread.
+        # Detach by default so KP2D gradients do not corrupt the stage-1 distribution.
+        if self.training and (self.shape_perturb_scale > 0 or self.scale_perturb_scale > 0):
+            shape_part = beta_samples[..., : self.num_shape_comps]
+            scale_part = beta_samples[..., self.num_shape_comps :]
+            if self.shape_perturb_scale > 0:
+                shape_part = shape_part + torch.randn_like(shape_part) * self._shape_perturb_std * self.shape_perturb_scale
+            if self.scale_perturb_scale > 0:
+                scale_part = scale_part + torch.randn_like(scale_part) * self._scale_perturb_std * self.scale_perturb_scale
+            beta_samples_for_stage2 = torch.cat([shape_part, scale_part], dim=-1)
+            if self.beta_perturb_detach:
+                beta_samples_for_stage2 = beta_samples_for_stage2.detach()
+        else:
+            beta_samples_for_stage2 = beta_samples
+
         # shape_scale_samples: [B, N, shape_scale_dim]
-        shape_residual_samples = beta_samples[..., : self.num_shape_comps]
-        scale_residual_samples = beta_samples[..., self.num_shape_comps :]
+        shape_residual_samples = beta_samples_for_stage2[..., : self.num_shape_comps]
+        scale_residual_samples = beta_samples_for_stage2[..., self.num_shape_comps :]
 
         shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1)
         if self.num_shape_comps > 0:
@@ -409,6 +440,49 @@ class NFARHead(nn.Module):
 
         beta_log_prob = beta_log_prob.reshape(B, N)
         log_prob = beta_log_prob + pose_log_prob
+
+        # DEBUG: override samples with GT residual
+        # if batch is not None and "model_params" in batch:
+        #     gt_flow_params = convert_mhr_params_to_flow_params(
+        #         batch["model_params"],
+        #         batch["shape_params"],
+        #         include_global_rot=self.model_glob_rot,
+        #         include_shape=self.model_shape,
+        #         include_scale=self.model_scale,
+        #     )
+        #     mean_pred_flow_params = convert_mhr_params_to_flow_params(
+        #         torch.cat(
+        #             [
+        #                 torch.zeros_like(mean_pred["body_pose"][..., :6]),
+        #                 mean_pred["body_pose"][..., :130],
+        #                 mean_pred["scale_68D"],
+        #             ],
+        #             dim=-1,
+        #         ),
+        #         mean_pred["shape"],
+        #         include_global_rot=self.model_glob_rot,
+        #         include_shape=self.model_shape,
+        #         include_scale=self.model_scale,
+        #     )
+        #     gt_residual = gt_flow_params - mean_pred_flow_params  # (B, flow_dim)
+        #     samples = gt_residual.unsqueeze(1).expand(-1, N, -1)  # (B, N, flow_dim)
+
+        #     # Override shape samples with GT
+        #     gt_shape_residual = gt_residual[..., self.pose_dim : self.pose_dim + self.num_shape_comps]
+        #     shape_samples = (shape_mean + gt_shape_residual).unsqueeze(1).expand(-1, N, -1)
+
+        #     # Override scale samples with GT
+        #     gt_scale_residual = gt_residual[..., self.pose_dim + self.num_shape_comps :]
+        #     scale_samples_68D = scale_mean.unsqueeze(1).expand(-1, N, -1).clone()
+        #     scale_samples_68D[..., scale_indices] = scale_samples_68D[..., scale_indices] + gt_scale_residual.unsqueeze(1).expand(-1, N, -1)
+
+        #     # Override pose samples with GT
+        #     offset = self.num_glob_rot_comps
+        #     gt_pose_3dof_residual = gt_residual[..., offset : offset + self.num_3dof_comps]
+        #     gt_pose_1dof_residual = gt_residual[..., offset + self.num_3dof_comps : offset + self.num_3dof_comps + self.num_1dof_comps]
+        #     gt_aa_3dof_samples = (aa_3dofs + gt_pose_3dof_residual).unsqueeze(1).expand(-1, N, -1)
+        #     gt_params_1dofs_samples = (params_1dofs + gt_pose_1dof_residual).unsqueeze(1).expand(-1, N, -1)
+        #     pose_samples = self.convert_samples_to_params(gt_aa_3dof_samples, gt_params_1dofs_samples, pose_params_mhr)
 
         # Full residual vector in the same ordering as `convert_mhr_params_to_flow_params`.
         # Ordering: [pose_part (glob? + 3dof + 1dof), shape(45), scale(10)].

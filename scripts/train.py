@@ -23,12 +23,16 @@ from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, config_path=None):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
 
-    if load_path is not None or resume_path is not None:
+    if config_path is not None:
+        cfg.merge_from_file(config_path)
+
+    # if load_path is not None or resume_path is not None:
+    if resume_path is not None:
         config_yaml_path = Path(exp_dir) / "config.yaml"
         if config_yaml_path.exists():
             logger.info(f"Loading config overrides from {config_yaml_path}")
@@ -146,7 +150,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
         # precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
         # profiler='simple',
     )
-    trainer.fit(model, ckpt_path=resume_path)
+    trainer.validate(model, ckpt_path=resume_path)
 
 
 if __name__ == "__main__":
@@ -178,6 +182,8 @@ if __name__ == "__main__":
         help="Comma-separated list of GPU indices to use. E.g., '0,1,2'",
     )
     parser.add_argument("--dev", action="store_true")
+    parser.add_argument("--config", "-C", type=str, default=None,
+                        help="YAML config override file (merged on top of defaults).")
     parser.add_argument(
         "--plot",
         action="store_true",
@@ -206,4 +212,5 @@ if __name__ == "__main__":
         resume_path=args.resume_training_states,
         load_path=args.load_from_ckpt,
         dev=args.dev,
+        config_path=args.config,
     )

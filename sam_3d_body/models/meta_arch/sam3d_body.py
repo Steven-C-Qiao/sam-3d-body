@@ -832,13 +832,13 @@ class SAM3DBody(BaseModel):
                 )
                 dist_3dof = samples_dict["dist_3dof"]
                 outputs["dist_3dof"] = dist_3dof
-            shape_samples = samples_dict["shape_samples"].view(
+            shape_samples = samples_dict["shape_samples"].reshape(
                 -1, samples_dict["shape_samples"].shape[-1]
             )
-            scale_samples = samples_dict["scale_samples"].view(
+            scale_samples = samples_dict["scale_samples"].reshape(
                 -1, samples_dict["scale_samples"].shape[-1]
             )
-            pose_samples = samples_dict["pose_samples"].view(
+            pose_samples = samples_dict["pose_samples"].reshape(
                 -1, samples_dict["pose_samples"].shape[-1]
             )
 

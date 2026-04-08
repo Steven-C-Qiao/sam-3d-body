@@ -36,6 +36,10 @@ _C.MODEL.HEAD_TYPE = "nf_ar"
 _C.MODEL.FLOW_COUPLING = "affine"
 _C.MODEL.FLOW_NUM_LAYERS = 8
 _C.MODEL.FLOW_DROPOUT = 0.2
+_C.MODEL.SHAPE_PERTURB_SCALE = 0.0   # multiplier on per-dim GT std noise for shape (45D); 0 = disabled
+_C.MODEL.SCALE_PERTURB_SCALE = 0.0   # multiplier on per-dim GT std noise for scale (10D selected); 0 = disabled
+_C.MODEL.BETA_PERTURB_DETACH = True  # detach perturbed betas from stage-1 graph
+_C.MODEL.BETA_PERTURB_STATS_PATH = "checkpoints/sam-3d-body-dinov3/shape_scale_std.pt"  # per-dim GT stds
 
 
 _C.LOSS = CfgNode()
@@ -47,15 +51,15 @@ _C.LOSS.JOINTS_2D_WEIGHT = 0.0
 _C.LOSS.KP2D_WEIGHT = 200.0
 _C.LOSS.KP3D_WEIGHT = 0.01
 _C.LOSS.PARAM_NLL_WEIGHT = 0.0
-_C.LOSS.PARAM_L2_WEIGHT = 0.0
+_C.LOSS.PARAM_L2_WEIGHT = 10.0
 # Diversity options 
 _C.LOSS.BYPASS_VISIBILITY = False
 _C.LOSS.KP3D_ON_SAMPLES = True    # Default: True,  False: skip KP3D loss on NF samples entirely
 _C.LOSS.KP2D_BEST_OF_N = False    # Default: False, True: penalise only the closest sample to GT (min-over-N)
 _C.LOSS.ENTROPY_WEIGHT = 0.0      # Default: 0.0,   >0: add sample-variance entropy bonus (DEPRECATED: use KP3D_INVISIBLE_SPREAD_WEIGHT)
-_C.LOSS.KP3D_INVISIBLE_SPREAD_WEIGHT = 10.0  # >0: maximise 3D keypoint spread over invisible joints only
-_C.LOSS.KP3D_ALONG_RAY_WEIGHT = 200.0   # >0: reward sample spread along camera ray (depth diversity for visible joints)
-_C.LOSS.KP3D_PERP_RAY_WEIGHT  = 200.0   # >0: penalise sample spread perpendicular to ray (explicit 2D consistency)
+_C.LOSS.KP3D_INVISIBLE_SPREAD_WEIGHT = 0.0  # >0: maximise 3D keypoint spread over invisible joints only
+_C.LOSS.KP3D_ALONG_RAY_WEIGHT = 0.0   # >0: reward sample spread along camera ray (depth diversity for visible joints)
+_C.LOSS.KP3D_PERP_RAY_WEIGHT  = 0.0   # >0: penalise sample spread perpendicular to ray (explicit 2D consistency)
 ##########################################
 
 

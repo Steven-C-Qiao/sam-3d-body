@@ -1,4 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+from typing import Optional
+
 import numpy as np
 import cv2
 from sam_3d_body.visualization.renderer import Renderer
@@ -268,17 +270,18 @@ def my_visualize(img_cv2, outputs, faces, stack_vertically=True, batch=None):
 
 
 def my_visualize_samples(
-    img_cv2, 
-    outputs, 
-    faces, 
-    stack_vertically=True, 
-    affine=None, 
+    img_cv2,
+    outputs,
+    faces,
+    stack_vertically=True,
+    affine=None,
     img_size=None,
     overlay_gt=True,
     plot_side=True,
     batch=None,
     mhr_model=None,
     metrics=None,
+    max_sample: Optional[int] = 10,
 ):
     affine = affine.cpu().detach().numpy() if affine is not None else None
     img_size = img_size.cpu().detach().numpy() if img_size is not None else None
@@ -297,7 +300,9 @@ def my_visualize_samples(
         base_img = cv2.warpAffine(base_img_uint8, affine, img_size)
 
     mhr_samples = outputs["verts_samples"].cpu().detach().numpy()
-    
+    n_mhr = mhr_samples.shape[1]
+    n_vis = min(n_mhr, max_sample) if max_sample is not None else n_mhr
+
     log_prob, pampjpe_samples, pampjpe_mean, gt_logp = None, None, None, None
     kp2d_visible_samples_px, spread_invisible_samples = None, None
     if "uncertainty_output" in outputs and "log_prob" in outputs["uncertainty_output"]:
@@ -332,9 +337,8 @@ def my_visualize_samples(
     vertex_colors_mean = None
     try:
         mean_pred_vertices_np = outputs["pred_vertices"][0]  # (N_verts, 3)
-        num_samples_mhr = mhr_samples.shape[1]
         distances = []
-        for i in range(num_samples_mhr):
+        for i in range(n_vis):
             sample_vertices = mhr_samples[0, i]  # (N_verts, 3)
             vertex_distances = np.linalg.norm(
                 sample_vertices - mean_pred_vertices_np, axis=1
@@ -366,7 +370,7 @@ def my_visualize_samples(
     renderer_side = Renderer(
         focal_length=1000, faces=all_faces
     )
-    for i in range(mhr_samples.shape[1]):
+    for i in range(n_vis):
         img_mesh = img_cv2.copy()
 
         # ----------------------- front view -----------------------

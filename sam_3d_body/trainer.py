@@ -195,9 +195,9 @@ class Trainer(BaseLightningModule):
             loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
         )
 
-        for k, v in loss_dict.items():
-            print(f"{k}: {v.item():.3f}", end=" ")
-        print("")
+        # for k, v in loss_dict.items():
+        #     print(f"{k}: {v.item():.3f}", end=" ")
+        # print("")
         # for k, v in metrics.items():
         #     print(f"{k}: {v:.4f}", end=" ")
         # print("")
@@ -759,8 +759,8 @@ class Trainer(BaseLightningModule):
             #         print(k, v)
             #     import ipdb; ipdb.set_trace()
 
-            # vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            # vis_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
+            vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
+            vis_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)
