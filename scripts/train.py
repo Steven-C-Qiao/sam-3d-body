@@ -150,7 +150,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, con
         # precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
         # profiler='simple',
     )
-    trainer.validate(model, ckpt_path=resume_path)
+    trainer.fit(model, ckpt_path=resume_path)
 
 
 if __name__ == "__main__":

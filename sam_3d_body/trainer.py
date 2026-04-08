@@ -396,6 +396,13 @@ class Trainer(BaseLightningModule):
             gt_verts = gt_verts @ R.transpose(-2, -1)
             gt_joint_coords = gt_joint_coords @ R.transpose(-2, -1)
 
+        # Remove body translation from verts/joints; compensate in cam_t so
+        # that camera-space positions (v + cam_t) are unchanged.
+        body_transl = batch["model_params"][:, :3] / 10.0  # (B, 3) metres
+        gt_verts = gt_verts - body_transl[:, None, :]
+        gt_joint_coords = gt_joint_coords - body_transl[:, None, :]
+        batch["cam_ext"][:, :3, 3] = batch["cam_ext"][:, :3, 3] + body_transl
+
         batch["gt_verts_w_transl"] = gt_verts
         batch["gt_joint_coords"] = gt_joint_coords
 
