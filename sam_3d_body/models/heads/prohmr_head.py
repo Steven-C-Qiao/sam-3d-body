@@ -4,19 +4,11 @@ from torch.amp import autocast
 from typing import Optional, Dict, Tuple
 from nflows.flows import ConditionalGlow
 from yacs.config import CfgNode
-import torch.nn.functional as F
-
 from sam_3d_body.models.modules.mhr_utils import (
-    batch9Dfrom6D,
     compact_cont_to_model_params_body,
-    mhr_param_hand_mask,
     convert_mhr_params_to_flow_params,
-)
-
-from pytorch3d.transforms import (
-    axis_angle_to_matrix,
-    matrix_to_axis_angle,
-    matrix_to_euler_angles,
+    convert_flow_samples_to_mhr_params,
+    convert_pose_cont_to_flow_context,
 )
 
 
@@ -216,103 +208,11 @@ class NFHead(nn.Module):
 
         return ret
 
-    def convert_samples_to_params(
-        self,
-        aa_3dof_samples: torch.Tensor,
-        params_1dofs_samples: torch.Tensor,
-        pose_mean: torch.Tensor,
-    ):
-        # fmt: off
-        all_param_3dof_rot_idxs_except_hands = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (130, 131, 132)])
-        all_param_1dof_rot_idxs_except_hands = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 116, 117, 118, 119, 120, 121, 122, 123])
-        # fmt: on
-        B, N, D = aa_3dof_samples.shape
-        pose_mean = pose_mean.unsqueeze(1).repeat(1, N, 1)
+    def convert_samples_to_params(self, aa_3dof_samples, params_1dofs_samples, pose_mean):
+        return convert_flow_samples_to_mhr_params(aa_3dof_samples, params_1dofs_samples, pose_mean)
 
-        aa_3dof_samples = aa_3dof_samples.unflatten(-1, (-1, 3))
-        rotmat_3dof_samples = axis_angle_to_matrix(aa_3dof_samples)
-
-        x_raw = rotmat_3dof_samples[..., :, 0]
-        y_raw = rotmat_3dof_samples[..., :, 1]
-
-        x = F.normalize(x_raw, dim=-1)
-        z = torch.cross(x, y_raw, dim=-1)
-        z = F.normalize(z, dim=-1)
-        y = torch.cross(z, x, dim=-1)
-
-        matrix = torch.stack([x, y, z], dim=-1)
-
-        sy = torch.sqrt(
-            matrix[..., 0, 0] * matrix[..., 0, 0]
-            + matrix[..., 1, 0] * matrix[..., 1, 0]
-        )
-        singular = sy < 1e-6
-        singular = singular.float()
-
-        x = torch.atan2(matrix[..., 2, 1], matrix[..., 2, 2])
-        y = torch.atan2(-matrix[..., 2, 0], sy)
-        z = torch.atan2(matrix[..., 1, 0], matrix[..., 0, 0])
-
-        xs = torch.atan2(-matrix[..., 1, 2], matrix[..., 1, 1])
-        ys = torch.atan2(-matrix[..., 2, 0], sy)
-        zs = matrix[..., 1, 0] * 0
-
-        euler_3dof_samples = torch.zeros_like(matrix[..., 0])
-        euler_3dof_samples[..., 0] = x * (1 - singular) + xs * singular
-        euler_3dof_samples[..., 1] = y * (1 - singular) + ys * singular
-        euler_3dof_samples[..., 2] = z * (1 - singular) + zs * singular
-
-        # euler_3dof_samples = aa_to_euler(aa_3dof_samples, "XYZ")
-        euler_3dof_samples = euler_3dof_samples.flatten(-2, -1)
-
-        pose_mean[..., all_param_3dof_rot_idxs_except_hands.flatten()] = (
-            euler_3dof_samples
-        )
-        pose_mean[..., all_param_1dof_rot_idxs_except_hands] = params_1dofs_samples
-        pose_mean[..., mhr_param_hand_mask] = 0
-        pose_mean[..., -3:] = 0
-        return pose_mean
-
-    def convert_pose_cont_to_params_for_context(self, pose_cont: torch.Tensor):
-
-        # fmt: off
-        all_param_3dof_rot_idxs = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (64, 65, 66), (85, 69, 73), (86, 70, 79), (87, 71, 82), (88, 72, 76), (91, 92, 93), (112, 96, 100), (113, 97, 106), (114, 98, 109), (115, 99, 103), (130, 131, 132)])
-        all_param_1dof_rot_idxs = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 62, 63, 67, 68, 74, 75, 77, 78, 80, 81, 83, 84, 89, 90, 94, 95, 101, 102, 104, 105, 107, 108, 110, 111, 116, 117, 118, 119, 120, 121, 122, 123])
-        all_param_1dof_trans_idxs = torch.LongTensor([124, 125, 126, 127, 128, 129])
-        all_param_3dof_rot_idxs_except_hands = torch.LongTensor([(0, 2, 4), (6, 8, 10), (12, 13, 14), (15, 16, 17), (18, 19, 20), (21, 22, 23), (24, 25, 26), (27, 28, 29), (34, 35, 36), (37, 38, 39), (44, 45, 46), (53, 54, 55), (130, 131, 132)])
-        all_param_1dof_rot_idxs_except_hands = torch.LongTensor([1, 3, 5, 7, 9, 11, 30, 31, 32, 33, 40, 41, 42, 43, 47, 48, 49, 50, 51, 52, 56, 57, 58, 59, 60, 61, 116, 117, 118, 119, 120, 121, 122, 123])
-        indices_3dof = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 22]
-        indices_1dof = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 50, 51, 52, 53, 54, 55, 56, 57]
-        # fmt: on
-        num_3dof_angles = len(all_param_3dof_rot_idxs) * 3  # 69
-        num_1dof_angles = len(all_param_1dof_rot_idxs)  # 58
-        num_1dof_trans = len(all_param_1dof_trans_idxs)  # 6
-        assert pose_cont.shape[-1] == (
-            2 * num_3dof_angles + 2 * num_1dof_angles + num_1dof_trans
-        )
-        # Get subsets
-        cont_3dofs = pose_cont[..., : 2 * num_3dof_angles]
-        cont_1dofs = pose_cont[
-            ..., 2 * num_3dof_angles : 2 * num_3dof_angles + 2 * num_1dof_angles
-        ]
-        cont_trans = pose_cont[..., 2 * num_3dof_angles + 2 * num_1dof_angles :]
-
-        cont_3dofs = cont_3dofs.unflatten(-1, (-1, 6))
-        rotmat_3dofs = batch9Dfrom6D(cont_3dofs).unflatten(-1, (3, 3))
-
-        aa_3dofs = matrix_to_axis_angle(rotmat_3dofs)[:, indices_3dof, ...].flatten(
-            -2, -1
-        )
-
-        cont_1dofs = cont_1dofs.unflatten(-1, (-1, 2))  # (sincos)
-        params_1dofs = torch.atan2(cont_1dofs[..., -2], cont_1dofs[..., -1])
-        params_1dofs = params_1dofs[:, indices_1dof]
-
-        ret = {
-            "aa_3dofs": aa_3dofs,
-            "params_1dofs": params_1dofs,
-        }
-        return ret
+    def convert_pose_cont_to_params_for_context(self, pose_cont):
+        return convert_pose_cont_to_flow_context(pose_cont)
 
         # with torch.cuda.amp.autocast(enabled=False):
 

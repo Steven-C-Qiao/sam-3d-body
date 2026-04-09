@@ -4,6 +4,7 @@ import pytorch_lightning as pl
 
 from sam_3d_body.models.modules.mhr_utils import (
     convert_mhr_params_to_flow_params,
+    convert_pose_cont_to_flow_context,
     scale_indices,
 )
 
@@ -38,7 +39,7 @@ class Loss(pl.LightningModule):
             flow_context_raw = uncertainty_output["flow_context_raw"]
             mean_pred = predictions["mhr"]
 
-            flow_context_shape_scale = self.nf_head.beta_context_proj(
+            flow_context_beta = self.nf_head.beta_context_proj(
                 torch.cat(
                     [
                         flow_context_raw,
@@ -50,18 +51,16 @@ class Loss(pl.LightningModule):
             )
 
             pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
-            pose_params = self.nf_head.convert_pose_cont_to_params_for_context(
-                pose_mean_cont
-            )
+            pose_params = convert_pose_cont_to_flow_context(pose_mean_cont)
             aa_3dofs = pose_params["aa_3dofs"]  # B, 39
             params_1dofs = pose_params["params_1dofs"]  # B, 34
 
-            shape_scale_residual_true = true_residual[..., self.nf_head.pose_dim :]
-            shape_residual_true = shape_scale_residual_true[
+            beta_residual_true = true_residual[..., self.nf_head.theta_dim :]
+            shape_residual_true = beta_residual_true[
                 ...,
                 : self.nf_head.num_shape_comps,
             ]
-            scale_residual_true = shape_scale_residual_true[
+            scale_residual_true = beta_residual_true[
                 ...,
                 self.nf_head.num_shape_comps :,
             ]
@@ -71,7 +70,7 @@ class Loss(pl.LightningModule):
                 mean_pred["scale_68D"][..., scale_indices] + scale_residual_true
             )
 
-            context_pose_parts = [
+            context_theta_parts = [
                 flow_context_raw,
                 shape_sample_true,
                 scale_sample_selected_true,
@@ -79,13 +78,13 @@ class Loss(pl.LightningModule):
                 params_1dofs,
             ]
             if self.nf_head.model_cam:
-                context_pose_parts.append(mean_pred["pred_cam"])
-            flow_context_pose = self.nf_head.pose_context_proj(
-                torch.cat(context_pose_parts, dim=-1)
+                context_theta_parts.append(mean_pred["pred_cam"])
+            flow_context_theta = self.nf_head.theta_context_proj(
+                torch.cat(context_theta_parts, dim=-1)
             )
 
             flow_log_prob, _ = self.nf_head.log_prob(
-                true_residual, flow_context_shape_scale, flow_context_pose
+                true_residual, flow_context_beta, flow_context_theta
             )
             return flow_log_prob
 
@@ -187,15 +186,15 @@ class Loss(pl.LightningModule):
             true_residual = gt_flow_params - mean_pred_flow_params
 
             if getattr(self.cfg.MODEL, "MODEL_CAM", False):
-                pose_dim_no_cam = self.nf_head.pose_dim - self.nf_head.num_cam_comps
+                theta_dim_no_cam = self.nf_head.theta_dim - self.nf_head.num_cam_comps
                 cam_zeros = torch.zeros(
                     true_residual.shape[0], self.nf_head.num_cam_comps,
                     device=true_residual.device, dtype=true_residual.dtype,
                 )
                 true_residual = torch.cat([
-                    true_residual[..., :pose_dim_no_cam],
+                    true_residual[..., :theta_dim_no_cam],
                     cam_zeros,
-                    true_residual[..., pose_dim_no_cam:],
+                    true_residual[..., theta_dim_no_cam:],
                 ], dim=-1)
 
         if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0:

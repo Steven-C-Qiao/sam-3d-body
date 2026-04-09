@@ -175,13 +175,14 @@ def build_distance_colorbar_rgb(
 
 
 class Visualiser(pl.LightningModule):
-    def __init__(self, save_dir, cfg=None, rank=0, faces=None):
+    def __init__(self, save_dir, cfg=None, rank=0, faces=None, max_plots=None):
         super().__init__()
         self.save_dir = save_dir
         self.rank = rank
         self.cfg = cfg
         self._suffix = ""
         self.faces = faces  # Store faces for mesh rendering
+        self.max_plots = max_plots
 
     def set_global_rank(self, global_rank):
         self.rank = global_rank
@@ -234,8 +235,21 @@ class Visualiser(pl.LightningModule):
         for k, v in batch.items():
             batch[k] = v.cpu().detach().numpy() if isinstance(v, torch.Tensor) else v
 
-        self.visualise_ray_debug(predictions, batch)
-        self.visualise_full(predictions, batch)
+        # self.visualise_ray_debug(predictions, batch)
+
+        batch["keypoints_3d"][..., [1, 2]] *= -1
+        predictions["mhr"]["pred_keypoints_3d"][..., [1, 2]] *= -1
+        predictions["kp3d_samples"][..., [1, 2]] *= -1
+        predictions["verts_samples"][..., [1, 2]] *= -1
+        predictions["mhr"]["pred_vertices"][..., [1, 2]] *= -1
+
+        self.visualise_keypoints_3d(predictions, batch)
+
+        # self.visualise_2d_keypoints_full(predictions, batch)
+        self.visualise_2d_keypoints_cropped(predictions, batch)
+
+        # self.visualise_mesh(predictions, batch)
+        # self.visualise_mesh_pyplot(predictions, batch)
 
     def visualise_ray_debug(self, predictions, batch):
         """
@@ -380,21 +394,6 @@ class Visualiser(pl.LightningModule):
         plt.savefig(os.path.join(self.save_dir, filename), dpi=120, bbox_inches="tight")
         plt.close()
 
-    def visualise_full(self, predictions, batch):
-        batch["keypoints_3d"][..., [1, 2]] *= -1
-        predictions["mhr"]["pred_keypoints_3d"][..., [1, 2]] *= -1
-        predictions["kp3d_samples"][..., [1, 2]] *= -1
-        predictions["verts_samples"][..., [1, 2]] *= -1
-        predictions["mhr"]["pred_vertices"][..., [1, 2]] *= -1
-
-        self.visualise_keypoints_3d(predictions, batch)
-
-        # self.visualise_2d_keypoints_full(predictions, batch)
-        self.visualise_2d_keypoints_cropped(predictions, batch)
-
-        # self.visualise_mesh(predictions, batch)
-        # self.visualise_mesh_pyplot(predictions, batch)
-
     def visualise_keypoints_3d(self, predictions, batch):
         """
         Generate 3D scatter plots visualizing GT, predicted, and sample keypoints.
@@ -443,6 +442,8 @@ class Visualiser(pl.LightningModule):
 
         # Determine number of subplots
         num_samples = sample_kps.shape[0] if sample_kps is not None else 0
+        if self.max_plots is not None:
+            num_samples = min(num_samples, self.max_plots)
         num_cols = 3 + num_samples  # GT, Pred, Overlay, Samples
 
         # Create figure with subplots
@@ -653,6 +654,8 @@ class Visualiser(pl.LightningModule):
 
         # Create figure with subplots
         num_samples = pred_verts_samples.shape[0]
+        if self.max_plots is not None:
+            num_samples = min(num_samples, self.max_plots)
         num_cols = 3 + num_samples  # GT, Pred, Samples
         fig = plt.figure(figsize=(6 * num_cols, 6))
 
@@ -761,6 +764,8 @@ class Visualiser(pl.LightningModule):
 
         # Create figure with subplots
         num_samples = pred_verts_samples.shape[0]
+        if self.max_plots is not None:
+            num_samples = min(num_samples, self.max_plots)
         num_cols = 3 + num_samples  # GT, Pred, Samples
         fig, axes = plt.subplots(1, num_cols, figsize=(4 * num_cols, 4))
         if num_cols == 1:
@@ -1014,6 +1019,8 @@ class Visualiser(pl.LightningModule):
             batch_idx
         ]  # [num_samples, 70, 2]
         num_samples = sample_kp2d_full.shape[0]
+        if self.max_plots is not None:
+            num_samples = min(num_samples, self.max_plots)
 
         # Create visualization
         plt.figure(figsize=(15, 10))
@@ -1090,6 +1097,8 @@ class Visualiser(pl.LightningModule):
             batch_idx
         ]  # [num_samples, N, 2]
         num_samples = sample_kp2d_cropped_normalized.shape[0]
+        if self.max_plots is not None:
+            num_samples = min(num_samples, self.max_plots)
         # Unnormalize to pixel coordinates [0, 256]
         sample_kp2d_cropped_coords = (
             sample_kp2d_cropped_normalized + 0.5
@@ -1221,6 +1230,8 @@ class Visualiser(pl.LightningModule):
             batch_idx
         ]  # [num_samples, N, 2]
         num_samples = sample_kp2d_cropped_normalized.shape[0]
+        if self.max_plots is not None:
+            num_samples = min(num_samples, self.max_plots)
         # Unnormalize to pixel coordinates [0, 256]
         sample_kp2d_cropped_coords = (
             sample_kp2d_cropped_normalized + 0.5

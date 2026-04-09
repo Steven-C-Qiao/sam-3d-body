@@ -258,7 +258,7 @@ class Trainer(BaseLightningModule):
             vis_step = int(self.global_step)
             should_visualize = self.always_visualise or (
                 vis_step in [2, 50, 250, 500, 1000, 2000, 3000, 4000]
-                or (vis_step > 4000 and vis_step % 5000 == 0)
+                or (vis_step > 4000 and vis_step % 2500 == 0)
             )
         else:
             # For validation/test: one visualization per dataloader per epoch

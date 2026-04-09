@@ -94,10 +94,10 @@ def merge_params_nf_psis(
     pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))
     pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))
 
-    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))
+    beta_log_prob_ref = uncertainty_out["log_prob_beta"].unflatten(0, (bs, num_views))
     shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
     scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
-    beta_context = uncertainty_out["flow_context_shape_scale"].unflatten(0, (bs, num_views))
+    beta_context = uncertainty_out["flow_context_beta"].unflatten(0, (bs, num_views))
 
     merged_shape = []
     merged_scale68 = []
@@ -120,7 +120,7 @@ def merge_params_nf_psis(
                 )  # [55]
                 residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)  # [S, 2048]
-                logp_j, _ = nf_head.flow_shape_scale.log_prob(inputs=residual_j, context=context_j)
+                logp_j, _ = nf_head.flow_beta.log_prob(inputs=residual_j, context=context_j)
                 logw_i = logw_i + logp_j
 
             candidate_beta.append(beta_i)
@@ -183,7 +183,7 @@ def merge_params_nf_tempered(
     """
     IS merge with temperature-scaled log-weights.
 
-    Divides log-weights by `temperature` (default: shape_scale_dim = 55) before
+    Divides log-weights by `temperature` (default: beta_dim = 55) before
     softmax.  This is equivalent to weighting by p(beta|I)^{1/T} rather than
     p(beta|I), which flattens the weight distribution and prevents collapse in
     high-dimensional spaces.  The per-dimension geometric-mean interpretation
@@ -191,7 +191,7 @@ def merge_params_nf_tempered(
 
     A temperature of 1.0 reduces to standard IS (merge_params_nf_is).
     """
-    T = temperature if temperature is not None else float(nf_head.shape_scale_dim)
+    T = temperature if temperature is not None else float(nf_head.beta_dim)
     S = num_samples
 
     T = 10.0
@@ -199,10 +199,10 @@ def merge_params_nf_tempered(
     pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))
     pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))
 
-    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))
+    beta_log_prob_ref = uncertainty_out["log_prob_beta"].unflatten(0, (bs, num_views))
     shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
     scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
-    beta_context = uncertainty_out["flow_context_shape_scale"].unflatten(0, (bs, num_views))
+    beta_context = uncertainty_out["flow_context_beta"].unflatten(0, (bs, num_views))
 
     merged_shape = []
     merged_scale68 = []
@@ -225,7 +225,7 @@ def merge_params_nf_tempered(
                 )  # [55]
                 residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)
-                logp_j, _ = nf_head.flow_shape_scale.log_prob(inputs=residual_j, context=context_j)
+                logp_j, _ = nf_head.flow_beta.log_prob(inputs=residual_j, context=context_j)
                 logw_i = logw_i + logp_j
 
             candidate_beta.append(beta_i)
@@ -294,10 +294,10 @@ def merge_params_nf_is(
     pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))
     pred_scale_params = mhr_out["scale"].unflatten(0, (bs, num_views))
 
-    beta_context = uncertainty_out["flow_context_shape_scale"].unflatten(0, (bs, num_views))
-    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))
+    beta_context = uncertainty_out["flow_context_beta"].unflatten(0, (bs, num_views))
+    beta_log_prob_ref = uncertainty_out["log_prob_beta"].unflatten(0, (bs, num_views))
     flow_samples = uncertainty_out["samples"].unflatten(0, (bs, num_views))
-    beta_residual_samples = flow_samples[..., -nf_head.shape_scale_dim :]
+    beta_residual_samples = flow_samples[..., -nf_head.beta_dim :]
     shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
     scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
 
@@ -323,7 +323,7 @@ def merge_params_nf_is(
             # # This avoids reconstruction mismatch from absolute samples and means.
             # residual_i = beta_residual_samples[b, i]  # [S, 55]
             # context_i = beta_context[b, i].unsqueeze(0).expand(S, -1)  # [S, 2048]
-            # logp_i_recomputed, _ = nf_head.flow_shape_scale.log_prob(
+            # logp_i_recomputed, _ = nf_head.flow_beta.log_prob(
             #     inputs=residual_i, context=context_i
             # )
             # logp_i_ref = beta_log_prob_ref[b, i]  # [S]
@@ -354,7 +354,7 @@ def merge_params_nf_is(
                 )  # [55]
                 residual_j = beta_i - mean_beta_j.unsqueeze(0)  # [S, 55]
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)  # [S, 2048]
-                logp_j, _ = nf_head.flow_shape_scale.log_prob(
+                logp_j, _ = nf_head.flow_beta.log_prob(
                     inputs=residual_j, context=context_j
                 )
 
@@ -434,7 +434,7 @@ def merge_params_nf_gaussian(
     pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))           # [B, V, 45]
     pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))     # [B, V, 68]
 
-    beta_log_prob_ref = uncertainty_out["log_prob_shape_scale"].unflatten(0, (bs, num_views))  # [B, V, S]
+    beta_log_prob_ref = uncertainty_out["log_prob_beta"].unflatten(0, (bs, num_views))  # [B, V, S]
     shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))             # [B, V, S, 45]
     scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))           # [B, V, S, 68]
 
@@ -499,7 +499,7 @@ def merge_params_nf(
     Args:
         method: One of:
             "psis"     — Pareto-Smoothed IS (default; self-diagnosing, robust)
-            "tempered" — Temperature-scaled IS (T = shape_scale_dim; simple, stable)
+            "tempered" — Temperature-scaled IS (T = beta_dim; simple, stable)
             "gaussian" — Precision-weighted Gaussian product (fastest, no NF calls)
             "is"       — Raw IS (reference; collapses in practice for D=55)
     """

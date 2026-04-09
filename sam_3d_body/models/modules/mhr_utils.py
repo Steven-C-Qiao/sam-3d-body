@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from pytorch3d.transforms import matrix_to_axis_angle
+from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 
 
 # fmt: off
@@ -446,6 +446,103 @@ def compact_model_params_to_cont_body(body_pose_params):
         [body_cont_3dofs, body_cont_1dofs, body_cont_trans], dim=-1
     )
     return body_pose_cont
+
+
+def convert_flow_samples_to_mhr_params(
+    aa_3dof_samples: torch.Tensor,
+    params_1dofs_samples: torch.Tensor,
+    pose_mean: torch.Tensor,
+) -> torch.Tensor:
+    """Convert flow-space axis-angle / 1-DOF samples back to 133D MHR Euler params.
+
+    Args:
+        aa_3dof_samples: (B, N, 39) axis-angle for 13 3-DOF joints (excl. hands).
+        params_1dofs_samples: (B, N, 34) scalar angles for 1-DOF joints (excl. hands).
+        pose_mean: (B, 133) MHR Euler-angle base pose (expanded to (B, N, 133) internally).
+
+    Returns:
+        (B, N, 133) MHR Euler-angle pose parameters.
+    """
+    B, N, D = aa_3dof_samples.shape
+    pose_mean = pose_mean.unsqueeze(1).repeat(1, N, 1)
+
+    aa_3dof_samples = aa_3dof_samples.unflatten(-1, (-1, 3))
+    rotmat_3dof_samples = axis_angle_to_matrix(aa_3dof_samples)
+
+    x_raw = rotmat_3dof_samples[..., :, 0]
+    y_raw = rotmat_3dof_samples[..., :, 1]
+
+    x = F.normalize(x_raw, dim=-1)
+    z = torch.cross(x, y_raw, dim=-1)
+    z = F.normalize(z, dim=-1)
+    y = torch.cross(z, x, dim=-1)
+
+    matrix = torch.stack([x, y, z], dim=-1)
+
+    sy = torch.sqrt(
+        matrix[..., 0, 0] * matrix[..., 0, 0]
+        + matrix[..., 1, 0] * matrix[..., 1, 0]
+    )
+    singular = sy < 1e-6
+    singular = singular.float()
+
+    x = torch.atan2(matrix[..., 2, 1], matrix[..., 2, 2])
+    y = torch.atan2(-matrix[..., 2, 0], sy)
+    z = torch.atan2(matrix[..., 1, 0], matrix[..., 0, 0])
+
+    xs = torch.atan2(-matrix[..., 1, 2], matrix[..., 1, 1])
+    ys = torch.atan2(-matrix[..., 2, 0], sy)
+    zs = matrix[..., 1, 0] * 0
+
+    euler_3dof_samples = torch.zeros_like(matrix[..., 0])
+    euler_3dof_samples[..., 0] = x * (1 - singular) + xs * singular
+    euler_3dof_samples[..., 1] = y * (1 - singular) + ys * singular
+    euler_3dof_samples[..., 2] = z * (1 - singular) + zs * singular
+
+    euler_3dof_samples = euler_3dof_samples.flatten(-2, -1)
+
+    pose_mean[..., all_param_3dof_rot_idxs_except_hands.flatten()] = (
+        euler_3dof_samples
+    )
+    pose_mean[..., all_param_1dof_rot_idxs_except_hands] = params_1dofs_samples
+    pose_mean[..., mhr_param_hand_mask] = 0
+    pose_mean[..., -3:] = 0
+    return pose_mean
+
+
+def convert_pose_cont_to_flow_context(pose_cont: torch.Tensor) -> dict:
+    """Convert continuous pose representation to axis-angle / 1-DOF params for flow context.
+
+    Args:
+        pose_cont: (B, 204) continuous pose (6D rotations + sin/cos + translations),
+            excluding the first 6 global-rotation dims.
+
+    Returns:
+        dict with keys ``aa_3dofs`` (B, 39) and ``params_1dofs`` (B, 34).
+    """
+    assert pose_cont.shape[-1] == (
+        2 * num_3dof_angles + 2 * num_1dof_angles + num_1dof_trans
+    )
+    cont_3dofs = pose_cont[..., : 2 * num_3dof_angles]
+    cont_1dofs = pose_cont[
+        ..., 2 * num_3dof_angles : 2 * num_3dof_angles + 2 * num_1dof_angles
+    ]
+
+    cont_3dofs = cont_3dofs.unflatten(-1, (-1, 6))
+    rotmat_3dofs = batch9Dfrom6D(cont_3dofs).unflatten(-1, (3, 3))
+
+    aa_3dofs = matrix_to_axis_angle(rotmat_3dofs)[:, indices_3dof, ...].flatten(
+        -2, -1
+    )
+
+    cont_1dofs = cont_1dofs.unflatten(-1, (-1, 2))  # (sincos)
+    params_1dofs = torch.atan2(cont_1dofs[..., -2], cont_1dofs[..., -1])
+    params_1dofs = params_1dofs[:, indices_1dof]
+
+    return {
+        "aa_3dofs": aa_3dofs,
+        "params_1dofs": params_1dofs,
+    }
 
 
 """
