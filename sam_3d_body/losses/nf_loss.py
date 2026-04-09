@@ -71,17 +71,17 @@ class Loss(pl.LightningModule):
                 mean_pred["scale_68D"][..., scale_indices] + scale_residual_true
             )
 
+            context_pose_parts = [
+                flow_context_raw,
+                shape_sample_true,
+                scale_sample_selected_true,
+                aa_3dofs,
+                params_1dofs,
+            ]
+            if self.nf_head.model_cam:
+                context_pose_parts.append(mean_pred["pred_cam"])
             flow_context_pose = self.nf_head.pose_context_proj(
-                torch.cat(
-                    [
-                        flow_context_raw,
-                        shape_sample_true,
-                        scale_sample_selected_true,
-                        aa_3dofs,
-                        params_1dofs,
-                    ],
-                    dim=-1,
-                )
+                torch.cat(context_pose_parts, dim=-1)
             )
 
             flow_log_prob, _ = self.nf_head.log_prob(
@@ -185,6 +185,18 @@ class Loss(pl.LightningModule):
             )
 
             true_residual = gt_flow_params - mean_pred_flow_params
+
+            if getattr(self.cfg.MODEL, "MODEL_CAM", False):
+                pose_dim_no_cam = self.nf_head.pose_dim - self.nf_head.num_cam_comps
+                cam_zeros = torch.zeros(
+                    true_residual.shape[0], self.nf_head.num_cam_comps,
+                    device=true_residual.device, dtype=true_residual.dtype,
+                )
+                true_residual = torch.cat([
+                    true_residual[..., :pose_dim_no_cam],
+                    cam_zeros,
+                    true_residual[..., pose_dim_no_cam:],
+                ], dim=-1)
 
         if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0:
             uncertainty_output = predictions["uncertainty_output"]

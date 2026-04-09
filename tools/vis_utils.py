@@ -322,6 +322,11 @@ def my_visualize_samples(
 
     mhr_root_joint_samples = outputs["j3d_samples"][..., 1, :].cpu().detach().numpy()
 
+    # Per-sample camera translations (only when MODEL_CAM is on)
+    pred_cam_t_samples = None
+    if "pred_cam_t_samples" in outputs:
+        pred_cam_t_samples = outputs["pred_cam_t_samples"].cpu().detach().numpy()
+
     gt_verts = batch['gt_verts_w_transl'].cpu().detach().numpy()
     gt_cam_t = batch["cam_ext"][..., :3, -1].cpu().detach().numpy()
     gt_root_joint = batch['gt_joint_coords'][..., [1], :].cpu().detach().numpy()
@@ -374,10 +379,11 @@ def my_visualize_samples(
         img_mesh = img_cv2.copy()
 
         # ----------------------- front view -----------------------
+        sample_cam_t = pred_cam_t_samples[0, i] if pred_cam_t_samples is not None else outputs["pred_cam_t"][0]
         img_mesh = (
             renderer(
                 mhr_samples[0, i],
-                outputs["pred_cam_t"][0],
+                sample_cam_t,
                 img_mesh,
                 mesh_base_color=ORANGE,
                 scene_bg_color=(1, 1, 1),

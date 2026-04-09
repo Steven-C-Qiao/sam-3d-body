@@ -108,3 +108,50 @@ class PerspectiveHead(nn.Module):
             "focal_length": focal_length,
             "pred_keypoints_2d_depth": j3d_cam.reshape(batch_size, -1, 3)[:, :, 2],
         }
+
+    def inverse_perspective_projection(
+        self,
+        cam_t: torch.Tensor,
+        bbox_center: torch.Tensor,
+        bbox_size: torch.Tensor,
+        img_size: torch.Tensor,
+        cam_int: torch.Tensor,
+        use_intrin_center: bool = False,
+    ) -> torch.Tensor:
+        """
+        Invert perspective_projection: recover pred_cam (s, tx, ty) from cam_t.
+
+        Args:
+            cam_t: (B, 3) camera translation [tx+cx, ty+cy, tz]
+            bbox_center / img_size: (B, 2)
+            bbox_size: (B,)
+            cam_int: (B, 3, 3)
+
+        Returns:
+            pred_cam: (B, 3) in the model's output convention (before internal flip)
+        """
+        focal_length = cam_int[:, 0, 0]
+        tz = cam_t[:, 2].clamp(min=1e-4)
+
+        # Invert: tz = 2 * f / bs  →  bs = 2 * f / tz
+        bs = 2 * focal_length / tz
+
+        # Invert: bs = bbox_size * s_flipped * scale_factor  →  s_flipped
+        s_flipped = bs / (bbox_size * self.default_scale_factor + 1e-8)
+
+        # cx, cy use the same bs as forward
+        if not use_intrin_center:
+            cx = 2 * (bbox_center[:, 0] - (img_size[:, 0] / 2)) / bs
+            cy = 2 * (bbox_center[:, 1] - (img_size[:, 1] / 2)) / bs
+        else:
+            cx = 2 * (bbox_center[:, 0] - (cam_int[:, 0, 2])) / bs
+            cy = 2 * (bbox_center[:, 1] - (cam_int[:, 1, 2])) / bs
+
+        # Invert: cam_t = [tx_flipped + cx, ty_flipped + cy, tz]
+        tx_flipped = cam_t[:, 0] - cx
+        ty_flipped = cam_t[:, 1] - cy
+
+        # Undo the flip (forward does pred_cam[..., [0, 2]] *= -1):
+        #   s_flipped = -s_orig,  ty_flipped = -ty_orig
+        pred_cam = torch.stack([-s_flipped, tx_flipped, -ty_flipped], dim=-1)
+        return pred_cam

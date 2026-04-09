@@ -679,6 +679,39 @@ class SAM3DBody(BaseModel):
 
         pose_output.update(cam_out)
 
+        # Compute GT pred_cam for MODEL_CAM: invert perspective_projection on GT cam_t.
+        # gt_cam_t (from cam_ext) pairs with un-flipped GT verts, but the model's
+        # pred_cam pairs with Y/Z-flipped verts.  Under perspective projection
+        # the Y-flip requires: cam_t_flipped_y = cam_t_y + 2 * centroid_y
+        # (exact at centroid; excellent approx elsewhere since vertex spread << depth).
+        # Z centroid ≈ 0 after translation removal, so no Z correction needed.
+        if getattr(self.cfg.MODEL, "MODEL_CAM", False) and "cam_ext" in batch:
+            gt_cam_t = self._flatten_person(
+                batch["cam_ext"]
+                .unsqueeze(1)
+                .expand(-1, batch["img"].shape[1], -1, -1)
+                .contiguous()
+            )[self.body_batch_idx, :3, 3].clone()
+
+            # Adjust for Y/Z-flip convention on predicted vertices
+            centroid_y = batch["gt_verts_w_transl"][:, :, 1].mean(dim=1)  # (B,)
+            gt_cam_t[:, 1] += 2 * centroid_y
+
+            gt_pred_cam = head_camera.inverse_perspective_projection(
+                gt_cam_t,
+                self._flatten_person(batch["bbox_center"])[self.body_batch_idx],
+                self._flatten_person(batch["bbox_scale"])[self.body_batch_idx, 0],
+                self._flatten_person(batch["ori_img_size"])[self.body_batch_idx],
+                self._flatten_person(
+                    batch["cam_int"]
+                    .unsqueeze(1)
+                    .expand(-1, batch["img"].shape[1], -1, -1)
+                    .contiguous()
+                )[self.body_batch_idx],
+                use_intrin_center=self.cfg.MODEL.DECODER.get("USE_INTRIN_CENTER", False),
+            )
+            batch["gt_pred_cam"] = gt_pred_cam
+
         return pose_output
 
 
@@ -884,9 +917,16 @@ class SAM3DBody(BaseModel):
             j3d_flat = j3d.view(B * num_samples, -1, 3)
             jcoords_flat = jcoords.view(B * num_samples, -1, 3)
 
-            pred_cam_expanded = output_mhr["pred_cam"].repeat_interleave(
-                num_samples, dim=0
-            )
+            # Use per-sample camera when MODEL_CAM is on, else shared mean camera.
+            cam_samples = samples_dict.get("cam_samples", None)
+            # # DEBUG: override per-sample cameras with mean prediction
+            # cam_samples = None
+            if cam_samples is not None:
+                pred_cam_expanded = cam_samples.reshape(B * num_samples, 3)
+            else:
+                pred_cam_expanded = output_mhr["pred_cam"].repeat_interleave(
+                    num_samples, dim=0
+                )
             bbox_center_expanded = self._flatten_person(batch["bbox_center"])[
                 self.body_batch_idx
             ].repeat_interleave(num_samples, dim=0)
@@ -906,7 +946,7 @@ class SAM3DBody(BaseModel):
             cam_int_expanded = cam_int_flat.repeat_interleave(num_samples, dim=0)
 
             # Project to 2D (full image coordinates)
-            kp2d_samples = self.head_camera.perspective_projection(
+            cam_out_samples = self.head_camera.perspective_projection(
                 j3d_flat,
                 pred_cam_expanded,
                 bbox_center_expanded,
@@ -916,8 +956,11 @@ class SAM3DBody(BaseModel):
                 use_intrin_center=self.cfg.MODEL.DECODER.get(
                     "USE_INTRIN_CENTER", False
                 ),
-            )["pred_keypoints_2d"]
+            )
+            kp2d_samples = cam_out_samples["pred_keypoints_2d"]
             outputs["kp2d_samples"] = kp2d_samples.view(B, num_samples, -1, 2)
+            if cam_samples is not None:
+                outputs["pred_cam_t_samples"] = cam_out_samples["pred_cam_t"].view(B, num_samples, 3)
 
             kp2d_samples_h = torch.cat(
                 [

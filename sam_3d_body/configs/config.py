@@ -28,6 +28,7 @@ _C.MODEL.FULL_COV = True
 _C.MODEL.MODEL_GLOB_ROT = True
 _C.MODEL.MODEL_SHAPE = True
 _C.MODEL.MODEL_SCALE = True
+_C.MODEL.MODEL_CAM = True
 
 ##########################################
 _C.MODEL.DECODER.USE_LORA = True
