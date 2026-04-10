@@ -3,6 +3,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 
 from sam_3d_body.models.modules.mhr_utils import (
+    batchXYZfrom6D,
     convert_mhr_params_to_flow_params,
     convert_pose_cont_to_flow_context,
     scale_indices,
@@ -166,12 +167,20 @@ class Loss(pl.LightningModule):
             )
 
             mean_pred = predictions["mhr"]
+            # When MODEL_GLOB_ROT, include the mean prediction's global rotation
+            # so that the flow learns a residual, not the absolute rotation.
+            if getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False):
+                glob_rot_euler_mean = batchXYZfrom6D(mean_pred["pred_pose_raw"][:, :6])
+                mean_global = torch.cat([
+                    torch.zeros_like(glob_rot_euler_mean),  # global_trans (unused)
+                    glob_rot_euler_mean,
+                ], dim=-1)
+            else:
+                mean_global = torch.zeros_like(mean_pred["body_pose"][..., :6])
             mean_pred_flow_params = convert_mhr_params_to_flow_params(
                 torch.cat(
                     [
-                        torch.zeros_like(
-                            mean_pred["body_pose"][..., :6]
-                        ),  # Adds global, which is not used
+                        mean_global,
                         mean_pred["body_pose"][..., :130],  # gets rid of jaw
                         mean_pred["scale_68D"],
                     ],
