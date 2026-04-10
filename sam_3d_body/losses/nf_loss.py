@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
+from pytorch3d.transforms import matrix_to_axis_angle
+
 from sam_3d_body.models.modules.mhr_utils import (
-    batchXYZfrom6D,
+    batch9Dfrom6D,
     convert_mhr_params_to_flow_params,
     convert_pose_cont_to_flow_context,
     scale_indices,
@@ -165,28 +167,26 @@ class Loss(pl.LightningModule):
             )
 
             mean_pred = predictions["mhr"]
-            if getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False):
-                glob_rot_euler_mean = batchXYZfrom6D(mean_pred["pred_pose_raw"][:, :6])
-                mean_global = torch.cat([
-                    torch.zeros_like(glob_rot_euler_mean),  # global_trans (unused)
-                    glob_rot_euler_mean,
-                ], dim=-1)
-            else:
-                mean_global = torch.zeros_like(mean_pred["body_pose"][..., :6])
-            mean_pred_flow_params = convert_mhr_params_to_flow_params(
-                torch.cat(
-                    [
-                        mean_global,
-                        mean_pred["body_pose"][..., :130],  # gets rid of jaw
-                        mean_pred["scale_68D"],
-                    ],
-                    dim=-1,
-                ),
-                mean_pred["shape"],
-                include_global_rot=getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False),
-                include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
-                include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
+
+            # Build mean_pred_flow_params using the direct 6D→AA path
+            # (convert_pose_cont_to_flow_context) instead of going through
+            # body_pose euler, which suffers from atan2 branch-cut bias.
+            # Ordering: [beta (shape? + scale?), theta (3dof + 1dof + glob_rot?)]
+            pose_params = convert_pose_cont_to_flow_context(
+                mean_pred["pred_pose_raw"][:, 6:]
             )
+            beta_parts = []
+            if getattr(self.cfg.MODEL, "MODEL_SHAPE", True):
+                beta_parts.append(mean_pred["shape"])
+            if getattr(self.cfg.MODEL, "MODEL_SCALE", True):
+                beta_parts.append(mean_pred["scale_68D"][..., scale_indices])
+            theta_parts = [pose_params["aa_3dofs"], pose_params["params_1dofs"]]
+            if getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False):
+                glob_rot_aa_mean = matrix_to_axis_angle(
+                    batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3))
+                )
+                theta_parts.append(glob_rot_aa_mean)
+            mean_pred_flow_params = torch.cat(beta_parts + theta_parts, dim=-1)
 
             #   [beta (shape+scale), theta (3dof + 1dof + glob_rot?)]
             true_residual = gt_flow_params - mean_pred_flow_params
