@@ -1,4 +1,3 @@
-import roma
 import torch
 import torch.nn as nn
 from torch.amp import autocast
@@ -7,6 +6,7 @@ from typing import Optional, Dict, Tuple
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 
 from sam_3d_body.models.modules.mhr_utils import (
+    batch6DFromXYZ,
     batch9Dfrom6D,
     batchXYZfrom6D,
     compact_cont_to_model_params_body,
@@ -126,6 +126,7 @@ class NFARHead(nn.Module):
             include_global_rot=self.model_glob_rot,
             include_shape=self.model_shape,
             include_scale=self.model_scale,
+            flip_global_rot=True,
         )
 
         # Compute mean-prediction flow params (mirrors nf_loss.py).
@@ -394,7 +395,12 @@ class NFARHead(nn.Module):
             )  # (B, 3)
             glob_rot_aa_samples = glob_rot_aa_mean.unsqueeze(1) + glob_rot_aa_residual  # (B, N, 3)
             glob_rot_mat_samples = axis_angle_to_matrix(glob_rot_aa_samples)  # (B, N, 3, 3)
-            glob_rot_euler_samples = roma.rotmat_to_euler("ZYX", glob_rot_mat_samples)  # (B, N, 3)
+            # Convert rotmat → (x, y, z) euler via batchXYZfrom6D (matches batch6DFromXYZ
+            # convention used by MHR C++ backend).  roma.rotmat_to_euler("ZYX") returns
+            # (z, y, x) which would be misinterpreted.
+            glob_rot_6d_samples = torch.cat([glob_rot_mat_samples[..., :, 0],
+                                             glob_rot_mat_samples[..., :, 1]], dim=-1)
+            glob_rot_euler_samples = batchXYZfrom6D(glob_rot_6d_samples)  # (B, N, 3)
         else:
             glob_rot_euler_samples = None
 
@@ -407,7 +413,67 @@ class NFARHead(nn.Module):
             cam_samples = None
 
         
-        # # DEBUG: override samples with GT residual
+        # DEBUG: override all samples with GT values directly (no residual roundtrip).
+        if batch is not None and "model_params" in batch:
+            # Shape & scale: use GT directly.
+            shape_samples = batch["shape_params"].unsqueeze(1).expand(-1, N, -1)
+            scale_samples_68D = batch["model_params"][:, -68:].unsqueeze(1).expand(-1, N, -1)
+
+            # Pose: use GT 130D euler directly (bypass AA roundtrip).
+            gt_pose_130D = batch["model_params"][:, 6:-68]  # (B, 130)
+            pose_samples = gt_pose_130D.unsqueeze(1).expand(-1, N, -1)
+
+            # Global rotation: use GT euler directly from model_params.
+            if self.model_glob_rot:
+                # GT model_params[:, 3:6] is in batch6DFromXYZ convention (x, y, z).
+                # Apply YZ-flip to go from GT camera frame to prediction "upright" frame,
+                # then convert back to the same (x, y, z) convention via batchXYZfrom6D
+                # (NOT roma, which returns (z, y, x)).
+                gt_glob_euler = batch["model_params"][:, 3:6]  # (B, 3)
+                gt_glob_rotmat = batch6DFromXYZ(gt_glob_euler, return_9D=True)
+                yz_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]],
+                                       device=gt_glob_rotmat.device, dtype=gt_glob_rotmat.dtype)
+                gt_glob_rotmat_flipped = yz_flip @ gt_glob_rotmat
+                gt_glob_6d = torch.cat([gt_glob_rotmat_flipped[..., :, 0],
+                                        gt_glob_rotmat_flipped[..., :, 1]], dim=-1)
+                gt_glob_rot_euler = batchXYZfrom6D(gt_glob_6d)  # (B, 3) in (x, y, z)
+                glob_rot_euler_samples = gt_glob_rot_euler.unsqueeze(1).expand(-1, N, -1)
+
+            # Camera: use GT directly.
+            if self.model_cam and "gt_pred_cam" in batch:
+                cam_samples = batch["gt_pred_cam"].unsqueeze(1).expand(-1, N, -1)
+            elif self.model_cam:
+                cam_samples = mean_pred["pred_cam"].unsqueeze(1).expand(-1, N, -1)
+
+            # Rebuild full residual for the samples tensor (used by param_l2 loss).
+            gt_flow_params = convert_mhr_params_to_flow_params(
+                batch["model_params"], batch["shape_params"],
+                include_global_rot=self.model_glob_rot,
+                include_shape=self.model_shape,
+                include_scale=self.model_scale,
+                flip_global_rot=True,
+            )
+            if self.model_glob_rot:
+                _glob_rot_euler_mean = batchXYZfrom6D(mean_pred["pred_pose_raw"][:, :6])
+                _mean_global = torch.cat([torch.zeros_like(_glob_rot_euler_mean), _glob_rot_euler_mean], dim=-1)
+            else:
+                _mean_global = torch.zeros_like(mean_pred["body_pose"][..., :6])
+            mean_pred_flow_params = convert_mhr_params_to_flow_params(
+                torch.cat([_mean_global, mean_pred["body_pose"][..., :130], mean_pred["scale_68D"]], dim=-1),
+                mean_pred["shape"],
+                include_global_rot=self.model_glob_rot, include_shape=self.model_shape, include_scale=self.model_scale,
+            )
+            gt_residual = gt_flow_params - mean_pred_flow_params
+            if self.model_cam and "gt_pred_cam" in batch:
+                gt_cam_residual = batch["gt_pred_cam"] - mean_pred["pred_cam"]
+                samples = torch.cat([gt_residual, gt_cam_residual], dim=-1)
+            else:
+                samples = gt_residual
+            samples = samples.unsqueeze(1).expand(-1, N, -1)
+
+        # # DEBUG (residual version): override samples with GT residual.
+        # # Uses mean+residual roundtrip — subject to euler↔AA branch-cut bias
+        # # for 3DOF joints. Use the direct version above for exact GT override.
         # if batch is not None and "model_params" in batch:
         #     gt_flow_params = convert_mhr_params_to_flow_params(
         #         batch["model_params"],
@@ -415,11 +481,20 @@ class NFARHead(nn.Module):
         #         include_global_rot=self.model_glob_rot,
         #         include_shape=self.model_shape,
         #         include_scale=self.model_scale,
+        #         flip_global_rot=True,
         #     )
+        #     if self.model_glob_rot:
+        #         glob_rot_euler_mean = batchXYZfrom6D(mean_pred["pred_pose_raw"][:, :6])
+        #         mean_global = torch.cat([
+        #             torch.zeros_like(glob_rot_euler_mean),
+        #             glob_rot_euler_mean,
+        #         ], dim=-1)
+        #     else:
+        #         mean_global = torch.zeros_like(mean_pred["body_pose"][..., :6])
         #     mean_pred_flow_params = convert_mhr_params_to_flow_params(
         #         torch.cat(
         #             [
-        #                 torch.zeros_like(mean_pred["body_pose"][..., :6]),
+        #                 mean_global,
         #                 mean_pred["body_pose"][..., :130],
         #                 mean_pred["scale_68D"],
         #             ],
@@ -430,51 +505,51 @@ class NFARHead(nn.Module):
         #         include_shape=self.model_shape,
         #         include_scale=self.model_scale,
         #     )
-        #     # gt_residual from convert_mhr_params_to_flow_params does NOT include camera.
-        #     # Flow ordering: [beta (shape+scale), theta (3dof + 1dof + glob_rot?)]
-        #     gt_residual = gt_flow_params - mean_pred_flow_params  # (B, flow_dim_no_cam)
-
+        #     gt_residual = gt_flow_params - mean_pred_flow_params
+        #
         #     # Override shape samples with GT
         #     gt_shape_residual = gt_residual[..., : self.num_shape_comps]
         #     shape_samples = (shape_mean + gt_shape_residual).unsqueeze(1).expand(-1, N, -1)
-
+        #
         #     # Override scale samples with GT
         #     gt_scale_residual = gt_residual[..., self.num_shape_comps : self.num_shape_comps + self.num_scale_comps]
-        #     gt_scale_68D = batch["model_params"][:, -68:]  # (B, 68)
+        #     gt_scale_68D = batch["model_params"][:, -68:]
         #     scale_samples_68D = gt_scale_68D.unsqueeze(1).expand(-1, N, -1).clone()
         #     scale_samples_68D[..., scale_indices] = (
         #         scale_mean[..., scale_indices].unsqueeze(1) + gt_scale_residual.unsqueeze(1)
         #     ).expand(-1, N, -1)
-
+        #
         #     # Override pose samples with GT
         #     gt_pose_3dof_residual = gt_residual[..., self.beta_dim : self.beta_dim + self.num_3dof_comps]
         #     gt_pose_1dof_residual = gt_residual[..., self.beta_dim + self.num_3dof_comps : self.beta_dim + self.num_3dof_comps + self.num_1dof_comps]
         #     gt_aa_3dof_samples = (aa_3dofs + gt_pose_3dof_residual).unsqueeze(1).expand(-1, N, -1)
         #     gt_params_1dofs_samples = (params_1dofs + gt_pose_1dof_residual).unsqueeze(1).expand(-1, N, -1)
-        #     # Use GT pose params (130D → 133D with jaw zeros) as base so non-modelled
-        #     # joints (hands, jaw, etc.) come from GT instead of mean prediction.
-        #     gt_pose_130D = batch["model_params"][:, 6:-68]  # (B, 130)
-        #     gt_pose_133D = torch.cat([gt_pose_130D, torch.zeros_like(gt_pose_130D[:, :3])], dim=-1)  # (B, 133)
+        #     gt_pose_130D = batch["model_params"][:, 6:-68]
+        #     gt_pose_133D = torch.cat([gt_pose_130D, torch.zeros_like(gt_pose_130D[:, :3])], dim=-1)
         #     pose_samples = convert_flow_samples_to_mhr_params(gt_aa_3dof_samples, gt_params_1dofs_samples, gt_pose_133D)
-
+        #
         #     # Override global rotation samples with GT
         #     if self.model_glob_rot:
         #         gr_off = self.beta_dim + self.num_3dof_comps + self.num_1dof_comps
-        #         gt_glob_rot_aa = gt_residual[..., gr_off : gr_off + self.num_glob_rot_comps]  # (B, 3)
-        #         gt_glob_rot_mat = axis_angle_to_matrix(gt_glob_rot_aa)  # (B, 3, 3)
-        #         gt_glob_rot_euler = roma.rotmat_to_euler("ZYX", gt_glob_rot_mat).flip(-1)  # (B, 3) ZYX→XYZ
-        #         glob_rot_euler_samples = gt_glob_rot_euler.unsqueeze(1).expand(-1, N, -1)
-
+        #         gt_glob_rot_aa_residual = gt_residual[..., gr_off : gr_off + self.num_glob_rot_comps]
+        #         glob_rot_aa_mean = matrix_to_axis_angle(
+        #             batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3))
+        #         )
+        #         gt_glob_rot_aa = glob_rot_aa_mean + gt_glob_rot_aa_residual
+        #         gt_glob_rot_mat = axis_angle_to_matrix(gt_glob_rot_aa)
+        #         gt_glob_6d = torch.cat([gt_glob_rot_mat[..., :, 0], gt_glob_rot_mat[..., :, 1]], dim=-1)
+        #         glob_rot_euler_samples = batchXYZfrom6D(gt_glob_6d).unsqueeze(1).expand(-1, N, -1)
+        #
         #     # Override camera samples with GT
         #     if self.model_cam and "gt_pred_cam" in batch:
-        #         gt_cam_residual = batch["gt_pred_cam"] - mean_pred["pred_cam"]  # (B, 3)
+        #         gt_cam_residual = batch["gt_pred_cam"] - mean_pred["pred_cam"]
         #         cam_samples = batch["gt_pred_cam"].unsqueeze(1).expand(-1, N, -1)
         #     elif self.model_cam:
         #         cam_samples = mean_pred["pred_cam"].unsqueeze(1).expand(-1, N, -1)
         #     else:
         #         cam_samples = None
-
-        #     # Rebuild full residual — gt_residual already in flow ordering [beta, theta_no_cam]
+        #
+        #     # Rebuild full residual
         #     if self.model_cam and "gt_pred_cam" in batch:
         #         samples = torch.cat([gt_residual, gt_cam_residual], dim=-1)
         #     else:

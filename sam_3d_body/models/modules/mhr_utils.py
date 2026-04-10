@@ -38,6 +38,7 @@ def convert_mhr_params_to_flow_params(
     include_global_rot: bool = False,
     include_shape: bool = True,
     include_scale: bool = True,
+    flip_global_rot: bool = False,
 ) -> torch.Tensor:
     assert model_params.shape[-1] == 204
     assert shape_params.shape[-1] == 45
@@ -68,6 +69,13 @@ def convert_mhr_params_to_flow_params(
         # model_params[..., :6] == [global_trans(3), global_rot(3)] in XYZ Euler.
         glob_euler = model_params[:, 3:6]  # (B, 3)
         glob_rotmat = batch6DFromXYZ(glob_euler, return_9D=True)  # (B, 3, 3)
+        if flip_global_rot:
+            # GT global rotation is in camera frame (mesh already oriented).
+            # Predictions are in "upright" frame (mesh flipped by verts[..., [1,2]] *= -1).
+            # Compose with YZ-flip so the residual reconciles these conventions.
+            yz_flip = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]],
+                                   device=glob_rotmat.device, dtype=glob_rotmat.dtype)
+            glob_rotmat = yz_flip @ glob_rotmat
         glob_aa = matrix_to_axis_angle(glob_rotmat)  # (B, 3)
         theta_parts.append(glob_aa)
 

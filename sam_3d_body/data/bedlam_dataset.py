@@ -236,7 +236,7 @@ class DatasetHMR(Dataset):
         return item
 
     def __len__(self):
-        mult = 0.1
+        mult = 0.5
         if self.is_train and "agora" not in self.dataset and "3dpw" not in self.dataset:
             return int(mult * self.options.CROP_PERCENT * len(self.imgname))
         else:

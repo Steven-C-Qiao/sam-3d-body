@@ -161,6 +161,7 @@ class Loss(pl.LightningModule):
                 include_global_rot=getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False),
                 include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
                 include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
+                flip_global_rot=True,
             )
 
             mean_pred = predictions["mhr"]

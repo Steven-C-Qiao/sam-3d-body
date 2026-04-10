@@ -63,6 +63,7 @@ class NFHead(nn.Module):
             include_global_rot=self.model_glob_rot,
             include_shape=self.model_shape,
             include_scale=self.model_scale,
+            flip_global_rot=True,
         )
 
         with torch.no_grad():
