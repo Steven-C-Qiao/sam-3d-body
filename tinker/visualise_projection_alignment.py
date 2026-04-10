@@ -176,7 +176,7 @@ def main():
         if isinstance(v, torch.Tensor):
             batch[k] = v.to(device)
 
-    # ---- Preprocess (computes gt_verts_w_transl etc.) ----
+    # ---- Preprocess ----
     print("[Preprocessing...]")
     batch = model.preprocess(batch)
 
@@ -199,9 +199,8 @@ def main():
     print(f"Extracting data for batch index {bi}")
     print(f"{'='*60}")
 
-    # GT verts: raw MHR output (no Y/Z flip), body translation baked in
-    # Shape: batch["gt_verts_w_transl"] is (B, N_verts, 3)
-    gt_verts = batch["gt_verts_w_transl"][bi].cpu().numpy()
+    # GT verts from new_preprocess (Y/Z-flipped, aligned with predictions)
+    gt_verts = batch["vertices"][bi].cpu().numpy()
     print(f"gt_verts shape: {gt_verts.shape}")
 
     # GT camera translation: extrinsic camera translation (last column of cam_ext)
@@ -225,9 +224,8 @@ def main():
     pred_cam_t = outputs["mhr"]["pred_cam_t"][bi].cpu().numpy()
     print(f"pred_cam_t: {pred_cam_t}")
 
-    # Root joint positions (joint index 1 in MHR ordering, matching vis_utils.py:323)
-    # GT: gt_joint_coords is already /100 (metres), in same frame as gt_verts (no Y/Z flip)
-    gt_root_joint = batch["gt_joint_coords"][bi, 1, :].cpu().numpy()  # (3,)
+    # Root joint positions (joint index 1 in MHR ordering)
+    gt_root_joint = batch["joint_coords"][bi, 1, :].cpu().numpy()  # (3,)
     print(f"gt_root_joint: {gt_root_joint}")
     # Pred: pred_joint_coords is (B, N_joints, 3), Y/Z flipped, no translation (mean prediction)
     pred_root_joint = outputs["mhr"]["pred_joint_coords"][bi, 1, :].cpu().numpy()  # (3,)

@@ -1,8 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 from typing import Optional
 
+import cv2 
+import torch
 import numpy as np
-import cv2
+import matplotlib.cm as cm
+
 from sam_3d_body.visualization.renderer import Renderer
 # from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
@@ -159,9 +162,7 @@ def visualize_sample_together(img_cv2, outputs, faces):
 
     return cur_img
 
-import cv2 
-import torch
-import matplotlib.cm as cm
+
 def my_visualize(img_cv2, outputs, faces, stack_vertically=True, batch=None):
     # Render everything together
     img_keypoints = img_cv2.copy()
@@ -327,9 +328,10 @@ def my_visualize_samples(
     if "pred_cam_t_samples" in outputs:
         pred_cam_t_samples = outputs["pred_cam_t_samples"].cpu().detach().numpy()
 
-    gt_verts = batch['gt_verts_w_transl'].cpu().detach().numpy()
+    gt_verts = batch['vertices'].cpu().detach().numpy()
+    # gt_verts[..., [1, 2]] *= -1  # un-flip for renderer
     gt_cam_t = batch["cam_ext"][..., :3, -1].cpu().detach().numpy()
-    gt_root_joint = batch['gt_joint_coords'][..., [1], :].cpu().detach().numpy()
+    gt_root_joint = batch['joint_coords'][..., [1], :].cpu().detach().numpy()
 
     outputs = outputs["mhr"]
     for key in outputs:
@@ -737,8 +739,11 @@ def view_one_in_another(
     
     # Ground truth for overlay (flattened batch indexing)
     if overlay_gt:
-        gt_verts_batch = batch.get("gt_verts_w_transl")
-        gt_joint_coords_batch = batch.get("gt_joint_coords")
+        gt_verts_batch = batch.get("vertices")
+        if gt_verts_batch is not None:
+            gt_verts_batch = gt_verts_batch.clone()
+            gt_verts_batch[..., [1, 2]] *= -1  # un-flip for renderer
+        gt_joint_coords_batch = batch.get("joint_coords")
         if "cam_ext" in batch:
             gt_cam_t_batch = batch["cam_ext"][..., :3, -1]
         else:

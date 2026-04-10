@@ -104,10 +104,7 @@ class Loss(pl.LightningModule):
         if self.cfg.LOSS.KP3D_WEIGHT > 0:
             pred_kp3d_samples = predictions["kp3d_samples"]
 
-            # pred_kp3d is in the wrong way up in 3D space, and projects correctly onto the image.
-            # Thus, flip gt_kp3d for loss. Both pred and gt are upside down
             gt_kp3d = batch["keypoints_3d"][..., :3]
-            gt_kp3d[..., [1, 2]] *= -1
             gt_kp3d = gt_kp3d.unsqueeze(1).expand(
                 -1, pred_kp3d_samples.shape[1], -1, -1
             )

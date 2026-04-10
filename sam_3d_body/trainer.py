@@ -182,7 +182,7 @@ class Trainer(BaseLightningModule):
         self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
 
     def training_step(self, batch: Dict, batch_idx: int):
-        
+
         batch = self.preprocess(batch)
 
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
@@ -368,8 +368,12 @@ class Trainer(BaseLightningModule):
 
         return loss_dict["total_loss"]
 
+
     def preprocess(self, batch: Dict):
         mhr_model = self.model.head_pose
+
+        mhr_transl = batch["model_params"][:, :3] / 10.0 
+        batch["model_params"][:, :3] = 0
 
         gt_mhr_output = mhr_model.mhr(
             identity_coeffs=batch["shape_params"],
@@ -383,6 +387,17 @@ class Trainer(BaseLightningModule):
         gt_verts = gt_verts / 100
         gt_joint_coords = gt_joint_coords / 100
 
+        def align(x, c=torch.tensor([0., 0.923986, 0.])):
+            c = c.to(x.device)
+            x -= c[None, :]
+            x[..., [1, 2]] *= -1
+            x += c[None, :]
+            x[..., [1, 2]] *= -1
+            return x
+
+        gt_verts = align(gt_verts)
+        gt_joint_coords = align(gt_joint_coords[None, ...]).squeeze()
+
         gt_vert_joints = torch.cat(
             [gt_verts, gt_joint_coords], dim=1
         )  # B x (num_verts + 127) x 3
@@ -390,22 +405,16 @@ class Trainer(BaseLightningModule):
             (mhr_model.keypoint_mapping @ gt_vert_joints.permute(1, 0, 2).flatten(1, 2))
             .reshape(-1, gt_vert_joints.shape[0], 3)
             .permute(1, 0, 2)
-        )
+        )[..., :70, :]
         if batch["dataset_name"][0] == "4d-dress":
             R = batch["cam_ext"][:, :3, :3]
             gt_verts = gt_verts @ R.transpose(-2, -1)
             gt_joint_coords = gt_joint_coords @ R.transpose(-2, -1)
 
-        # Remove body translation from verts/joints; compensate in cam_t so
-        # that camera-space positions (v + cam_t) are unchanged.
-        body_transl = batch["model_params"][:, :3] / 10.0  # (B, 3) metres
-        gt_verts = gt_verts - body_transl[:, None, :]
-        gt_joint_coords = gt_joint_coords - body_transl[:, None, :]
-        gt_keypoints_3d = gt_keypoints_3d - body_transl[:, None, :]
-        batch["cam_ext"][:, :3, 3] = batch["cam_ext"][:, :3, 3] + body_transl
+        batch["vertices"] = gt_verts
+        batch["joint_coords"] = gt_joint_coords
+        batch["keypoints_3d"] = gt_keypoints_3d
 
-        batch["gt_verts_w_transl"] = gt_verts
-        batch["gt_joint_coords"] = gt_joint_coords
 
         cam_int = batch["cam_int"]
         if "cam_ext" not in batch:
@@ -416,11 +425,12 @@ class Trainer(BaseLightningModule):
             cam_ext = batch["cam_ext"]
             trans_cam = cam_ext[:, :3, 3]
 
+        c = torch.tensor([0., 0.923986, 0.]).to(cam_ext.device)
+        trans_cam += (c * 2 + mhr_transl)
+
         def project(points, cam_trans, cam_int):
             points = points + cam_trans
-            # Normalize by Z (divide by last coordinate)
             projected_points = points / points[..., -1].unsqueeze(-1)
-            # Multiply by camera intrinsics: cam_int @ projected_points.T
             projected_points = torch.einsum("bij, bkj->bki", cam_int, projected_points)
             return projected_points
 
@@ -440,7 +450,6 @@ class Trainer(BaseLightningModule):
         img_size = batch["img_size"][:, 0]
 
         gt_kp2d_crop = gt_kp2d_h @ affine.mT  # [B, 70, 3] @ [B, 3, 2] = [B, 70, 2]
-        # gt_kp2d_crop = gt_kp2d_crop[..., :2]
 
         gt_kp2d_crop = gt_kp2d_crop / img_size.unsqueeze(1) - 0.5  # [B, 70, 2]
         batch["keypoints_2d"] = gt_kp2d_crop
@@ -455,72 +464,6 @@ class Trainer(BaseLightningModule):
         j2d_crop = j2d_crop[..., :2]
         j2d_crop = j2d_crop / img_size.unsqueeze(1) - 0.5
         batch["joints_2d"] = j2d_crop
-
-        # ------------ gt for no glob rot ------------
-        model_parameters = batch["model_params"]
-
-        # No global transl
-        model_parameters[:, :3] = 0
-
-        global_rot = batch["model_params"][:, 3:6]
-
-        global_rotmat = roma.euler_to_rotmat("xyz", global_rot)  # B x 3 x 3
-        
-        if batch["dataset_name"][0] == "4d-dress":
-            R = batch["cam_ext"][:, :3, :3]
-            global_rotmat = global_rotmat @ R.transpose(-2, -1)
-
-        batch_size = global_rot.shape[0]
-        rot_180_x = (
-            torch.tensor(
-                [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
-                dtype=global_rot.dtype,
-                device=global_rot.device,
-            )
-            .unsqueeze(0)
-            .expand(batch_size, -1, -1)
-        )
-        new_global_rotmat = torch.bmm(rot_180_x, global_rotmat)
-
-        global_rot = roma.rotmat_to_euler("xyz", new_global_rotmat)
-
-        model_parameters[:, 3:6] = global_rot
-
-        gt_mhr_output = mhr_model.mhr(
-            identity_coeffs=batch["shape_params"],
-            model_parameters=model_parameters,
-            face_expr_coeffs=batch["face_expr_coeffs"],
-        )
-        gt_verts, gt_skeleton_state = gt_mhr_output
-        gt_joint_coords, gt_joint_quats, _ = torch.split(
-            gt_skeleton_state, [3, 4, 1], dim=2
-        )
-        gt_verts = gt_verts / 100
-        gt_joint_coords = gt_joint_coords / 100
-
-        gt_vert_joints = torch.cat(
-            [gt_verts, gt_joint_coords], dim=1
-        )  # B x (num_verts + 127) x 3
-        gt_keypoints_3d_all = (
-            (mhr_model.keypoint_mapping @ gt_vert_joints.permute(1, 0, 2).flatten(1, 2))
-            .reshape(-1, gt_vert_joints.shape[0], 3)
-            .permute(1, 0, 2)
-        )
-
-        # Ground-truth 3D keypoints: always include the canonical 70 MHR keypoints,
-        # and optionally append dense keypoints if enabled.
-        gt_kp3d_70 = gt_keypoints_3d_all[:, :70]  # [B, 70, 3]
-        if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
-            dense_kp3d_gt = gt_verts[:, self.mhr_dense_kp_indices, :]  # [B, N_dense, 3]
-            gt_keypoints_3d = torch.cat(
-                [gt_kp3d_70, dense_kp3d_gt], dim=1
-            )  # [B, 70+N_dense, 3]
-        else:
-            gt_keypoints_3d = gt_kp3d_70
-
-        batch["joints_3d"] = gt_joint_coords
-        batch["vertices"] = gt_verts
-        batch["keypoints_3d"] = gt_keypoints_3d
 
         return batch
 

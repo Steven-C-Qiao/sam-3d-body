@@ -192,7 +192,6 @@ class Metrics(pl.LightningModule):
 
             pred_vertices = predictions["mhr"]["pred_vertices"]
             gt_vertices = batch["vertices"]
-            gt_vertices[..., [1, 2]] *= -1
 
             mpjpe_per_joint = mpjpe(
                 pred_kp3d[:, :70, :],

@@ -115,23 +115,29 @@ def main():
 
     with torch.no_grad():
         batch = trainer.preprocess(batch)
+        outputs = trainer(batch, num_samples=0)
 
     i = args.sample_idx
 
     # --- Extract data ---
-    # gt_verts_w_transl: first MHR pass (with global rot), un-flipped — matches cam_ext.
-    # batch["vertices"]: second MHR pass (no global rot) — used by loss, not for rendering.
-    gt_verts = batch["gt_verts_w_transl"][i].cpu().numpy()      # (V, 3) un-flipped, with global rot
-    gt_verts_no_glob = batch["vertices"][i].cpu().numpy()       # (V, 3) no-global-rot version
-    # gt_verts_no_glob[:, [1, 2]] *= -1
+    # batch["vertices"]: GT verts from new_preprocess (Y/Z-flipped, aligned with predictions)
+    gt_verts = batch["vertices"][i].cpu().numpy()               # (V, 3) Y/Z-flipped
 
-    pelvis = torch.tensor([0., 0.923986, 0.])
+    # Predicted vertices (Y/Z-flipped by MHR head) + predicted camera translation
+    pred_verts = outputs["mhr"]["pred_vertices"][i].cpu().numpy()          # (V, 3) Y/Z-flipped
+    pred_cam_t = outputs["mhr"]["pred_cam_t"][i].cpu().numpy()             # (3,)
+    pred_joint_coords = outputs["mhr"]["pred_joint_coords"][i].cpu().numpy()  # (J, 3) Y/Z-flipped
+    pred_root = pred_joint_coords[0]    # (3,)
+    pred_pelvis = pred_joint_coords[1]  # (3,)
 
-    root_joint = batch["gt_joint_coords"][i, 0].cpu().numpy()  # (3,) joint 0 = root
-    pelvis_joint = batch["gt_joint_coords"][i, 1].cpu().numpy() # (3,) joint 1 = pelvis
+    root_joint = batch["joint_coords"][i, 0].cpu().numpy()  # (3,) joint 0 = root
+    pelvis_joint = batch["joint_coords"][i, 1].cpu().numpy() # (3,) joint 1 = pelvis
 
     cam_t = batch["cam_ext"][i, :3, 3].cpu().numpy()            # (3,)
     K = batch["cam_int"][i].cpu().numpy()                       # (3, 3)
+
+    print(cam_t)
+    print(pred_cam_t)
 
     # Original image
     img_ori = batch["img_ori"][i]
@@ -144,28 +150,34 @@ def main():
     # --- Figure: 2x2 ---
     fig = plt.figure(figsize=(16, 14))
 
-    # Panel 1: GT vertices with global rot (un-flipped, body frame)
+    # Panel 1: GT vertices (Y/Z-flipped, from new_preprocess)
     ax1 = fig.add_subplot(2, 2, 1, projection="3d")
-    scatter_3d(ax1, gt_verts, "gt_verts_w_transl (with global rot)")
+    scatter_3d(ax1, gt_verts, "GT vertices (flipped frame)")
     ax1.scatter(*root_joint, s=80, c="red", marker="x", zorder=10)
     ax1.text(*root_joint, "  " + xyz_label("root", root_joint), fontsize=7, color="red")
     ax1.scatter(*pelvis_joint, s=80, c="magenta", marker="o", zorder=10)
     ax1.text(*pelvis_joint, "  " + xyz_label("pelvis", pelvis_joint), fontsize=7, color="magenta")
 
-    # Panel 2: Overlay of both vertex sets
+    # Panel 2: Overlay GT and predicted vertices
     ax2 = fig.add_subplot(2, 2, 2, projection="3d")
-    scatter_3d(ax2, gt_verts, "Overlay: w/ global rot (blue) vs no global rot (orange)")
-    scatter_3d(ax2, gt_verts_no_glob, "", color="darkorange")
+    scatter_3d(ax2, gt_verts, "GT (blue) vs Pred (green)", color="darkorange")
+    scatter_3d(ax2, pred_verts, "", color="limegreen")
     # Re-compute axis limits to fit both sets
     all_verts = np.concatenate([subsample_verts(gt_verts, 1500),
-                                subsample_verts(gt_verts_no_glob, 1500)], axis=0)
+                                subsample_verts(pred_verts, 1500)], axis=0)
     set_equal_aspect_3d(ax2, all_verts)
+    # GT joints
     ax2.scatter(*root_joint, s=80, c="red", marker="x", zorder=10)
-    ax2.text(*root_joint, "  " + xyz_label("root", root_joint), fontsize=7, color="red")
+    ax2.text(*root_joint, "  " + xyz_label("GT root", root_joint), fontsize=7, color="red")
     ax2.scatter(*pelvis_joint, s=80, c="magenta", marker="o", zorder=10)
-    ax2.text(*pelvis_joint, "  " + xyz_label("pelvis", pelvis_joint), fontsize=7, color="magenta")
+    ax2.text(*pelvis_joint, "  " + xyz_label("GT pelvis", pelvis_joint), fontsize=7, color="magenta")
+    # Predicted joints
+    ax2.scatter(*pred_root, s=80, c="darkred", marker="x", zorder=10)
+    ax2.text(*pred_root, "  " + xyz_label("pred root", pred_root), fontsize=7, color="darkred")
+    ax2.scatter(*pred_pelvis, s=80, c="purple", marker="o", zorder=10)
+    ax2.text(*pred_pelvis, "  " + xyz_label("pred pelvis", pred_pelvis), fontsize=7, color="purple")
 
-    # Panel 3: Project un-flipped GT vertices onto image (same as trainer.preprocess)
+    # Panel 3: Project GT vertices onto image (flipped verts + adjusted cam_ext)
     ax3 = fig.add_subplot(2, 2, 3)
     px = project_to_2d(gt_verts, cam_t, K)
     ax3.imshow(img_rgb)
@@ -179,26 +191,27 @@ def main():
     ax3.scatter(pelvis_px[0], pelvis_px[1], s=80, c="magenta", marker="o", zorder=10)
     ax3.annotate(xyz_label("pelvis", pelvis_joint), (pelvis_px[0], pelvis_px[1]),
                  fontsize=7, color="magenta", xytext=(5, 10), textcoords="offset points")
-    ax3.set_title("GT projected onto image (un-flipped + cam_ext)", fontsize=10)
+    ax3.set_title("GT projected onto image (flipped + adjusted cam_ext)", fontsize=10)
     ax3.axis("off")
 
     # Panel 4: Rendered mesh overlay via Renderer
-    # Training vis passes un-flipped verts + cam_ext to Renderer;
-    # the renderer's internal 180-deg X rotation handles the visual flip.
+    # Renderer applies 180-deg X rotation internally, so un-flip GT verts before passing.
     ax4 = fig.add_subplot(2, 2, 4)
     faces = trainer.faces
     focal_length = K[0, 0]
     renderer = Renderer(focal_length=focal_length, faces=faces)
     img_render = (img_rgb * 255.0).astype(np.float32)
     cx, cy = K[0, 2], K[1, 2]
+    gt_verts_unflipped = gt_verts.copy()
+    gt_verts_unflipped[..., [1, 2]] *= -1  # un-flip for renderer
     rendered = renderer(
-        gt_verts,
+        gt_verts_unflipped,
         cam_t,
         img_render,
         camera_center=[cx, cy],
     )
     ax4.imshow(rendered)
-    ax4.set_title("Renderer: GT mesh on image (un-flipped)", fontsize=10)
+    ax4.set_title("Renderer: GT mesh on image", fontsize=10)
     ax4.axis("off")
 
     fig.suptitle("Preprocess vertex outputs", fontsize=14, y=0.98)

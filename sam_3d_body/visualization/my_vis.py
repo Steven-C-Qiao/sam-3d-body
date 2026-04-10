@@ -1605,7 +1605,7 @@ def vis_predictions(
 
         flat_idx = i * num_views + view
         pred_verts = outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
-        gt_verts = batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
+        gt_verts = batch["vertices"][flat_idx].cpu().detach().numpy()
         if not has_merged:
             # `merged_verts` and `merged_neutral_verts` should both be provided for this visualization.
             assert False
@@ -1650,8 +1650,8 @@ def vis_predictions(
         verts = outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
         cam_t = outputs["mhr"]["pred_cam_t"][flat_idx].cpu().detach().numpy()
 
-        gt_verts = batch["gt_verts_w_transl"][flat_idx].cpu().detach().numpy()
-        # gt_verts[..., [1, 2]] *= -1
+        gt_verts = batch["vertices"][flat_idx].cpu().detach().numpy()
+        # gt_verts[..., [1, 2]] *= -1  # un-flip for renderer (renderer applies 180-deg X internally)
         if "cam_ext" not in batch:
             # SSP-3D
             assert batch["dataset_name"][0] == "ssp3d"

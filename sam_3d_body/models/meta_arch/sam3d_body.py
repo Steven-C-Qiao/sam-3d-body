@@ -680,11 +680,6 @@ class SAM3DBody(BaseModel):
         pose_output.update(cam_out)
 
         # Compute GT pred_cam for MODEL_CAM: invert perspective_projection on GT cam_t.
-        # gt_cam_t (from cam_ext) pairs with un-flipped GT verts, but the model's
-        # pred_cam pairs with Y/Z-flipped verts.  Under perspective projection
-        # the Y-flip requires: cam_t_flipped_y = cam_t_y + 2 * centroid_y
-        # (exact at centroid; excellent approx elsewhere since vertex spread << depth).
-        # Z centroid ≈ 0 after translation removal, so no Z correction needed.
         if getattr(self.cfg.MODEL, "MODEL_CAM", False) and "cam_ext" in batch:
             gt_cam_t = self._flatten_person(
                 batch["cam_ext"]
@@ -692,10 +687,6 @@ class SAM3DBody(BaseModel):
                 .expand(-1, batch["img"].shape[1], -1, -1)
                 .contiguous()
             )[self.body_batch_idx, :3, 3].clone()
-
-            # Adjust for Y/Z-flip convention on predicted vertices
-            centroid_y = batch["gt_verts_w_transl"][:, :, 1].mean(dim=1)  # (B,)
-            gt_cam_t[:, 1] += 2 * centroid_y
 
             gt_pred_cam = head_camera.inverse_perspective_projection(
                 gt_cam_t,

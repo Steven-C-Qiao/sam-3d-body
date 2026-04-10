@@ -133,10 +133,7 @@ class Loss(pl.LightningModule):
             visibility = batch["visibility"]
             visibility = visibility.unsqueeze(1).expand(-1, num_samples, -1)
 
-            # pred_kp3d is in the wrong way up in 3D space, and projects correctly onto the image.
-            # Thus, flip gt_kp3d for loss. Both pred and gt are upside down
             gt_kp3d = batch["keypoints_3d"][..., :3]
-            gt_kp3d[..., [1, 2]] *= -1
             gt_kp3d = gt_kp3d.unsqueeze(1).expand(-1, num_samples, -1, -1)
 
             kp3d_loss = self.mse_loss(pred_kp3d_samples, gt_kp3d)
