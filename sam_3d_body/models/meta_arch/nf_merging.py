@@ -297,7 +297,7 @@ def merge_params_nf_is(
     beta_context = uncertainty_out["flow_context_beta"].unflatten(0, (bs, num_views))
     beta_log_prob_ref = uncertainty_out["log_prob_beta"].unflatten(0, (bs, num_views))
     flow_samples = uncertainty_out["samples"].unflatten(0, (bs, num_views))
-    beta_residual_samples = flow_samples[..., -nf_head.beta_dim :]
+    beta_residual_samples = flow_samples[..., : nf_head.beta_dim]
     shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
     scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
 

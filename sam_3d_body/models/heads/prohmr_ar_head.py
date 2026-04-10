@@ -41,7 +41,8 @@ class NFARHead(nn.Module):
         #   Stage 1: p(Δβ | c, μβ) over shape+scale residuals.
         #   Stage 2: p(Δθ, Δcam? | c, μθ, μcam?, Δβ) over pose (+camera) residuals.
         self.beta_dim = self.num_shape_comps + self.num_scale_comps
-        self.theta_dim = self.num_glob_rot_comps + self.num_3dof_comps + self.num_1dof_comps + self.num_cam_comps
+        # theta ordering: [3dof(39) | 1dof(34) | glob_rot?(3) | cam?(3)]
+        self.theta_dim = self.num_3dof_comps + self.num_1dof_comps + self.num_glob_rot_comps + self.num_cam_comps
         self.flow_dim = self.theta_dim + self.beta_dim
         flow_num_layers = cfg.MODEL.FLOW_NUM_LAYERS
         flow_dropout = cfg.MODEL.FLOW_DROPOUT
@@ -154,12 +155,11 @@ class NFARHead(nn.Module):
         )
 
         # Flows are trained on residuals, so initialise with residuals.
+        # convert_mhr_params_to_flow_params output ordering matches flow ordering:
+        #   [beta (shape+scale), theta (3dof + 1dof + glob_rot?)]
         true_residual = gt_flow_params - mean_pred_flow_params
-        # convert_mhr_params_to_flow_params doesn't include camera, so split at
-        # the pose dim *without* camera, then splice camera residual in.
-        theta_dim_no_cam = self.theta_dim - self.num_cam_comps
-        theta_residual_no_cam = true_residual[..., :theta_dim_no_cam]
-        beta_residual = true_residual[..., theta_dim_no_cam:]
+        beta_residual = true_residual[..., : self.beta_dim]
+        theta_residual_no_cam = true_residual[..., self.beta_dim :]
 
         if self.model_cam:
             cam_residual = batch["gt_pred_cam"] - mean_pred["pred_cam"]
@@ -221,9 +221,8 @@ class NFARHead(nn.Module):
         Compute summed conditional log-probability for the factorised model.
 
         Args:
-            params: Residual parameters in the same ordering as
-                `convert_mhr_params_to_flow_params`, i.e.
-                [pose_part (= glob rot aa (optional), 3dof, 1dof), shape_params, scale_params]
+            params: Residual parameters in flow ordering:
+                [beta (shape(45) + scale(10)), theta (3dof(39) + 1dof(34) + glob_rot?(3) + cam?(3))]
                 with shapes matching `self.flow_dim`.
             flow_context_beta: [B, 2048] context for stage 1.
             flow_context_theta: [B, 2048] context for stage 2.
@@ -233,14 +232,14 @@ class NFARHead(nn.Module):
                 f"Expected params last dim {self.flow_dim}, got {params.shape[-1]}"
             )
 
-        # Split residual parameters into theta (pose+cam) and beta (shape+scale).
-        theta_params = params[..., : self.theta_dim]
-        beta_params = params[..., self.theta_dim :]
+        # Split: [beta (shape+scale), theta (3dof+1dof+glob_rot?+cam?)].
+        beta_params = params[..., : self.beta_dim]
+        theta_params = params[..., self.beta_dim :]
 
-        if beta_params.shape[-1] != self.beta_dim:
+        if theta_params.shape[-1] != self.theta_dim:
             raise ValueError(
                 "Internal split mismatch: "
-                f"expected beta_dim={self.beta_dim}, got {beta_params.shape[-1]}"
+                f"expected theta_dim={self.theta_dim}, got {theta_params.shape[-1]}"
             )
 
         log_prob_beta, z_beta = self.flow_beta.log_prob(
@@ -365,16 +364,13 @@ class NFARHead(nn.Module):
         theta_samples_residual = theta_residual_flat.squeeze(1).reshape(B, N, self.theta_dim)
         theta_log_prob = theta_log_prob_flat.squeeze(1).reshape(B, N)
 
-        offset = self.num_glob_rot_comps
+        # theta ordering: [3dof(39) | 1dof(34) | glob_rot?(3) | cam?(3)]
         pose_3dof_residual_samples = theta_samples_residual[
-            ..., offset : offset + self.num_3dof_comps
+            ..., : self.num_3dof_comps
         ]
         pose_1dof_residual_samples = theta_samples_residual[
             ...,
-            offset
-            + self.num_3dof_comps : offset
-            + self.num_3dof_comps
-            + self.num_1dof_comps,
+            self.num_3dof_comps : self.num_3dof_comps + self.num_1dof_comps,
         ]
 
         aa_3dof_samples = (
@@ -390,20 +386,21 @@ class NFARHead(nn.Module):
 
         # Global rotation samples: add mean + residual in AA space, then convert to XYZ Euler.
         if self.model_glob_rot:
-            glob_rot_aa_residual = theta_samples_residual[..., : self.num_glob_rot_comps]  # (B, N, 3)
+            gr_offset = self.num_3dof_comps + self.num_1dof_comps
+            glob_rot_aa_residual = theta_samples_residual[..., gr_offset : gr_offset + self.num_glob_rot_comps]  # (B, N, 3)
             glob_rot_6d_mean = mean_pred["pred_pose_raw"][:, :6]  # (B, 6)
             glob_rot_aa_mean = matrix_to_axis_angle(
                 batch9Dfrom6D(glob_rot_6d_mean).unflatten(-1, (3, 3))
             )  # (B, 3)
             glob_rot_aa_samples = glob_rot_aa_mean.unsqueeze(1) + glob_rot_aa_residual  # (B, N, 3)
             glob_rot_mat_samples = axis_angle_to_matrix(glob_rot_aa_samples)  # (B, N, 3, 3)
-            glob_rot_euler_samples = roma.rotmat_to_euler("ZYX", glob_rot_mat_samples).flip(-1)  # (B, N, 3) ZYX→XYZ
+            glob_rot_euler_samples = roma.rotmat_to_euler("ZYX", glob_rot_mat_samples)  # (B, N, 3)
         else:
             glob_rot_euler_samples = None
 
         # Camera samples: add residual to mean pred_cam.
         if self.model_cam:
-            cam_offset = self.num_glob_rot_comps + self.num_3dof_comps + self.num_1dof_comps
+            cam_offset = self.num_3dof_comps + self.num_1dof_comps + self.num_glob_rot_comps
             cam_residual_samples = theta_samples_residual[..., cam_offset : cam_offset + 3]  # (B, N, 3)
             cam_samples = mean_pred["pred_cam"].unsqueeze(1) + cam_residual_samples  # (B, N, 3)
         else:
@@ -434,16 +431,15 @@ class NFARHead(nn.Module):
         #         include_scale=self.model_scale,
         #     )
         #     # gt_residual from convert_mhr_params_to_flow_params does NOT include camera.
-        #     # Ordering: [glob_rot?(3) | 3dof(39) | 1dof(34) | shape(45) | scale(10)]
+        #     # Flow ordering: [beta (shape+scale), theta (3dof + 1dof + glob_rot?)]
         #     gt_residual = gt_flow_params - mean_pred_flow_params  # (B, flow_dim_no_cam)
-        #     theta_dim_no_cam = self.theta_dim - self.num_cam_comps
 
         #     # Override shape samples with GT
-        #     gt_shape_residual = gt_residual[..., theta_dim_no_cam : theta_dim_no_cam + self.num_shape_comps]
+        #     gt_shape_residual = gt_residual[..., : self.num_shape_comps]
         #     shape_samples = (shape_mean + gt_shape_residual).unsqueeze(1).expand(-1, N, -1)
 
         #     # Override scale samples with GT
-        #     gt_scale_residual = gt_residual[..., theta_dim_no_cam + self.num_shape_comps :]
+        #     gt_scale_residual = gt_residual[..., self.num_shape_comps : self.num_shape_comps + self.num_scale_comps]
         #     gt_scale_68D = batch["model_params"][:, -68:]  # (B, 68)
         #     scale_samples_68D = gt_scale_68D.unsqueeze(1).expand(-1, N, -1).clone()
         #     scale_samples_68D[..., scale_indices] = (
@@ -451,9 +447,8 @@ class NFARHead(nn.Module):
         #     ).expand(-1, N, -1)
 
         #     # Override pose samples with GT
-        #     offset = self.num_glob_rot_comps
-        #     gt_pose_3dof_residual = gt_residual[..., offset : offset + self.num_3dof_comps]
-        #     gt_pose_1dof_residual = gt_residual[..., offset + self.num_3dof_comps : offset + self.num_3dof_comps + self.num_1dof_comps]
+        #     gt_pose_3dof_residual = gt_residual[..., self.beta_dim : self.beta_dim + self.num_3dof_comps]
+        #     gt_pose_1dof_residual = gt_residual[..., self.beta_dim + self.num_3dof_comps : self.beta_dim + self.num_3dof_comps + self.num_1dof_comps]
         #     gt_aa_3dof_samples = (aa_3dofs + gt_pose_3dof_residual).unsqueeze(1).expand(-1, N, -1)
         #     gt_params_1dofs_samples = (params_1dofs + gt_pose_1dof_residual).unsqueeze(1).expand(-1, N, -1)
         #     # Use GT pose params (130D → 133D with jaw zeros) as base so non-modelled
@@ -464,7 +459,8 @@ class NFARHead(nn.Module):
 
         #     # Override global rotation samples with GT
         #     if self.model_glob_rot:
-        #         gt_glob_rot_aa = gt_residual[..., :self.num_glob_rot_comps]  # (B, 3)
+        #         gr_off = self.beta_dim + self.num_3dof_comps + self.num_1dof_comps
+        #         gt_glob_rot_aa = gt_residual[..., gr_off : gr_off + self.num_glob_rot_comps]  # (B, 3)
         #         gt_glob_rot_mat = axis_angle_to_matrix(gt_glob_rot_aa)  # (B, 3, 3)
         #         gt_glob_rot_euler = roma.rotmat_to_euler("ZYX", gt_glob_rot_mat).flip(-1)  # (B, 3) ZYX→XYZ
         #         glob_rot_euler_samples = gt_glob_rot_euler.unsqueeze(1).expand(-1, N, -1)
@@ -478,11 +474,9 @@ class NFARHead(nn.Module):
         #     else:
         #         cam_samples = None
 
-        #     # Rebuild full residual: splice camera residual between pose and shape/scale
-        #     gt_theta_residual = gt_residual[..., :theta_dim_no_cam]
-        #     gt_beta_residual = gt_residual[..., theta_dim_no_cam:]
+        #     # Rebuild full residual — gt_residual already in flow ordering [beta, theta_no_cam]
         #     if self.model_cam and "gt_pred_cam" in batch:
-        #         samples = torch.cat([gt_theta_residual, gt_cam_residual, gt_beta_residual], dim=-1)
+        #         samples = torch.cat([gt_residual, gt_cam_residual], dim=-1)
         #     else:
         #         samples = gt_residual
         #     samples = samples.unsqueeze(1).expand(-1, N, -1)
@@ -491,9 +485,9 @@ class NFARHead(nn.Module):
         beta_log_prob = beta_log_prob.reshape(B, N)
         log_prob = beta_log_prob + theta_log_prob
 
-        # Full residual vector in the same ordering as `convert_mhr_params_to_flow_params`.
-        # Ordering: [theta (glob? + 3dof + 1dof + cam?), beta (shape(45) + scale(10))].
-        samples = torch.cat([theta_samples_residual, beta_residual_samples], dim=-1)
+        # Full residual vector.
+        # Ordering: [beta (shape(45) + scale(10)), theta (3dof(39) + 1dof(34) + glob_rot?(3) + cam?(3))].
+        samples = torch.cat([beta_residual_samples, theta_samples_residual], dim=-1)
 
         ret = {
             "log_prob": log_prob,

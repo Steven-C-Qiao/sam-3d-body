@@ -106,30 +106,6 @@ class DatasetHMR(Dataset):
         self.cam_ext = self.data["cam_ext"].astype(np.float32)
         self.trans_cam = self.data["trans_cam"].astype(np.float32)
 
-        # self.mhr_keypoints_2d = self.data["mhr_keypoints_2d"]
-
-        # evaluation variables
-        # if not self.is_train:
-        #     if "width" in self.data:  # For closeup image stored in rotated format
-        #         self.width = self.data["width"]
-        #     self.joint_mapper_h36m = constants.H36M_TO_J14
-        #     self.joint_mapper_gt = constants.J24_TO_J14
-        #     self.J_regressor = torch.from_numpy(np.load(JOINT_REGRESSOR_H36M)).float()
-        #     self.smpl_male = SMPL(SMPL_MODEL_DIR, gender="male", create_transl=False)
-        #     self.smpl_female = SMPL(
-        #         SMPL_MODEL_DIR, gender="female", create_transl=False
-        #     )
-        #     self.smplx_male = SMPLX(SMPLX_MODEL_DIR, gender="male")
-        #     self.smplx_female = SMPLX(SMPLX_MODEL_DIR, gender="female")
-        #     self.smplx2smpl = pickle.load(open(SMPLX2SMPL, "rb"))
-        #     self.smplx2smpl = torch.tensor(
-        #         self.smplx2smpl["matrix"][None], dtype=torch.float32
-        #     )
-        # if (
-        #     self.is_train and "agora" not in self.dataset and "3dpw" not in self.dataset
-        # ):  # first 80% is training set 20% is validation
-        #     self.length = int(self.scale.shape[0] * self.options.CROP_PERCENT)
-        # else:
         self.length = self.scale.shape[0]
         logger.info(f"Loaded {self.dataset} dataset, num samples {self.length}")
 
@@ -260,10 +236,11 @@ class DatasetHMR(Dataset):
         return item
 
     def __len__(self):
+        mult = 0.1
         if self.is_train and "agora" not in self.dataset and "3dpw" not in self.dataset:
-            return int(self.options.CROP_PERCENT * len(self.imgname))
+            return int(mult * self.options.CROP_PERCENT * len(self.imgname))
         else:
-            return len(self.imgname)
+            return int(mult * len(self.imgname))
 
 
 class MultiViewEvaluationDataset(Dataset):

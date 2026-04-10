@@ -56,7 +56,7 @@ class Loss(pl.LightningModule):
             aa_3dofs = pose_params["aa_3dofs"]  # B, 39
             params_1dofs = pose_params["params_1dofs"]  # B, 34
 
-            beta_residual_true = true_residual[..., self.nf_head.theta_dim :]
+            beta_residual_true = true_residual[..., : self.nf_head.beta_dim]
             shape_residual_true = beta_residual_true[
                 ...,
                 : self.nf_head.num_shape_comps,
@@ -164,8 +164,6 @@ class Loss(pl.LightningModule):
             )
 
             mean_pred = predictions["mhr"]
-            # When MODEL_GLOB_ROT, include the mean prediction's global rotation
-            # so that the flow learns a residual, not the absolute rotation.
             if getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False):
                 glob_rot_euler_mean = batchXYZfrom6D(mean_pred["pred_pose_raw"][:, :6])
                 mean_global = torch.cat([
@@ -189,19 +187,16 @@ class Loss(pl.LightningModule):
                 include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
             )
 
+            #   [beta (shape+scale), theta (3dof + 1dof + glob_rot?)]
             true_residual = gt_flow_params - mean_pred_flow_params
 
+            # Append camera residual onto the theta part when MODEL_CAM is on.
+            # Camera residual is detached: the NLL trains the flow to model
+            # the correct joint distribution, but no gradient flows back to
+            # the camera prediction head — supervised only by reprojection.
             if getattr(self.cfg.MODEL, "MODEL_CAM", False):
-                theta_dim_no_cam = self.nf_head.theta_dim - self.nf_head.num_cam_comps
-                cam_zeros = torch.zeros(
-                    true_residual.shape[0], self.nf_head.num_cam_comps,
-                    device=true_residual.device, dtype=true_residual.dtype,
-                )
-                true_residual = torch.cat([
-                    true_residual[..., :theta_dim_no_cam],
-                    cam_zeros,
-                    true_residual[..., theta_dim_no_cam:],
-                ], dim=-1)
+                cam_residual = (batch["gt_pred_cam"] - mean_pred["pred_cam"]).detach()
+                true_residual = torch.cat([true_residual, cam_residual], dim=-1)
 
         if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0:
             uncertainty_output = predictions["uncertainty_output"]
@@ -211,9 +206,6 @@ class Loss(pl.LightningModule):
                 true_residual, predictions
             )
             nll_loss = -flow_log_prob.mean()
-
-            # Keep the GT-residual log probability for visualization/analysis.
-            # This is the log p(gt_residual | context) before weighting.
             loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
 
         # DEPRECATED: raw parameter-space variance. Can be gamed by random noise.

@@ -56,22 +56,22 @@ def convert_mhr_params_to_flow_params(
 
     scale = scale[..., scale_indices]
 
-    parts = []
+    # Output ordering: [beta (shape? + scale?), theta (3dof + 1dof + glob_rot?)]
+    beta_parts = []
+    if include_shape:
+        beta_parts.append(shape_params)
+    if include_scale:
+        beta_parts.append(scale)
+
+    theta_parts = [pose_3dof_aa, pose_1dof_angle]
     if include_global_rot:
         # model_params[..., :6] == [global_trans(3), global_rot(3)] in XYZ Euler.
         glob_euler = model_params[:, 3:6]  # (B, 3)
         glob_rotmat = batch6DFromXYZ(glob_euler, return_9D=True)  # (B, 3, 3)
         glob_aa = matrix_to_axis_angle(glob_rotmat)  # (B, 3)
-        parts.append(glob_aa)
+        theta_parts.append(glob_aa)
 
-    parts.extend([pose_3dof_aa, pose_1dof_angle])
-
-    if include_shape:
-        parts.append(shape_params)
-    if include_scale:
-        parts.append(scale)
-
-    flow_params = torch.cat(parts, dim=-1)
+    flow_params = torch.cat(beta_parts + theta_parts, dim=-1)
 
     return flow_params
 

@@ -161,12 +161,13 @@ class NFHead(nn.Module):
         log_prob = flow_output["log_prob"]
         z = flow_output["z"]
 
-        offset = self.num_glob_rot_comps
-        pose_3dof_residual_samples = samples[..., offset : offset + self.num_3dof_comps]
+        # Flow ordering: [shape?(45) | scale?(10) | 3dof(39) | 1dof(34) | glob_rot?(3)]
+        theta_offset = self.num_shape_comps + self.num_scale_comps
+        pose_3dof_residual_samples = samples[..., theta_offset : theta_offset + self.num_3dof_comps]
         pose_1dof_residual_samples = samples[
             ...,
-            offset
-            + self.num_3dof_comps : offset
+            theta_offset
+            + self.num_3dof_comps : theta_offset
             + self.num_3dof_comps
             + self.num_1dof_comps,
         ]
@@ -189,7 +190,8 @@ class NFHead(nn.Module):
 
         scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
         if self.model_scale and self.num_scale_comps > 0:
-            scale_residual_samples = samples[..., -self.num_scale_comps :]
+            scale_offset = self.num_shape_comps
+            scale_residual_samples = samples[..., scale_offset : scale_offset + self.num_scale_comps]
             scale_samples_68D[..., scale_indices] += scale_residual_samples
 
         ret = {
