@@ -1,0 +1,4 @@
+MODEL:
+  FLOW_COUPLING: "additive"
+  FLOW_NUM_LAYERS: 4
+  FLOW_DROPOUT: 0.5

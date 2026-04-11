@@ -243,7 +243,7 @@ class Visualiser(pl.LightningModule):
         predictions["verts_samples"][..., [1, 2]] *= -1
         predictions["mhr"]["pred_vertices"][..., [1, 2]] *= -1
 
-        self.visualise_keypoints_3d(predictions, batch)
+        # self.visualise_keypoints_3d(predictions, batch)
 
         # self.visualise_2d_keypoints_full(predictions, batch)
         self.visualise_2d_keypoints_cropped(predictions, batch)

@@ -70,6 +70,12 @@ class NFHead(nn.Module):
             _, _ = self.flow.log_prob(flow_params, flow_context)
             self.initialized |= True
 
+        # nflows ActNorm._initialize creates CPU tensors — fix for DDP.
+        device = flow_params.device
+        for name, buf in self.flow.named_buffers():
+            if buf.device != device:
+                buf.data = buf.data.to(device)
+
     @autocast("cuda", enabled=False)
     def log_prob(self, params: torch.Tensor, flow_context: torch.Tensor) -> Tuple:
         log_prob, z = self.flow.log_prob(
