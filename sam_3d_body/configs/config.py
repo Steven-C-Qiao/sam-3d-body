@@ -34,7 +34,7 @@ _C.MODEL.MODEL_CAM = True
 _C.MODEL.DECODER.USE_LORA = True
 _C.MODEL.NUM_SAMPLES = 25
 _C.MODEL.HEAD_TYPE = "nf_ar"
-_C.MODEL.FLOW_COUPLING = "affine"
+_C.MODEL.FLOW_COUPLING = "clamped_affine"
 _C.MODEL.FLOW_NUM_LAYERS = 8
 _C.MODEL.FLOW_DROPOUT = 0.2
 _C.MODEL.SHAPE_PERTURB_SCALE = 0.0   # multiplier on per-dim GT std noise for shape (45D); 0 = disabled

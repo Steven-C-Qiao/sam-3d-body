@@ -12,12 +12,14 @@ from sam_3d_body.models.modules.mhr_utils import (
     convert_mhr_params_to_flow_params,
     convert_flow_samples_to_mhr_params,
     convert_pose_cont_to_flow_context,
+    so3_compose_aa,
+    so3_residual_aa,
     scale_indices,
 )
 
 from nflows.flows import ConditionalGlow
 
-from sam_3d_body.models.modules.coupling_layers import ConditionalGlowAffine
+from sam_3d_body.models.modules.coupling_layers import ConditionalGlowAffine, ConditionalGlowUnclampedAffine
 
 
 class NFARHead(nn.Module):
@@ -67,11 +69,13 @@ class NFARHead(nn.Module):
         if flow_coupling == "additive":
             flow_cls = ConditionalGlow
         elif flow_coupling == "affine":
+            flow_cls = ConditionalGlowUnclampedAffine
+        elif flow_coupling == "clamped_affine":
             flow_cls = ConditionalGlowAffine
         else:
             raise ValueError(
                 f"Unsupported MODEL.FLOW_COUPLING='{flow_coupling}'. "
-                "Expected one of: ['additive', 'affine']."
+                "Expected one of: ['additive', 'affine', 'clamped_affine']."
             )
         self.flow_coupling = flow_coupling
 
@@ -118,19 +122,18 @@ class NFARHead(nn.Module):
         self.register_buffer("initialized_theta", torch.tensor(False))
 
     def initialize_actnorm(self, batch: Dict, mean_pred: Dict, flow_context: torch.Tensor):
-        # Compute GT flow params.
-        gt_flow_params = convert_mhr_params_to_flow_params(
+        # Compute GT flow params and rotation matrices.
+        gt_flow_params, gt_rotmats = convert_mhr_params_to_flow_params(
             batch["model_params"],
             batch["shape_params"],
             include_global_rot=self.model_glob_rot,
             include_shape=self.model_shape,
             include_scale=self.model_scale,
             flip_global_rot=True,
+            return_rotmats=True,
         )
 
-        # Compute mean-prediction flow params using direct 6D→AA path
-        # (mirrors nf_loss.py). Avoids euler roundtrip branch-cut bias.
-        # Ordering: [beta (shape? + scale?), theta (3dof + 1dof + glob_rot?)]
+        # Mean prediction via direct 6D→AA path (no euler roundtrip bias).
         pose_params_mean = convert_pose_cont_to_flow_context(
             mean_pred["pred_pose_raw"][:, 6:]
         )
@@ -139,20 +142,32 @@ class NFARHead(nn.Module):
             beta_parts.append(mean_pred["shape"])
         if self.model_scale:
             beta_parts.append(mean_pred["scale_68D"][..., scale_indices])
-        theta_parts = [pose_params_mean["aa_3dofs"], pose_params_mean["params_1dofs"]]
-        if self.model_glob_rot:
-            glob_rot_aa_mean = matrix_to_axis_angle(
-                batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3))
-            )
-            theta_parts.append(glob_rot_aa_mean)
-        mean_pred_flow_params = torch.cat(beta_parts + theta_parts, dim=-1)
+        mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None
 
-        # Flows are trained on residuals, so initialise with residuals.
-        # convert_mhr_params_to_flow_params output ordering matches flow ordering:
-        #   [beta (shape+scale), theta (3dof + 1dof + glob_rot?)]
-        true_residual = gt_flow_params - mean_pred_flow_params
-        beta_residual = true_residual[..., : self.beta_dim]
-        theta_residual_no_cam = true_residual[..., self.beta_dim :]
+        # Piecewise residual: SO(3) for 3DOF + glob_rot, additive for beta + 1DOF.
+        # Beta residual (additive)
+        beta_residual = gt_flow_params[..., : self.beta_dim] - mean_beta
+
+        # Theta residual: [3dof(39), 1dof(34), glob_rot?(3)]
+        pose_3dof_residual = so3_residual_aa(
+            pose_params_mean["rotmat_3dofs"], gt_rotmats["pose_3dof_rotmat"]
+        )
+        offset_1dof = self.beta_dim + 39
+        pose_1dof_residual = (
+            gt_flow_params[..., offset_1dof : offset_1dof + 34]
+            - pose_params_mean["params_1dofs"]
+        )
+        theta_parts = [pose_3dof_residual, pose_1dof_residual]
+        if self.model_glob_rot:
+            mean_glob_rotmat = batch9Dfrom6D(
+                mean_pred["pred_pose_raw"][:, :6]
+            ).unflatten(-1, (3, 3))
+            glob_rot_residual = so3_residual_aa(
+                mean_glob_rotmat.unsqueeze(-3),
+                gt_rotmats["glob_rotmat"].unsqueeze(-3),
+            )
+            theta_parts.append(glob_rot_residual)
+        theta_residual_no_cam = torch.cat(theta_parts, dim=-1)
 
         if self.model_cam:
             cam_residual = batch["gt_pred_cam"] - mean_pred["pred_cam"]
@@ -162,8 +177,9 @@ class NFARHead(nn.Module):
 
         shape_mean = mean_pred["shape"]
         scale_mean = mean_pred["scale_68D"]
-        pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
-        pose_params = convert_pose_cont_to_flow_context(pose_mean_cont)
+        pose_params = convert_pose_cont_to_flow_context(
+            mean_pred["pred_pose_raw"][:, 6:]
+        )
         aa_3dofs = pose_params["aa_3dofs"]
         params_1dofs = pose_params["params_1dofs"]
 
@@ -375,9 +391,11 @@ class NFARHead(nn.Module):
             self.num_3dof_comps : self.num_3dof_comps + self.num_1dof_comps,
         ]
 
-        aa_3dof_samples = (
-            aa_3dofs.unsqueeze(1).repeat(1, N, 1) + pose_3dof_residual_samples
+        # SO(3) right-perturbation: R_sample = R_mean @ Exp(delta)
+        aa_3dof_samples = so3_compose_aa(
+            aa_3dofs.unsqueeze(1), pose_3dof_residual_samples
         )
+        # 1DOF: additive is exact (SO(2) is abelian)
         params_1dofs_samples = (
             params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
         )
@@ -386,16 +404,14 @@ class NFARHead(nn.Module):
             aa_3dof_samples, params_1dofs_samples, pose_params_mhr
         )
 
-        # Global rotation samples: add mean + residual in AA space, then convert to XYZ Euler.
+        # Global rotation samples: SO(3) right-perturbation in matrix space.
         if self.model_glob_rot:
             gr_offset = self.num_3dof_comps + self.num_1dof_comps
             glob_rot_aa_residual = theta_samples_residual[..., gr_offset : gr_offset + self.num_glob_rot_comps]  # (B, N, 3)
             glob_rot_6d_mean = mean_pred["pred_pose_raw"][:, :6]  # (B, 6)
-            glob_rot_aa_mean = matrix_to_axis_angle(
-                batch9Dfrom6D(glob_rot_6d_mean).unflatten(-1, (3, 3))
-            )  # (B, 3)
-            glob_rot_aa_samples = glob_rot_aa_mean.unsqueeze(1) + glob_rot_aa_residual  # (B, N, 3)
-            glob_rot_mat_samples = axis_angle_to_matrix(glob_rot_aa_samples)  # (B, N, 3, 3)
+            glob_rot_mean_mat = batch9Dfrom6D(glob_rot_6d_mean).unflatten(-1, (3, 3))  # (B, 3, 3)
+            glob_rot_delta_mat = axis_angle_to_matrix(glob_rot_aa_residual)  # (B, N, 3, 3)
+            glob_rot_mat_samples = glob_rot_mean_mat.unsqueeze(1) @ glob_rot_delta_mat  # (B, N, 3, 3)
             # Convert rotmat → (x, y, z) euler via batchXYZfrom6D (matches batch6DFromXYZ
             # convention used by MHR C++ backend).  roma.rotmat_to_euler("ZYX") returns
             # (z, y, x) which would be misinterpreted.
@@ -414,60 +430,66 @@ class NFARHead(nn.Module):
             cam_samples = None
 
         
-        # # DEBUG: override samples with GT residual (using direct 6D→AA path, no euler roundtrip).
+        # # DEBUG: override samples with GT residual (SO(3) Lie algebra composition).
         # if batch is not None and "model_params" in batch:
-        #     gt_flow_params = convert_mhr_params_to_flow_params(
+        #     gt_flow_params, gt_rotmats = convert_mhr_params_to_flow_params(
         #         batch["model_params"], batch["shape_params"],
         #         include_global_rot=self.model_glob_rot,
         #         include_shape=self.model_shape,
         #         include_scale=self.model_scale,
         #         flip_global_rot=True,
+        #         return_rotmats=True,
         #     )
-        #     # Build mean_pred_flow_params via direct 6D→AA (same path as aa_3dofs above).
+        #     # Piecewise GT residual: SO(3) for 3DOF+glob_rot, additive for beta+1DOF.
         #     _beta = []
         #     if self.model_shape:
         #         _beta.append(mean_pred["shape"])
         #     if self.model_scale:
         #         _beta.append(mean_pred["scale_68D"][..., scale_indices])
-        #     _theta = [aa_3dofs, params_1dofs]  # from convert_pose_cont_to_flow_context (line 337)
-        #     if self.model_glob_rot:
-        #         _theta.append(matrix_to_axis_angle(
-        #             batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3))
-        #         ))
-        #     mean_pred_flow_params = torch.cat(_beta + _theta, dim=-1)
-        #     gt_residual = gt_flow_params - mean_pred_flow_params
+        #     mean_beta = torch.cat(_beta, dim=-1)
+        #     gt_beta_residual = gt_flow_params[..., : self.beta_dim] - mean_beta
+        #     gt_pose_3dof_residual = so3_residual_aa(
+        #         pose_params["rotmat_3dofs"], gt_rotmats["pose_3dof_rotmat"]
+        #     )  # pose_params from convert_pose_cont_to_flow_context above
+        #     offset_1dof = self.beta_dim + 39
+        #     gt_pose_1dof_residual = (
+        #         gt_flow_params[..., offset_1dof : offset_1dof + 34]
+        #         - pose_params["params_1dofs"]
+        #     )
+        #     gt_residual = torch.cat([gt_beta_residual, gt_pose_3dof_residual, gt_pose_1dof_residual], dim=-1)
 
         #     # Override shape samples with GT
-        #     gt_shape_residual = gt_residual[..., : self.num_shape_comps]
+        #     gt_shape_residual = gt_beta_residual[..., : self.num_shape_comps]
         #     shape_samples = (shape_mean + gt_shape_residual).unsqueeze(1).expand(-1, N, -1)
 
         #     # Override scale samples with GT
-        #     gt_scale_residual = gt_residual[..., self.num_shape_comps : self.num_shape_comps + self.num_scale_comps]
+        #     gt_scale_residual = gt_beta_residual[..., self.num_shape_comps :]
         #     scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
         #     scale_samples_68D[..., scale_indices] = (
         #         scale_mean[..., scale_indices] + gt_scale_residual
         #     ).unsqueeze(1).expand(-1, N, -1)
 
-        #     # Override pose samples with GT (mean + residual, now exact since same AA path)
-        #     gt_pose_3dof_residual = gt_residual[..., self.beta_dim : self.beta_dim + self.num_3dof_comps]
-        #     gt_pose_1dof_residual = gt_residual[..., self.beta_dim + self.num_3dof_comps : self.beta_dim + self.num_3dof_comps + self.num_1dof_comps]
-        #     gt_aa_3dof_samples = (aa_3dofs + gt_pose_3dof_residual).unsqueeze(1).expand(-1, N, -1)
+        #     # Override pose samples with GT (SO(3) composition)
+        #     gt_aa_3dof_samples = so3_compose_aa(aa_3dofs, gt_pose_3dof_residual).unsqueeze(1).expand(-1, N, -1)
         #     gt_params_1dofs_samples = (params_1dofs + gt_pose_1dof_residual).unsqueeze(1).expand(-1, N, -1)
         #     gt_pose_130D = batch["model_params"][:, 6:-68]
         #     gt_pose_133D = torch.cat([gt_pose_130D, torch.zeros_like(gt_pose_130D[:, :3])], dim=-1)
         #     pose_samples = convert_flow_samples_to_mhr_params(gt_aa_3dof_samples, gt_params_1dofs_samples, gt_pose_133D)
 
-        #     # Override global rotation samples with GT
+        #     # Override global rotation samples with GT (SO(3) composition)
         #     if self.model_glob_rot:
-        #         gr_off = self.beta_dim + self.num_3dof_comps + self.num_1dof_comps
-        #         gt_glob_rot_aa_residual = gt_residual[..., gr_off : gr_off + self.num_glob_rot_comps]
-        #         glob_rot_aa_mean = matrix_to_axis_angle(
-        #             batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3))
+        #         gt_glob_rot_residual = so3_residual_aa(
+        #             batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3)).unsqueeze(-3),
+        #             gt_rotmats["glob_rotmat"].unsqueeze(-3),
         #         )
-        #         gt_glob_rot_aa = glob_rot_aa_mean + gt_glob_rot_aa_residual
+        #         gt_glob_rot_aa = so3_compose_aa(
+        #             matrix_to_axis_angle(batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3))),
+        #             gt_glob_rot_residual,
+        #         )
         #         gt_glob_rot_mat = axis_angle_to_matrix(gt_glob_rot_aa)
         #         gt_glob_6d = torch.cat([gt_glob_rot_mat[..., :, 0], gt_glob_rot_mat[..., :, 1]], dim=-1)
         #         glob_rot_euler_samples = batchXYZfrom6D(gt_glob_6d).unsqueeze(1).expand(-1, N, -1)
+        #         gt_residual = torch.cat([gt_residual, gt_glob_rot_residual], dim=-1)
 
         #     # Override camera samples with GT
         #     if self.model_cam and "gt_pred_cam" in batch:
@@ -477,7 +499,6 @@ class NFARHead(nn.Module):
         #         cam_samples = mean_pred["pred_cam"].unsqueeze(1).expand(-1, N, -1)
         #     else:
         #         cam_samples = None
-
 
         #     # Rebuild full residual for the samples tensor
         #     if self.model_cam and "gt_pred_cam" in batch:

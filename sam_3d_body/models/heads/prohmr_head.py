@@ -9,6 +9,7 @@ from sam_3d_body.models.modules.mhr_utils import (
     convert_mhr_params_to_flow_params,
     convert_flow_samples_to_mhr_params,
     convert_pose_cont_to_flow_context,
+    so3_compose_aa,
 )
 
 
@@ -179,9 +180,11 @@ class NFHead(nn.Module):
             + self.num_1dof_comps,
         ]
 
-        aa_3dof_samples = (
-            aa_3dofs.unsqueeze(1).repeat(1, N, 1) + pose_3dof_residual_samples
+        # SO(3) right-perturbation: R_sample = R_mean @ Exp(delta)
+        aa_3dof_samples = so3_compose_aa(
+            aa_3dofs.unsqueeze(1), pose_3dof_residual_samples
         )
+        # 1DOF: additive is exact (SO(2) is abelian)
         params_1dofs_samples = (
             params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
         )

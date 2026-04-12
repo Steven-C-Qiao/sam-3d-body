@@ -470,7 +470,12 @@ class Trainer(BaseLightningModule):
     def configure_optimizers(self):
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         optimizer = torch.optim.Adam(trainable_params, lr=self.cfg.TRAIN.LR)
-        return optimizer
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=self.cfg.TRAIN.NUM_EPOCHS,
+            eta_min=self.cfg.TRAIN.LR * 0.01,
+        )
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
 
     def train_dataset(self):
         options = self.cfg.DATASET

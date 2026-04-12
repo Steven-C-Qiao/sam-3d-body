@@ -39,6 +39,7 @@ def convert_mhr_params_to_flow_params(
     include_shape: bool = True,
     include_scale: bool = True,
     flip_global_rot: bool = False,
+    return_rotmats: bool = False,
 ) -> torch.Tensor:
     assert model_params.shape[-1] == 204
     assert shape_params.shape[-1] == 45
@@ -52,8 +53,8 @@ def convert_mhr_params_to_flow_params(
     pose_1dof_angle = pose[..., all_param_1dof_rot_idxs_except_hands]
 
     pose_3dof_rotmat = batch6DFromXYZ(pose_3dof_euler, return_9D=True)
-    pose_3dof_aa = matrix_to_axis_angle(pose_3dof_rotmat)
-    pose_3dof_aa = pose_3dof_aa[..., indices_3dof, :].flatten(-2, -1)
+    pose_3dof_rotmat_selected = pose_3dof_rotmat[..., indices_3dof, :, :]  # (B, 13, 3, 3)
+    pose_3dof_aa = matrix_to_axis_angle(pose_3dof_rotmat_selected).flatten(-2, -1)
 
     scale = scale[..., scale_indices]
 
@@ -81,8 +82,45 @@ def convert_mhr_params_to_flow_params(
 
     flow_params = torch.cat(beta_parts + theta_parts, dim=-1)
 
+    if return_rotmats:
+        rotmats = {"pose_3dof_rotmat": pose_3dof_rotmat_selected}
+        if include_global_rot:
+            rotmats["glob_rotmat"] = glob_rotmat  # (B, 3, 3), after optional yz_flip
+        return flow_params, rotmats
     return flow_params
 
+
+def so3_compose_aa(mean_aa_flat: torch.Tensor, residual_flat: torch.Tensor) -> torch.Tensor:
+    """Compose rotations via right-perturbation: R_sample = R_mean @ Exp(delta).
+
+    Works for any flat axis-angle vector whose last dim is a multiple of 3
+    (e.g., 39 for 13 joints, 3 for global rotation).
+
+    Args:
+        mean_aa_flat:    (..., J*3) mean axis-angle (broadcasts with residual)
+        residual_flat:   (..., J*3) residual in body-local tangent space
+    Returns:
+        (..., J*3) composed axis-angle
+    """
+    mean_unflat = mean_aa_flat.unflatten(-1, (-1, 3))       # (..., J, 3)
+    res_unflat = residual_flat.unflatten(-1, (-1, 3))        # (..., J, 3)
+    R_mean = axis_angle_to_matrix(mean_unflat)               # (..., J, 3, 3)
+    R_delta = axis_angle_to_matrix(res_unflat)               # (..., J, 3, 3)
+    R_composed = R_mean @ R_delta                             # (..., J, 3, 3)
+    return matrix_to_axis_angle(R_composed).flatten(-2, -1)  # (..., J*3)
+
+
+def so3_residual_aa(mean_rotmat: torch.Tensor, gt_rotmat: torch.Tensor) -> torch.Tensor:
+    """Compute right-perturbation residual: delta = Log(R_mean^T @ R_gt).
+
+    Args:
+        mean_rotmat: (..., J, 3, 3)
+        gt_rotmat:   (..., J, 3, 3)
+    Returns:
+        (..., J*3) residual axis-angle
+    """
+    R_rel = mean_rotmat.transpose(-1, -2) @ gt_rotmat  # (..., J, 3, 3)
+    return matrix_to_axis_angle(R_rel).flatten(-2, -1)  # (..., J*3)
 
 
 def rotation_angle_difference(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
@@ -538,10 +576,9 @@ def convert_pose_cont_to_flow_context(pose_cont: torch.Tensor) -> dict:
 
     cont_3dofs = cont_3dofs.unflatten(-1, (-1, 6))
     rotmat_3dofs = batch9Dfrom6D(cont_3dofs).unflatten(-1, (3, 3))
+    rotmat_3dofs_selected = rotmat_3dofs[:, indices_3dof, ...]  # (B, 13, 3, 3)
 
-    aa_3dofs = matrix_to_axis_angle(rotmat_3dofs)[:, indices_3dof, ...].flatten(
-        -2, -1
-    )
+    aa_3dofs = matrix_to_axis_angle(rotmat_3dofs_selected).flatten(-2, -1)
 
     cont_1dofs = cont_1dofs.unflatten(-1, (-1, 2))  # (sincos)
     params_1dofs = torch.atan2(cont_1dofs[..., -2], cont_1dofs[..., -1])
@@ -550,6 +587,7 @@ def convert_pose_cont_to_flow_context(pose_cont: torch.Tensor) -> dict:
     return {
         "aa_3dofs": aa_3dofs,
         "params_1dofs": params_1dofs,
+        "rotmat_3dofs": rotmat_3dofs_selected,  # (B, 13, 3, 3)
     }
 
 

@@ -2,12 +2,11 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from pytorch3d.transforms import matrix_to_axis_angle
-
 from sam_3d_body.models.modules.mhr_utils import (
     batch9Dfrom6D,
     convert_mhr_params_to_flow_params,
     convert_pose_cont_to_flow_context,
+    so3_residual_aa,
     scale_indices,
 )
 
@@ -157,21 +156,21 @@ class Loss(pl.LightningModule):
             gt_model_params = batch["model_params"]
             gt_shape = batch["shape_params"]
 
-            gt_flow_params = convert_mhr_params_to_flow_params(
+            model_glob_rot = getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False)
+
+            gt_flow_params, gt_rotmats = convert_mhr_params_to_flow_params(
                 gt_model_params,
                 gt_shape,
-                include_global_rot=getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False),
+                include_global_rot=model_glob_rot,
                 include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
                 include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
                 flip_global_rot=True,
+                return_rotmats=True,
             )
 
             mean_pred = predictions["mhr"]
 
-            # Build mean_pred_flow_params using the direct 6D→AA path
-            # (convert_pose_cont_to_flow_context) instead of going through
-            # body_pose euler, which suffers from atan2 branch-cut bias.
-            # Ordering: [beta (shape? + scale?), theta (3dof + 1dof + glob_rot?)]
+            # Mean prediction via direct 6D→AA path (no euler roundtrip bias).
             pose_params = convert_pose_cont_to_flow_context(
                 mean_pred["pred_pose_raw"][:, 6:]
             )
@@ -180,16 +179,44 @@ class Loss(pl.LightningModule):
                 beta_parts.append(mean_pred["shape"])
             if getattr(self.cfg.MODEL, "MODEL_SCALE", True):
                 beta_parts.append(mean_pred["scale_68D"][..., scale_indices])
-            theta_parts = [pose_params["aa_3dofs"], pose_params["params_1dofs"]]
-            if getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False):
-                glob_rot_aa_mean = matrix_to_axis_angle(
-                    batch9Dfrom6D(mean_pred["pred_pose_raw"][:, :6]).unflatten(-1, (3, 3))
-                )
-                theta_parts.append(glob_rot_aa_mean)
-            mean_pred_flow_params = torch.cat(beta_parts + theta_parts, dim=-1)
+            mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None
 
-            #   [beta (shape+scale), theta (3dof + 1dof + glob_rot?)]
-            true_residual = gt_flow_params - mean_pred_flow_params
+            # Piecewise residual: SO(3) for 3DOF + glob_rot, additive for beta + 1DOF.
+            # Ordering: [beta, 3dof(39), 1dof(34), glob_rot?(3)]
+            beta_dim = self.nf_head.num_shape_comps + self.nf_head.num_scale_comps
+            residual_parts = []
+
+            # Beta residual (additive — not rotations)
+            beta_residual = gt_flow_params[..., :beta_dim] - mean_beta
+            residual_parts.append(beta_residual)
+
+            # 3DOF pose residual (SO(3) right-perturbation)
+            pose_3dof_residual = so3_residual_aa(
+                pose_params["rotmat_3dofs"],        # (B, 13, 3, 3) mean
+                gt_rotmats["pose_3dof_rotmat"],     # (B, 13, 3, 3) GT
+            )
+            residual_parts.append(pose_3dof_residual)
+
+            # 1DOF pose residual (additive — SO(2) is abelian)
+            offset_1dof = beta_dim + 39
+            pose_1dof_residual = (
+                gt_flow_params[..., offset_1dof : offset_1dof + 34]
+                - pose_params["params_1dofs"]
+            )
+            residual_parts.append(pose_1dof_residual)
+
+            # Global rotation residual (SO(3)) if enabled
+            if model_glob_rot:
+                mean_glob_rotmat = batch9Dfrom6D(
+                    mean_pred["pred_pose_raw"][:, :6]
+                ).unflatten(-1, (3, 3))  # (B, 3, 3)
+                glob_rot_residual = so3_residual_aa(
+                    mean_glob_rotmat.unsqueeze(-3),          # (B, 1, 3, 3)
+                    gt_rotmats["glob_rotmat"].unsqueeze(-3), # (B, 1, 3, 3)
+                )  # (B, 3)
+                residual_parts.append(glob_rot_residual)
+
+            true_residual = torch.cat(residual_parts, dim=-1)
 
             # Append camera residual onto the theta part when MODEL_CAM is on.
             # Camera residual is detached: the NLL trains the flow to model
@@ -295,8 +322,8 @@ class Loss(pl.LightningModule):
         
         # loss_dict["gt_residual_log_prob"] = flow_log_prob.detach()
 
-        if torch.isnan(loss_dict["total_loss"]):
-            loss_dict["total_loss"] = torch.zeros_like(loss_dict["total_loss"])
+        # if torch.isnan(loss_dict["total_loss"]):
+        #     loss_dict["total_loss"] = torch.zeros_like(loss_dict["total_loss"])
 
         # for k, v in loss_dict.items():
         #     print(f"{k}: {v.item():.3f}", end=" ")

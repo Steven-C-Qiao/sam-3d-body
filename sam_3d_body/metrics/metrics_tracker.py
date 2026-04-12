@@ -270,7 +270,7 @@ class Metrics(pl.LightningModule):
                 invisible_mask_samples = invisible_mask.unsqueeze(1).expand(-1, N, -1)
                 metrics["spread_invisible_kp3d_samples"] = (
                     (dists_per_sample * invisible_mask_samples).sum(dim=-1)
-                    / invisible_mask_samples.sum(dim=-1)
+                    / invisible_mask_samples.sum(dim=-1).clamp(min=1)
                 )
             # fmt: on
 
