@@ -82,7 +82,7 @@ _C.DATASET.DATASETS_AND_RATIOS = 'static-hdri_agora-bfh_agora-body_zoom-suburbd_
 # _C.DATASET.DATASETS_AND_RATIOS = 'closeup-suburba_closeup-suburbb_closeup-suburbc_closeup-suburbd_closeup-gym_closeup-suburbb-bmi_closeup-suburbc-bmi'
 
 _C.DATASET.CROP_PERCENT = 0.8
-_C.DATASET.ALB = False #True
+_C.DATASET.ALB = True
 _C.DATASET.ALB_PROB = 0.5
 _C.DATASET.proj_verts = False
 _C.DATASET.FOCAL_LENGTH = 5000
@@ -93,7 +93,6 @@ _C.MODEL.IMAGE_STD = [0.229, 0.224, 0.225]
 
 _C.DATASET.IMAGE_SIZE = (512, 512)
 _C.MODEL.IMAGE_SIZE = (512, 512)
-
 
 
 _C.MODEL.BACKBONE = CfgNode()

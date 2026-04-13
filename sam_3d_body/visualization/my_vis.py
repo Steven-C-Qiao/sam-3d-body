@@ -1,5 +1,7 @@
 import os
-import cv2 
+from typing import Optional
+
+import cv2
 
 import torch
 import matplotlib
@@ -8,6 +10,7 @@ import pytorch_lightning as pl
 from loguru import logger
 
 matplotlib.use("Agg")
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 
 if "PYOPENGL_PLATFORM" not in os.environ:
@@ -16,6 +19,7 @@ import pyrender
 import trimesh
 
 from sam_3d_body.metrics.metrics_tracker import scale_and_translation_transform_batch
+from sam_3d_body.visualization.renderer import Renderer
 
 LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
 LIGHT_ORANGE = (1.0, 0.8, 0.5)
@@ -172,6 +176,612 @@ def build_distance_colorbar_rgb(
         lineType=cv2.LINE_AA,
     )
     return bar_rgb
+
+
+def _draw_label_lines(img, lines, *, origin=(10, 10), font_scale=0.7, pad=6,
+                      line_height=26, bg_alpha=0.55):
+    """Draw a stack of text lines with a semi-transparent black box and white text."""
+    if not lines:
+        return img
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    thickness = 1
+    widths = [cv2.getTextSize(t, font, font_scale, thickness)[0][0] for t in lines]
+    box_w = max(widths) + 2 * pad
+    box_h = line_height * len(lines) + 2 * pad
+    x0, y0 = origin
+    x1 = min(x0 + box_w, img.shape[1])
+    y1 = min(y0 + box_h, img.shape[0])
+
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, bg_alpha, img, 1 - bg_alpha, 0, dst=img)
+
+    for i, text in enumerate(lines):
+        y = y0 + pad + (i + 1) * line_height - 8
+        cv2.putText(img, text, (x0 + pad, y), font, font_scale,
+                    (255, 255, 255), thickness, cv2.LINE_AA)
+    return img
+
+
+def vis_prediction(img_cv2, outputs, faces, stack_vertically=True, batch=None):
+    img_keypoints = img_cv2.copy()
+    img_mesh = img_cv2.copy()
+
+    camera_center=(
+        batch["cam_int"][0, 0, 2],
+        batch["cam_int"][0, 1, 2],
+    )
+
+    # Get original output (mean prediction)
+    mhr_outputs = outputs['mhr']
+    for key in mhr_outputs:
+        try:
+            mhr_outputs[key] = mhr_outputs[key].cpu().detach().numpy()
+        except:
+            pass
+    person_output = mhr_outputs
+
+    keypoints_2d = person_output["pred_keypoints_2d"][0]
+    keypoints_2d = np.concatenate(
+        [keypoints_2d, np.ones((keypoints_2d.shape[0], 1))], axis=-1
+    )
+
+    # Get mean prediction vertices (original output)
+    mean_pred_vertices = person_output["pred_vertices"][0]
+
+    # Get samples if available
+    vertex_colors = None
+    if 'verts_samples' in outputs:
+        verts_samples = outputs['verts_samples']
+        if isinstance(verts_samples, torch.Tensor):
+            verts_samples = verts_samples.cpu().detach().numpy()
+
+        # Calculate average distance of each vertex from mean across all samples
+        num_samples = verts_samples.shape[1]
+        distances = []
+        for i in range(num_samples):
+            sample_vertices = verts_samples[0, i]
+            vertex_distances = np.linalg.norm(sample_vertices - mean_pred_vertices, axis=1)
+            distances.append(vertex_distances)
+
+        avg_distances = np.mean(distances, axis=0)
+
+        min_dist = np.min(avg_distances)
+        max_dist = np.max(avg_distances)
+        if max_dist > min_dist:
+            normalized_distances = (avg_distances - min_dist) / (max_dist - min_dist)
+        else:
+            normalized_distances = np.zeros_like(avg_distances)
+
+        viridis = cm.get_cmap('viridis')
+        vertex_colors_rgb = viridis(normalized_distances)[:, :3]
+        vertex_colors = np.ones((vertex_colors_rgb.shape[0], 4))
+        vertex_colors[:, :3] = vertex_colors_rgb
+
+    all_pred_vertices = person_output["pred_vertices"][0]
+    all_faces = faces
+
+    renderer = Renderer(focal_length=person_output["focal_length"][0], faces=all_faces)
+    img_mesh = (
+        renderer(
+            all_pred_vertices,
+            person_output["pred_cam_t"][0],
+            img_mesh,
+            mesh_base_color=LIGHT_BLUE,
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vertex_colors,
+            camera_center=camera_center,
+        )
+        * 255
+    )
+
+    white_img = np.ones_like(img_cv2) * 255
+    img_mesh_side = (
+        renderer(
+            all_pred_vertices,
+            person_output["pred_cam_t"][0],
+            white_img,
+            mesh_base_color=LIGHT_BLUE,
+            scene_bg_color=(1, 1, 1),
+            side_view=True,
+            vertex_colors=vertex_colors,
+            camera_center=camera_center,
+        )
+        * 255
+    )
+
+    if stack_vertically:
+        cur_img = np.concatenate([img_cv2, img_mesh, img_mesh_side], axis=0)
+    else:
+        cur_img = np.concatenate([img_cv2, img_mesh, img_mesh_side], axis=1)
+
+    return cur_img
+
+
+def vis_samples(
+    img_cv2,
+    outputs,
+    faces,
+    batch,
+    metrics=None,
+    vis_verts=None,
+    stack_vertically=True,
+    overlay_gt=True,
+    plot_side=True,
+    plot_neutral=True,
+    max_sample: Optional[int] = 10,
+):
+    def _to_np(x):
+        return x.cpu().detach().numpy() if isinstance(x, torch.Tensor) else x
+
+    b = 0  # batch element to visualise
+
+    # ---- batch-derived quantities (full batch; index with `b` in the plotting loop) ----
+    affine_all = _to_np(batch["affine_trans"]) if "affine_trans" in batch else None
+    img_size_all = _to_np(batch["img_size"]) if "img_size" in batch else None
+    cam_int = batch["cam_int"]
+    gt_verts = _to_np(batch["vertices"])
+    gt_cam_t = _to_np(batch["cam_ext"][..., :3, -1])
+    gt_root_joint = _to_np(batch["joint_coords"][..., [1], :])
+
+    affine = affine_all[b, 0] if affine_all is not None else None
+    img_size = img_size_all[b, 0] if img_size_all is not None else None
+    camera_center = (cam_int[b, 0, 2], cam_int[b, 1, 2])
+
+    base_img = img_cv2.copy()
+    if affine is not None:
+        base_img = cv2.warpAffine(base_img.astype(np.uint8), affine, img_size)
+
+    # ---- output-derived quantities ----
+    mhr_samples = _to_np(outputs["verts_samples"])
+    n_mhr = mhr_samples.shape[1]
+    n_vis = min(n_mhr, max_sample) if max_sample is not None else n_mhr
+    mhr_root_joint_samples = _to_np(outputs["j3d_samples"][..., 1, :])
+    pred_cam_t_samples = (
+        _to_np(outputs["pred_cam_t_samples"]) if "pred_cam_t_samples" in outputs else None
+    )
+    log_prob = None
+    if "uncertainty_output" in outputs:
+        log_prob = _to_np(outputs["uncertainty_output"].get("log_prob"))
+
+    mhr_outputs = {k: _to_np(v) for k, v in outputs["mhr"].items()}
+    mean_pred_vertices_np = mhr_outputs["pred_vertices"][b]
+
+    # ---- metrics (may be None) ----
+    m = metrics or {}
+    mpjpe_samples = m.get("mpjpe_samples")
+    mpjpe_mean = m.get("mpjpe")
+    pampjpe_samples = m.get("pampjpe_samples")
+    pampjpe_mean = m.get("pampjpe")
+    gt_logp = m.get("gt_residual_log_prob")
+    mean_logp = m.get("mean_residual_log_prob")
+    kp2d_visible_samples_px = m.get("kp2d_samples_pixel_error_visible")
+    kp2d_visible_mean_px = m.get("kp2d_pixel_error_visible")
+    spread_invisible_samples = m.get("spread_invisible_kp3d_samples")
+
+    # ---- per-vertex spread colours, shared inferno scale ----
+    per_sample_dists = np.linalg.norm(
+        mhr_samples[b, :n_vis] - mean_pred_vertices_np[None], axis=-1
+    )  # (n_vis, V)
+    shared_max = float(per_sample_dists.max()) if per_sample_dists.size else 1.0
+    vertex_colors_samples = [
+        build_vertex_colors(per_sample_dists[i], min_dist=0.0, max_dist=shared_max)
+        for i in range(n_vis)
+    ]
+    vertex_colors_mean = build_vertex_colors(
+        per_sample_dists.mean(axis=0), min_dist=0.0, max_dist=shared_max
+    )
+
+    # ---- renderers ----
+    generic_camera = np.array([0.0, 0.0, 4.0])
+    renderer = Renderer(focal_length=mhr_outputs["focal_length"][b], faces=faces)
+    renderer_side = Renderer(focal_length=1000, faces=faces)
+
+    # Expose as `outputs` to keep existing per-sample code below unchanged.
+    outputs = mhr_outputs
+    img_mesh_list = []
+    img_side_list = []
+    img_pa_list = []
+    img_neutral_list = []
+    img_neutral_sc_list = []
+
+    # ---- precomputed aligned/neutral vertices (supplied by metrics tracker) ----
+    gt_verts_b = gt_verts[b]
+    gt_root = gt_root_joint[b]  # (1, 3)
+    vv = vis_verts or {}
+    aligned_samples = _to_np(vv["pa_sample_verts"])[b, :n_vis] if "pa_sample_verts" in vv else None
+    aligned_mean = _to_np(vv["pa_mean_verts"])[b] if "pa_mean_verts" in vv else None
+
+    neutral_available = plot_neutral and all(
+        k in vv for k in ("gt_neutral_verts", "pred_neutral_verts", "sample_neutral_verts",
+                          "pred_neutral_verts_sc", "sample_neutral_verts_sc")
+    )
+    if neutral_available:
+        gt_neutral = _to_np(vv["gt_neutral_verts"])[b]
+        pred_neutral = _to_np(vv["pred_neutral_verts"])[b]
+        sample_neutral = _to_np(vv["sample_neutral_verts"])[b, :n_vis]
+        pred_neutral_sc = _to_np(vv["pred_neutral_verts_sc"])[b]
+        sample_neutral_sc = _to_np(vv["sample_neutral_verts_sc"])[b, :n_vis]
+        neutral_center = gt_neutral.mean(axis=0, keepdims=True) + np.array([[0.0, 0.1, 0.0]])
+
+        pve_samples = m.get("pve_samples")
+        pve_samples = _to_np(pve_samples)[b, :n_vis] if pve_samples is not None else \
+            np.linalg.norm(sample_neutral - gt_neutral[None], axis=-1).mean(axis=-1) * 1000.0
+        pve_mean = m.get("pve")
+        pve_mean = float(_to_np(pve_mean)[b]) if pve_mean is not None else \
+            float(np.linalg.norm(pred_neutral - gt_neutral, axis=-1).mean()) * 1000.0
+        pvetsc_samples = m.get("pvetsc_samples")
+        pvetsc_samples = _to_np(pvetsc_samples)[b, :n_vis] if pvetsc_samples is not None else \
+            np.linalg.norm(sample_neutral_sc - gt_neutral[None], axis=-1).mean(axis=-1) * 1000.0
+        pvetsc_mean = m.get("pvetsc")
+        pvetsc_mean = float(_to_np(pvetsc_mean)[b]) if pvetsc_mean is not None else \
+            float(np.linalg.norm(pred_neutral_sc - gt_neutral, axis=-1).mean()) * 1000.0
+    white_bg_full = np.full_like(img_cv2, 255, dtype=np.uint8)
+    if img_size is not None:
+        black_bg = np.zeros((int(img_size[1]), int(img_size[0]), 3), dtype=np.uint8)
+    else:
+        black_bg = np.zeros_like(img_cv2)
+
+    def _to_uint8(float_rgb):
+        return (float_rgb * 255.0).clip(0, 255).astype(np.uint8)
+
+    for i in range(n_vis):
+        # ----------------------- front view -----------------------
+        sample_cam_t = pred_cam_t_samples[b, i] if pred_cam_t_samples is not None else outputs["pred_cam_t"][b]
+        pred_rgb = renderer(
+            mhr_samples[b, i],
+            sample_cam_t,
+            img_cv2.copy(),
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vertex_colors_samples[i],
+            camera_center=camera_center,
+        )
+
+        if overlay_gt:
+            gt_rgba = renderer(
+                gt_verts[b], gt_cam_t[b],
+                white_bg_full,
+                mesh_base_color=BLUE,
+                scene_bg_color=(1, 1, 1),
+                return_rgba=True,
+                camera_center=camera_center,
+            )
+            alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
+            pred_rgb = alpha * gt_rgba[..., :3].astype(np.float32) + (1.0 - alpha) * pred_rgb
+
+        img_mesh = _to_uint8(pred_rgb)
+
+        if affine is not None:
+            img_mesh = cv2.warpAffine(img_mesh, affine, img_size)
+
+        front_lines = []
+        if kp2d_visible_samples_px is not None:
+            front_lines.append(f"2D err vis: {float(kp2d_visible_samples_px[b, i]):.1f} px")
+        if spread_invisible_samples is not None:
+            front_lines.append(
+                f"3D dist to mean: {float(spread_invisible_samples[b, i]) * 1000.0:.1f} mm"
+            )
+        _draw_label_lines(img_mesh, front_lines)
+
+        img_mesh_list.append(img_mesh)
+
+        # ----------------------- side view -----------------------
+        if plot_side:
+            pred_side = renderer_side(
+                mhr_samples[b, i] - mhr_root_joint_samples[b, i],
+                generic_camera,
+                black_bg,
+                vertex_colors=vertex_colors_samples[i],
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+            )
+            gt_side = renderer_side(
+                gt_verts[b] - gt_root_joint[b],
+                generic_camera,
+                black_bg,
+                mesh_base_color=BLUE,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+                return_rgba=True,
+            )
+            alpha = gt_side[..., 3:4].astype(np.float32) * 0.5
+            blended = alpha * gt_side[..., :3].astype(np.float32) + (1.0 - alpha) * pred_side
+            img_side = _to_uint8(blended)
+
+            side_lines = []
+            if log_prob is not None:
+                side_lines.append(f"log p: {float(log_prob[b, i]):.1f}")
+            if mpjpe_samples is not None:
+                side_lines.append(f"MPJPE: {float(mpjpe_samples[b, i]):.1f} mm")
+            _draw_label_lines(img_side, side_lines)
+            img_side_list.append(img_side)
+
+            # ----------------------- PA-aligned side view -----------------------
+            pa_pred_side = renderer_side(
+                aligned_samples[i] - gt_root,
+                generic_camera,
+                black_bg,
+                vertex_colors=vertex_colors_samples[i],
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+            )
+            gt_pa_rgba = renderer_side(
+                gt_verts_b - gt_root,
+                generic_camera,
+                black_bg,
+                mesh_base_color=BLUE,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+                return_rgba=True,
+            )
+            alpha_pa = gt_pa_rgba[..., 3:4].astype(np.float32) * 0.5
+            blended_pa = alpha_pa * gt_pa_rgba[..., :3].astype(np.float32) + (1.0 - alpha_pa) * pa_pred_side
+            img_pa = _to_uint8(blended_pa)
+
+            pa_lines = []
+            if pampjpe_samples is not None:
+                pa_lines.append(f"PA-MPJPE: {float(pampjpe_samples[b, i]):.1f} mm")
+            _draw_label_lines(img_pa, pa_lines)
+            img_pa_list.append(img_pa)
+
+            # ----------------------- neutral raw -----------------------
+            if neutral_available:
+                pred_n_side = renderer_side(
+                    sample_neutral[i] - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    vertex_colors=vertex_colors_samples[i],
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                )
+                gt_n_rgba = renderer_side(
+                    gt_neutral - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    mesh_base_color=BLUE,
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                    return_rgba=True,
+                )
+                alpha_n = gt_n_rgba[..., 3:4].astype(np.float32) * 0.5
+                blended_n = alpha_n * gt_n_rgba[..., :3].astype(np.float32) + (1.0 - alpha_n) * pred_n_side
+                img_n = _to_uint8(blended_n)
+                _draw_label_lines(img_n, [f"PVE: {float(pve_samples[i]):.1f} mm"])
+                img_neutral_list.append(img_n)
+
+                # ----------------------- neutral scale+trans aligned -----------------------
+                pred_nsc_side = renderer_side(
+                    sample_neutral_sc[i] - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    vertex_colors=vertex_colors_samples[i],
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                )
+                gt_nsc_rgba = renderer_side(
+                    gt_neutral - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    mesh_base_color=BLUE,
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                    return_rgba=True,
+                )
+                alpha_nsc = gt_nsc_rgba[..., 3:4].astype(np.float32) * 0.5
+                blended_nsc = alpha_nsc * gt_nsc_rgba[..., :3].astype(np.float32) + (1.0 - alpha_nsc) * pred_nsc_side
+                img_nsc = _to_uint8(blended_nsc)
+                _draw_label_lines(img_nsc, [f"PVE-T-SC: {float(pvetsc_samples[i]):.1f} mm"])
+                img_neutral_sc_list.append(img_nsc)
+
+    axis = 0 if stack_vertically else 1
+    img_mesh_list = np.concatenate(img_mesh_list, axis=axis)
+    img_side_list = np.concatenate(img_side_list, axis=axis)
+    if img_pa_list:
+        img_pa_list = np.concatenate(img_pa_list, axis=axis)
+    else:
+        img_pa_list = None
+    if img_neutral_list:
+        img_neutral_list = np.concatenate(img_neutral_list, axis=axis)
+        img_neutral_sc_list = np.concatenate(img_neutral_sc_list, axis=axis)
+    else:
+        img_neutral_list = None
+        img_neutral_sc_list = None
+
+    # ----------------------- Top-left -----------------------
+    if overlay_gt:
+        gt_base_rgba = renderer(
+            gt_verts[b],
+            gt_cam_t[b],
+            img_cv2.copy(),
+            mesh_base_color=BLUE,
+            scene_bg_color=(1, 1, 1),
+            return_rgba=True,
+            camera_center=camera_center,
+        )
+
+        mean_pred_verts = outputs["pred_vertices"][b]
+        mean_pred_cam_t = outputs["pred_cam_t"][b]
+        mean_pred_root_joint = outputs["pred_joint_coords"][b][..., [1], :]
+
+        mean_pred_rgb_full = renderer(
+            mean_pred_verts,
+            mean_pred_cam_t,
+            img_cv2.copy(),
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vertex_colors_mean,
+            camera_center=camera_center,
+        )
+        alpha = gt_base_rgba[..., 3:4].astype(np.float32) * 0.5
+        blended_front = alpha * gt_base_rgba[..., :3].astype(np.float32) + (1.0 - alpha) * mean_pred_rgb_full
+        gt_base_img = _to_uint8(blended_front)
+
+        # ----------------------- Bottom-left -----------------------
+        mean_pred_unc = renderer_side(
+            mean_pred_verts - mean_pred_root_joint,
+            generic_camera,
+            black_bg,
+            scene_bg_color=(0, 0, 0),
+            vertex_colors=vertex_colors_mean,
+            side_view=True,
+            rot_angle=90,
+        )
+        gt_rgba_unc = renderer_side(
+            gt_verts[b] - gt_root_joint[b],
+            generic_camera,
+            black_bg,
+            mesh_base_color=BLUE,
+            scene_bg_color=(0, 0, 0),
+            side_view=True,
+            rot_angle=90,
+            return_rgba=True,
+        )
+        alpha_unc = gt_rgba_unc[..., 3:4].astype(np.float32) * 0.5
+        blended_unc = alpha_unc * gt_rgba_unc[..., :3].astype(np.float32) + (1.0 - alpha_unc) * mean_pred_unc
+        mean_unc_panel = _to_uint8(blended_unc)
+
+
+        mean_side_lines = []
+        if mean_logp is not None:
+            mean_side_lines.append(f"log p (mean): {float(mean_logp[b]):.1f}")
+        if mpjpe_mean is not None:
+            mean_side_lines.append(f"MPJPE (mean): {float(mpjpe_mean[b]):.1f} mm")
+        if gt_logp is not None:
+            mean_side_lines.append(f"log p (gt residual): {float(gt_logp[b]):.1f}")
+        _draw_label_lines(mean_unc_panel, mean_side_lines)
+
+        # ----------------------- Bottom-left (PA-aligned) -----------------------
+        mean_pa_pred = renderer_side(
+            aligned_mean - gt_root,
+            generic_camera,
+            black_bg,
+            vertex_colors=vertex_colors_mean,
+            scene_bg_color=(0, 0, 0),
+            side_view=True,
+            rot_angle=90,
+        )
+        gt_pa_rgba_mean = renderer_side(
+            gt_verts_b - gt_root,
+            generic_camera,
+            black_bg,
+            mesh_base_color=BLUE,
+            scene_bg_color=(0, 0, 0),
+            side_view=True,
+            rot_angle=90,
+            return_rgba=True,
+        )
+        alpha_mpa = gt_pa_rgba_mean[..., 3:4].astype(np.float32) * 0.5
+        blended_mpa = alpha_mpa * gt_pa_rgba_mean[..., :3].astype(np.float32) + (1.0 - alpha_mpa) * mean_pa_pred
+        mean_pa_panel = _to_uint8(blended_mpa)
+
+        mean_pa_lines = []
+        if pampjpe_mean is not None:
+            mean_pa_lines.append(f"PA-MPJPE (mean): {float(pampjpe_mean[b]):.1f} mm")
+        _draw_label_lines(mean_pa_panel, mean_pa_lines)
+
+        # ----------------------- mean neutral panels -----------------------
+        mean_neutral_panel = None
+        mean_neutral_sc_panel = None
+        if neutral_available:
+            pred_n_mean = renderer_side(
+                pred_neutral - neutral_center,
+                generic_camera,
+                black_bg,
+                vertex_colors=vertex_colors_mean,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=0,
+            )
+            gt_n_rgba_mean = renderer_side(
+                gt_neutral - neutral_center,
+                generic_camera,
+                black_bg,
+                mesh_base_color=BLUE,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=0,
+                return_rgba=True,
+            )
+            alpha_nm = gt_n_rgba_mean[..., 3:4].astype(np.float32) * 0.5
+            blended_nm = alpha_nm * gt_n_rgba_mean[..., :3].astype(np.float32) + (1.0 - alpha_nm) * pred_n_mean
+            mean_neutral_panel = _to_uint8(blended_nm)
+            _draw_label_lines(mean_neutral_panel, [f"PVE (mean): {pve_mean:.1f} mm"])
+
+            pred_nsc_mean = renderer_side(
+                pred_neutral_sc - neutral_center,
+                generic_camera,
+                black_bg,
+                vertex_colors=vertex_colors_mean,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=0,
+            )
+            alpha_nscm = gt_n_rgba_mean[..., 3:4].astype(np.float32) * 0.5
+            blended_nscm = alpha_nscm * gt_n_rgba_mean[..., :3].astype(np.float32) + (1.0 - alpha_nscm) * pred_nsc_mean
+            mean_neutral_sc_panel = _to_uint8(blended_nscm)
+            _draw_label_lines(mean_neutral_sc_panel, [f"PVE-T-SC (mean): {pvetsc_mean:.1f} mm"])
+
+        if affine is not None:
+            gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)
+
+        mean_front_lines = []
+        if kp2d_visible_mean_px is not None:
+            mean_front_lines.append(
+                f"2D err vis (mean): {float(kp2d_visible_mean_px[b]):.1f} px"
+            )
+        _draw_label_lines(gt_base_img, mean_front_lines)
+    else:
+        gt_base_img = base_img
+        mean_unc_panel = np.zeros_like(base_img)
+        mean_pa_panel = np.zeros_like(base_img)
+        mean_neutral_panel = None
+        mean_neutral_sc_panel = None
+
+    # row 1 + row 2
+    cur_img = np.concatenate([gt_base_img, img_mesh_list], axis=axis)
+    cur_img = np.concatenate(
+        [
+            cur_img,
+            np.concatenate([mean_unc_panel, img_side_list], axis=axis),
+        ],
+        axis=1 - axis,
+    )
+    # row 3: neutral raw
+    if img_neutral_list is not None and mean_neutral_panel is not None:
+        cur_img = np.concatenate(
+            [
+                cur_img,
+                np.concatenate([mean_neutral_panel, img_neutral_list], axis=axis),
+            ],
+            axis=1 - axis,
+        )
+    # row 4: PA-aligned
+    if img_pa_list is not None:
+        cur_img = np.concatenate(
+            [
+                cur_img,
+                np.concatenate([mean_pa_panel, img_pa_list], axis=axis),
+            ],
+            axis=1 - axis,
+        )
+    # row 5: neutral scale+trans aligned
+    if img_neutral_sc_list is not None and mean_neutral_sc_panel is not None:
+        cur_img = np.concatenate(
+            [
+                cur_img,
+                np.concatenate([mean_neutral_sc_panel, img_neutral_sc_list], axis=axis),
+            ],
+            axis=1 - axis,
+        )
+
+    return cur_img
 
 
 class Visualiser(pl.LightningModule):
@@ -1560,7 +2170,7 @@ class Visualiser(pl.LightningModule):
 # Multiview visualisations
 ################################################################################
 
-def vis_predictions(
+def vis_merging_predictions(
     input_dict,
     save_dir: str = None,
     plot_side: bool = True,
@@ -2090,7 +2700,7 @@ def vis_predictions(
         f"Saved multiview gallery: {save_path} (shape: {gallery_img.shape})"
     )
 
-def vis_neutral(
+def vis_merging_neutral(
     input_dict,
     save_dir: str = None,
     sc: bool = True,

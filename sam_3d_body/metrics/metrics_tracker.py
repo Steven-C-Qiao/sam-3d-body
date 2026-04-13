@@ -179,12 +179,39 @@ def pvetsc(pred, gt):
 
 
 class Metrics(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, mhr_head=None):
         super().__init__()
+        self.mhr_head = mhr_head
+
+    def _neutral_forward(self, shape_params, scale_offsets, templates):
+        """Run mhr_forward with zero global_rot/pose/hand/face; returns Y/Z-flipped verts."""
+        n = shape_params.shape[0]
+
+        def _zero_like(t):
+            return torch.zeros_like(t[:1]).expand(n, *t.shape[1:]).contiguous()
+
+        verts, _, _, _, _ = self.mhr_head.mhr_forward(
+            shape_params=shape_params,
+            scale_offsets=scale_offsets,
+            global_trans=_zero_like(templates["global_rot"]),
+            global_rot=_zero_like(templates["global_rot"]),
+            body_pose_params=_zero_like(templates["body_pose"]),
+            hand_pose_params=_zero_like(templates["hand"]),
+            expr_params=_zero_like(templates["face"]),
+            return_keypoints=True,
+            return_joint_coords=True,
+            return_model_params=True,
+            return_joint_rotations=True,
+            do_pcblend=True,
+        )
+        verts = verts.clone()
+        verts[..., [1, 2]] *= -1
+        return verts
 
     @torch.no_grad()
     def forward(self, predictions, batch):
         metrics = {}
+        vis_verts = {}
 
         if "pred_keypoints_3d" in predictions["mhr"]:
             pred_kp3d = predictions["mhr"]["pred_keypoints_3d"]
@@ -275,21 +302,21 @@ class Metrics(pl.LightningModule):
             # fmt: on
 
         if "kp2d_samples_cropped" in predictions:
-            img_size = batch["img_size"]
-
             pred_kp2d_norm = predictions["mhr"][
                 "pred_keypoints_2d_cropped"
             ]  # (B, J, 2)
             gt_kp2d_norm = batch["keypoints_2d"]  # (B, J, 2)
 
-            pred_kp2d = (pred_kp2d_norm + 0.5) * img_size.unsqueeze(1)
-            gt_kp2d = (gt_kp2d_norm + 0.5) * img_size.unsqueeze(1)
-
             pred_kp2d_samples_norm = predictions["kp2d_samples_cropped"]  # (B, N, J, 2)
             B, N = pred_kp2d_samples_norm.shape[:2]
             gt_kp2d_samples_norm = batch["keypoints_2d"][:, None].expand(-1, N, -1, -1)
 
-            img_size_b = img_size.view(B, 1, 1, 2)
+            # batch["img_size"] is (B_orig, V, 2); flatten to match flattened-person B.
+            img_size_flat = batch["img_size"].reshape(B, 2)
+            pred_kp2d = (pred_kp2d_norm + 0.5) * img_size_flat.unsqueeze(1)
+            gt_kp2d = (gt_kp2d_norm + 0.5) * img_size_flat.unsqueeze(1)
+
+            img_size_b = img_size_flat.view(B, 1, 1, 2)
             pred_kp2d_samples = (pred_kp2d_samples_norm + 0.5) * img_size_b
             gt_kp2d_samples = (gt_kp2d_samples_norm + 0.5) * img_size_b
 
@@ -308,12 +335,82 @@ class Metrics(pl.LightningModule):
                     (kp2d_err_samples * visibility_mask.float()).sum(dim=-1)
                     / visibility_mask.float().sum(dim=-1)
                 )
+                vis_mean = batch["visibility"].bool().float()
+                metrics["kp2d_pixel_error_visible"] = (
+                    (kp2d_err * vis_mean).sum(dim=-1)
+                    / vis_mean.sum(dim=-1).clamp(min=1)
+                )
 
-        # for k, v in metrics.items():
-        #     print(f"{k}: {v:.4f}")
-        # import ipdb; ipdb.set_trace()
+        # --- visualisation-aligned vertices (reuse procrustes/SC transforms) ---
+        if "pred_vertices" in predictions["mhr"]:
+            gt_v = batch["vertices"].cpu().detach().numpy()
+            pred_v = predictions["mhr"]["pred_vertices"].cpu().detach().numpy()
+            vis_verts["pa_mean_verts"] = compute_similarity_transform_batch(pred_v, gt_v)
 
-        return metrics
+        if "verts_samples" in predictions:
+            vs = predictions["verts_samples"]  # (B, N, V, 3)
+            B, N = vs.shape[:2]
+            gt_v = batch["vertices"]
+            gt_v_exp = gt_v[:, None].expand(-1, N, -1, -1)
+            pa = compute_similarity_transform_batch(
+                vs.flatten(0, 1).cpu().detach().numpy(),
+                gt_v_exp.flatten(0, 1).cpu().detach().numpy(),
+            )
+            vis_verts["pa_sample_verts"] = pa.reshape(B, N, *pa.shape[1:])
+
+        if self.mhr_head is not None and "shape" in predictions["mhr"]:
+            mhr_out = predictions["mhr"]
+            templates = {
+                k: mhr_out[k] for k in ("global_rot", "body_pose", "hand", "face")
+            }
+            pred_shape = mhr_out["shape"]
+            pred_scale = mhr_out["scale_68D"]
+            gt_shape = batch["shape_params"]
+            gt_scale = batch["model_params"][:, -68:]
+
+            pred_neutral = self._neutral_forward(pred_shape, pred_scale, templates)
+            gt_neutral = self._neutral_forward(gt_shape, gt_scale, templates)
+            vis_verts["pred_neutral_verts"] = pred_neutral
+            vis_verts["gt_neutral_verts"] = gt_neutral
+
+            # PVE metric (mean vertex L2 in mm)
+            metrics["pve"] = torch.sqrt(((pred_neutral - gt_neutral) ** 2).sum(dim=-1)).mean(dim=-1) * 1000.0
+
+            gt_np = gt_neutral.cpu().detach().numpy()
+            pred_neutral_sc = scale_and_translation_transform_batch(
+                pred_neutral.cpu().detach().numpy(), gt_np
+            )
+            vis_verts["pred_neutral_verts_sc"] = pred_neutral_sc
+            metrics["pvetsc"] = torch.from_numpy(
+                np.linalg.norm(pred_neutral_sc - gt_np, axis=-1).mean(axis=-1)
+            ).to(pred_shape.device) * 1000.0
+
+            if "shape_samples" in predictions.get("uncertainty_output", {}):
+                unc = predictions["uncertainty_output"]
+                shape_s = unc["shape_samples"]
+                scale_s = unc["scale_samples"]
+                B, S = shape_s.shape[:2]
+                sample_neutral = self._neutral_forward(
+                    shape_s.reshape(B * S, -1), scale_s.reshape(B * S, -1), templates
+                ).reshape(B, S, *pred_neutral.shape[1:])
+                vis_verts["sample_neutral_verts"] = sample_neutral
+
+                sample_np = sample_neutral.cpu().detach().numpy()
+                gt_exp_np = np.broadcast_to(gt_np[:, None], sample_np.shape)
+                sample_neutral_sc = scale_and_translation_transform_batch(
+                    sample_np.reshape(B * S, *sample_np.shape[2:]),
+                    gt_exp_np.reshape(B * S, *sample_np.shape[2:]),
+                ).reshape(B, S, *sample_np.shape[2:])
+                vis_verts["sample_neutral_verts_sc"] = sample_neutral_sc
+
+                metrics["pve_samples"] = torch.sqrt(
+                    ((sample_neutral - gt_neutral[:, None]) ** 2).sum(dim=-1)
+                ).mean(dim=-1) * 1000.0
+                metrics["pvetsc_samples"] = torch.from_numpy(
+                    np.linalg.norm(sample_neutral_sc - gt_exp_np, axis=-1).mean(axis=-1)
+                ).to(pred_shape.device) * 1000.0
+
+        return metrics, vis_verts
 
 
 

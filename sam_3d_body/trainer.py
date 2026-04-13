@@ -1,47 +1,38 @@
 import os
-import cv2
-import roma
-import torch
-import numpy as np
-
-from typing import Dict, Optional
 from collections import defaultdict
-from yacs.config import CfgNode
+from typing import Dict, Optional
+
+import cv2
+import numpy as np
+import torch
 from loguru import logger
 from torch.utils.data import ConcatDataset, DataLoader
+from yacs.config import CfgNode
 
-from .models.meta_arch.sam3d_body import SAM3DBody
-from .models.meta_arch.base_lightning_module import BaseLightningModule
-from .models.meta_arch.nf_merging import get_mhr_outputs
-from .models.meta_arch.nf_merging import merge_params_nf
-
-# from .losses.loss import Loss
+from .configs.config import INDICES_PATH
+from .data.bedlam_dataset import (
+    DatasetHMR as BEDLAMDataset,
+    MultiViewEvaluationDataset,
+    bedlam_collate,
+)
 from .losses.nf_loss import Loss
-from .data.bedlam_dataset import DatasetHMR as BEDLAMDataset
-from .data.bedlam_dataset import bedlam_collate
-from .data.bedlam_dataset import MultiViewEvaluationDataset
-from .metrics.metrics_tracker import Metrics
 from .metrics.metrics_tracker import (
+    Metrics,
     multiframe_metrics,
     print_multiview_metrics,
     scale_and_translation_transform_batch,
 )
-from .visualization.my_vis import Visualiser, vis_predictions, vis_neutral
+from .models.meta_arch.base_lightning_module import BaseLightningModule
+from .models.meta_arch.nf_merging import get_mhr_outputs, merge_params_nf
+from .models.meta_arch.sam3d_body import SAM3DBody
+from .visualization.my_vis import (
+    Visualiser,
+    vis_prediction,
+    vis_samples,
+    vis_merging_neutral,
+    vis_merging_predictions,
+)
 from .visualization.renderer import Renderer
-
-from .configs.config import INDICES_PATH
-
-import sys
-from pathlib import Path
-
-# Add project root to path for tools import
-project_root = Path(__file__).parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
-from tools.vis_utils import my_visualize
-from tools.vis_utils import my_visualize_samples
-from tools.vis_utils import view_one_in_another
 
 
 def _write_obj(path, verts, faces):
@@ -108,7 +99,7 @@ class Trainer(BaseLightningModule):
         else:
             raise ValueError("Invalid model type")
 
-        self.metrics = Metrics()
+        self.metrics = None  # instantiated after model is built (needs mhr_head)
 
         # Optionally enable dense keypoints based on config; if disabled, the model
         # will only use the canonical 70 MHR keypoints.
@@ -179,6 +170,7 @@ class Trainer(BaseLightningModule):
 
         self.faces = self.model.head_pose.faces.cpu().detach().numpy()
 
+        self.metrics = Metrics(mhr_head=self.model.head_pose)
         self.visualiser = Visualiser(vis_save_dir, cfg=cfg, faces=self.faces)
 
     def training_step(self, batch: Dict, batch_idx: int):
@@ -189,10 +181,11 @@ class Trainer(BaseLightningModule):
 
         loss_dict = self.criterion(outputs, batch)
 
-        metrics = self.metrics(outputs, batch)
+        metrics, vis_verts = self.metrics(outputs, batch)
 
         self.log_and_visualise(
-            loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx
+            loss_dict, metrics, batch, outputs, prefix="train_", batch_idx=batch_idx,
+            vis_verts=vis_verts,
         )
 
         # for k, v in loss_dict.items():
@@ -213,13 +206,15 @@ class Trainer(BaseLightningModule):
         outputs: Dict,
         prefix: str = "",
         batch_idx: Optional[int] = None,
+        vis_verts: Optional[Dict] = None,
     ):
 
         raw_metrics = metrics.copy()
         # Also propagate selected loss quantities needed for visualization (e.g., GT log-prob).
-        if "gt_residual_log_prob" in loss_dict:
-            raw_metrics["gt_residual_log_prob"] = loss_dict["gt_residual_log_prob"]
-        loss_dict.pop("gt_residual_log_prob", None)
+        for k in ("gt_residual_log_prob", "mean_residual_log_prob"):
+            if k in loss_dict:
+                raw_metrics[k] = loss_dict[k]
+            loss_dict.pop(k, None)
         metrics = {
             k: (v.float().mean() if isinstance(v, torch.Tensor) else np.asarray(v).mean())
             for k, v in metrics.items()
@@ -273,24 +268,24 @@ class Trainer(BaseLightningModule):
             if isinstance(image, torch.Tensor):
                 image = image.cpu().detach().numpy()  # [3, H, W]
 
-            # Generate visualizations
-            rend_img = my_visualize(
-                image, outputs, self.faces, stack_vertically=self.stack_vertically, batch=batch
-            )
-            affine = batch["affine_trans"][0, 0]
-            img_size = batch["img_size"][0, 0]
-            rend_img_samples_crops = my_visualize_samples(
+            rend_img_samples_crops = vis_samples(
                 image,
                 outputs,
                 self.faces,
-                stack_vertically=False,  # self.stack_vertically,
-                affine=affine,
-                img_size=img_size,
+                batch=batch,
+                metrics=raw_metrics,
+                vis_verts=vis_verts,
+                stack_vertically=False,
                 overlay_gt=True,
                 plot_side=True,
+                plot_neutral=True,
+            )
+            rend_img = vis_prediction(
+                image,
+                outputs,
+                self.faces,
+                stack_vertically=self.stack_vertically,
                 batch=batch,
-                mhr_model=self.model.head_pose,
-                metrics=raw_metrics,
             )
             rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
             rend_img_samples_crops_bgr = cv2.cvtColor(
@@ -347,9 +342,10 @@ class Trainer(BaseLightningModule):
         batch = self.preprocess(batch)
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
         loss_dict = self.criterion(outputs, batch)
-        metrics = self.metrics(outputs, batch)
+        metrics, vis_verts = self.metrics(outputs, batch)
         self.log_and_visualise(
-            loss_dict, metrics, batch, outputs, prefix="val_", batch_idx=batch_idx
+            loss_dict, metrics, batch, outputs, prefix="val_", batch_idx=batch_idx,
+            vis_verts=vis_verts,
         )
         return loss_dict["total_loss"]
 
@@ -361,9 +357,10 @@ class Trainer(BaseLightningModule):
         batch = self.preprocess(batch)
         outputs = self(batch, num_samples=self.cfg.MODEL.NUM_SAMPLES)
         loss_dict = self.criterion(outputs, batch)
-        metrics = self.metrics(outputs, batch)
+        metrics, vis_verts = self.metrics(outputs, batch)
         self.log_and_visualise(
-            loss_dict, metrics, batch, outputs, prefix="test_", batch_idx=batch_idx
+            loss_dict, metrics, batch, outputs, prefix="test_", batch_idx=batch_idx,
+            vis_verts=vis_verts,
         )
 
         return loss_dict["total_loss"]
@@ -715,8 +712,8 @@ class Trainer(BaseLightningModule):
             #         print(k, v)
             #     import ipdb; ipdb.set_trace()
 
-            vis_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            vis_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
+            vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
+            vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)

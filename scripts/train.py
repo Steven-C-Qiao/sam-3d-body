@@ -23,13 +23,17 @@ from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, config_path=None):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, config_path=None, lr=None):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
 
     if config_path is not None:
         cfg.merge_from_file(config_path)
+
+    if lr is not None:
+        cfg.TRAIN.LR = lr
+        logger.info(f"Overriding TRAIN.LR with CLI value: {lr}")
 
     # if load_path is not None or resume_path is not None:
     if resume_path is not None:
@@ -185,6 +189,12 @@ if __name__ == "__main__":
     parser.add_argument("--config", "-C", type=str, default=None,
                         help="YAML config override file (merged on top of defaults).")
     parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Override TRAIN.LR from the config.",
+    )
+    parser.add_argument(
         "--plot",
         action="store_true",
         help="If set, always generate visualisations each step.",
@@ -213,4 +223,5 @@ if __name__ == "__main__":
         load_path=args.load_from_ckpt,
         dev=args.dev,
         config_path=args.config,
+        lr=args.lr,
     )

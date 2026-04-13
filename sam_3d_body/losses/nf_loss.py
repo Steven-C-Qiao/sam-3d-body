@@ -235,6 +235,9 @@ class Loss(pl.LightningModule):
             )
             nll_loss = -flow_log_prob.mean()
             loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
+            mean_log_prob = self._compute_gt_residual_log_prob(
+                torch.zeros_like(true_residual), predictions
+            )
 
         # DEPRECATED: raw parameter-space variance. Can be gamed by random noise.
         # Prefer KP3D_INVISIBLE_SPREAD_WEIGHT instead.
@@ -319,6 +322,10 @@ class Loss(pl.LightningModule):
         loss_dict["total_loss"] = sum(
             v for k, v in loss_dict.items() if k != "total_loss"
         )
+
+        if self.cfg.LOSS.PARAM_NLL_WEIGHT > 0:
+            loss_dict["gt_residual_log_prob"] = flow_log_prob.detach()
+            loss_dict["mean_residual_log_prob"] = mean_log_prob.detach()
         
         # loss_dict["gt_residual_log_prob"] = flow_log_prob.detach()
 
