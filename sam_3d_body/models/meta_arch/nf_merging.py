@@ -363,6 +363,7 @@ def merge_params_nf_is(
             candidate_beta.append(beta_i)
             candidate_logw.append(logw_i)
 
+
         candidate_beta = torch.cat(candidate_beta, dim=0)  # [V*S, 55]
         candidate_logw = torch.cat(candidate_logw, dim=0)  # [V*S]
 
@@ -704,6 +705,30 @@ def get_mhr_outputs(
         sample_neutral_verts, _, sample_neutral_jcoords, _, _ = sample_neutral_out
         ret["sample_neutral_verts"] = sample_neutral_verts.reshape(BV, S, *sample_neutral_verts.shape[1:])
         ret["sample_neutral_jcoords"] = sample_neutral_jcoords.reshape(BV, S, *sample_neutral_jcoords.shape[1:])
+
+        # ------------- sample-param-average neutral (average residual samples, then MHR once) -------------
+        # shape_samples = shape_mean + shape_residual_samples, so mean over S equals
+        # shape_mean + mean(shape_residual_samples). Distinct from sample_neutral_verts,
+        # which runs MHR per sample and averages *in vertex space*.
+        sample_param_avg_shape = shape_s.mean(dim=1)  # [B*V, 45]
+        sample_param_avg_scale = scale_s.mean(dim=1)  # [B*V, 68]
+
+        sample_param_avg_neutral_out = mhr_head.mhr_forward(
+            shape_params=sample_param_avg_shape,
+            scale_offsets=sample_param_avg_scale,
+            **mhr_zero_inputs,
+            **mhr_output_config,
+        )
+        (
+            sample_param_avg_neutral_verts,
+            sample_param_avg_neutral_kp3d,
+            sample_param_avg_neutral_jcoords,
+            _,
+            _,
+        ) = sample_param_avg_neutral_out
+        ret["sample_param_avg_neutral_verts"] = sample_param_avg_neutral_verts
+        ret["sample_param_avg_neutral_kp3d"] = sample_param_avg_neutral_kp3d
+        ret["sample_param_avg_neutral_jcoords"] = sample_param_avg_neutral_jcoords
 
     # for k, v in ret.items():
     #     print(k, v.shape)

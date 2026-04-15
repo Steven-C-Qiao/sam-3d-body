@@ -422,7 +422,7 @@ class Trainer(BaseLightningModule):
             cam_ext = batch["cam_ext"]
             trans_cam = cam_ext[:, :3, 3]
 
-        c = torch.tensor([0., 0.923986, 0.]).to(cam_ext.device)
+        c = torch.tensor([0., 0.923986, 0.]).to(trans_cam.device)
         trans_cam += (c * 2 + mhr_transl)
 
         def project(points, cam_trans, cam_int):
@@ -606,6 +606,7 @@ class Trainer(BaseLightningModule):
         max_batches: Optional[int] = 2,
         dataset_name: str = "4d-dress",
         merge_method: str = "psis",
+        noplot: bool = False,
     ):
         """
         Run MHR predictions for each view loaded by MultiViewEvaluationDataset.
@@ -712,8 +713,9 @@ class Trainer(BaseLightningModule):
             #         print(k, v)
             #     import ipdb; ipdb.set_trace()
 
-            vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-            vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
+            if not noplot:
+                vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
+                vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)

@@ -416,6 +416,31 @@ def vis_samples(
         pvetsc_mean = m.get("pvetsc")
         pvetsc_mean = float(_to_np(pvetsc_mean)[b]) if pvetsc_mean is not None else \
             float(np.linalg.norm(pred_neutral_sc - gt_neutral, axis=-1).mean()) * 1000.0
+
+        # ---- neutral per-vertex spread colours (shared inferno scale per row) ----
+        neutral_dists = np.linalg.norm(
+            sample_neutral - pred_neutral[None], axis=-1
+        )  # (n_vis, V)
+        neutral_max = float(neutral_dists.max()) if neutral_dists.size else 1.0
+        vertex_colors_neutral_samples = [
+            build_vertex_colors(neutral_dists[i], min_dist=0.0, max_dist=neutral_max)
+            for i in range(n_vis)
+        ]
+        vertex_colors_neutral_mean = build_vertex_colors(
+            neutral_dists.mean(axis=0), min_dist=0.0, max_dist=neutral_max
+        )
+
+        neutral_sc_dists = np.linalg.norm(
+            sample_neutral_sc - pred_neutral_sc[None], axis=-1
+        )
+        neutral_sc_max = float(neutral_sc_dists.max()) if neutral_sc_dists.size else 1.0
+        vertex_colors_neutral_sc_samples = [
+            build_vertex_colors(neutral_sc_dists[i], min_dist=0.0, max_dist=neutral_sc_max)
+            for i in range(n_vis)
+        ]
+        vertex_colors_neutral_sc_mean = build_vertex_colors(
+            neutral_sc_dists.mean(axis=0), min_dist=0.0, max_dist=neutral_sc_max
+        )
     white_bg_full = np.full_like(img_cv2, 255, dtype=np.uint8)
     if img_size is not None:
         black_bg = np.zeros((int(img_size[1]), int(img_size[0]), 3), dtype=np.uint8)
@@ -534,7 +559,7 @@ def vis_samples(
                     sample_neutral[i] - neutral_center,
                     generic_camera,
                     black_bg,
-                    vertex_colors=vertex_colors_samples[i],
+                    vertex_colors=vertex_colors_neutral_samples[i],
                     scene_bg_color=(0, 0, 0),
                     side_view=True,
                     rot_angle=0,
@@ -560,7 +585,7 @@ def vis_samples(
                     sample_neutral_sc[i] - neutral_center,
                     generic_camera,
                     black_bg,
-                    vertex_colors=vertex_colors_samples[i],
+                    vertex_colors=vertex_colors_neutral_sc_samples[i],
                     scene_bg_color=(0, 0, 0),
                     side_view=True,
                     rot_angle=0,
@@ -694,7 +719,7 @@ def vis_samples(
                 pred_neutral - neutral_center,
                 generic_camera,
                 black_bg,
-                vertex_colors=vertex_colors_mean,
+                vertex_colors=vertex_colors_neutral_mean,
                 scene_bg_color=(0, 0, 0),
                 side_view=True,
                 rot_angle=0,
@@ -718,7 +743,7 @@ def vis_samples(
                 pred_neutral_sc - neutral_center,
                 generic_camera,
                 black_bg,
-                vertex_colors=vertex_colors_mean,
+                vertex_colors=vertex_colors_neutral_sc_mean,
                 scene_bg_color=(0, 0, 0),
                 side_view=True,
                 rot_angle=0,
@@ -744,43 +769,45 @@ def vis_samples(
         mean_neutral_panel = None
         mean_neutral_sc_panel = None
 
-    # row 1 + row 2
-    cur_img = np.concatenate([gt_base_img, img_mesh_list], axis=axis)
-    cur_img = np.concatenate(
-        [
-            cur_img,
-            np.concatenate([mean_unc_panel, img_side_list], axis=axis),
-        ],
-        axis=1 - axis,
-    )
-    # row 3: neutral raw
-    if img_neutral_list is not None and mean_neutral_panel is not None:
-        cur_img = np.concatenate(
-            [
-                cur_img,
-                np.concatenate([mean_neutral_panel, img_neutral_list], axis=axis),
-            ],
-            axis=1 - axis,
-        )
-    # row 4: PA-aligned
-    if img_pa_list is not None:
-        cur_img = np.concatenate(
-            [
-                cur_img,
-                np.concatenate([mean_pa_panel, img_pa_list], axis=axis),
-            ],
-            axis=1 - axis,
-        )
-    # row 5: neutral scale+trans aligned
-    if img_neutral_sc_list is not None and mean_neutral_sc_panel is not None:
-        cur_img = np.concatenate(
-            [
-                cur_img,
-                np.concatenate([mean_neutral_sc_panel, img_neutral_sc_list], axis=axis),
-            ],
-            axis=1 - axis,
-        )
+    # Build each row and (when rows are horizontal) attach a per-row colorbar.
+    # dists are in metres; colorbars are labelled in mm.
+    attach_cbar = not stack_vertically
 
+    def _with_cbar(row_img, max_dist_m):
+        if not attach_cbar:
+            return row_img
+        h = row_img.shape[0]
+        cbar = build_distance_colorbar_rgb(
+            min_dist=0.0,
+            max_dist=float(max_dist_m) * 1000.0,
+            height=h,
+            width=60,
+        )
+        return np.concatenate([row_img, cbar], axis=1)
+
+    rows = []
+    rows.append(_with_cbar(
+        np.concatenate([gt_base_img, img_mesh_list], axis=axis), shared_max
+    ))
+    rows.append(_with_cbar(
+        np.concatenate([mean_unc_panel, img_side_list], axis=axis), shared_max
+    ))
+    if img_neutral_list is not None and mean_neutral_panel is not None:
+        rows.append(_with_cbar(
+            np.concatenate([mean_neutral_panel, img_neutral_list], axis=axis),
+            neutral_max,
+        ))
+    if img_pa_list is not None:
+        rows.append(_with_cbar(
+            np.concatenate([mean_pa_panel, img_pa_list], axis=axis), shared_max
+        ))
+    if img_neutral_sc_list is not None and mean_neutral_sc_panel is not None:
+        rows.append(_with_cbar(
+            np.concatenate([mean_neutral_sc_panel, img_neutral_sc_list], axis=axis),
+            neutral_sc_max,
+        ))
+
+    cur_img = np.concatenate(rows, axis=1 - axis)
     return cur_img
 
 

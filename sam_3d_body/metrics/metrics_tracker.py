@@ -64,6 +64,35 @@ def compute_similarity_transform_batch(S1, S2):
     return S1_hat
 
 
+def compute_similarity_transform_batch_torch(S1, S2):
+    """
+    Batched orthogonal procrustes (with scale + translation) in torch.
+    S1, S2: (B, N, 3). Returns aligned S1 of same shape.
+    ~100x faster than the numpy version when run on GPU.
+    """
+    mu1 = S1.mean(dim=-2, keepdim=True)          # (B, 1, 3)
+    mu2 = S2.mean(dim=-2, keepdim=True)
+    X1 = S1 - mu1
+    X2 = S2 - mu2
+    var1 = (X1 ** 2).sum(dim=(-2, -1))           # (B,)
+
+    K = X1.transpose(-2, -1) @ X2                # (B, 3, 3)
+    U, _, Vh = torch.linalg.svd(K)
+    V = Vh.transpose(-2, -1)
+
+    sign = torch.sign(torch.det(U @ Vh))         # (B,)
+    Z = torch.eye(3, device=S1.device, dtype=S1.dtype).expand(S1.shape[0], 3, 3).clone()
+    Z[:, -1, -1] = Z[:, -1, -1] * sign
+
+    R = V @ Z @ U.transpose(-2, -1)
+    trRK = torch.einsum("bij,bji->b", R, K)
+    scale = (trRK / var1).view(-1, 1, 1)         # (B, 1, 1)
+
+    S1_rot = S1 @ R.transpose(-2, -1)
+    t = mu2 - scale * (mu1 @ R.transpose(-2, -1))
+    return scale * S1_rot + t
+
+
 def reconstruction_error(S1, S2, reduction="mean"):
     """Do Procrustes alignment and compute reconstruction error."""
     S1_hat = compute_similarity_transform_batch(S1, S2)
@@ -341,22 +370,21 @@ class Metrics(pl.LightningModule):
                     / vis_mean.sum(dim=-1).clamp(min=1)
                 )
 
-        # --- visualisation-aligned vertices (reuse procrustes/SC transforms) ---
+        # --- visualisation-aligned vertices (all kept on GPU as tensors) ---
         if "pred_vertices" in predictions["mhr"]:
-            gt_v = batch["vertices"].cpu().detach().numpy()
-            pred_v = predictions["mhr"]["pred_vertices"].cpu().detach().numpy()
-            vis_verts["pa_mean_verts"] = compute_similarity_transform_batch(pred_v, gt_v)
+            gt_v = batch["vertices"]
+            pred_v = predictions["mhr"]["pred_vertices"]
+            vis_verts["pa_mean_verts"] = compute_similarity_transform_batch_torch(pred_v, gt_v)
 
         if "verts_samples" in predictions:
             vs = predictions["verts_samples"]  # (B, N, V, 3)
             B, N = vs.shape[:2]
             gt_v = batch["vertices"]
             gt_v_exp = gt_v[:, None].expand(-1, N, -1, -1)
-            pa = compute_similarity_transform_batch(
-                vs.flatten(0, 1).cpu().detach().numpy(),
-                gt_v_exp.flatten(0, 1).cpu().detach().numpy(),
+            pa_flat = compute_similarity_transform_batch_torch(
+                vs.flatten(0, 1), gt_v_exp.flatten(0, 1)
             )
-            vis_verts["pa_sample_verts"] = pa.reshape(B, N, *pa.shape[1:])
+            vis_verts["pa_sample_verts"] = pa_flat.reshape(B, N, *pa_flat.shape[1:])
 
         if self.mhr_head is not None and "shape" in predictions["mhr"]:
             mhr_out = predictions["mhr"]
@@ -373,17 +401,13 @@ class Metrics(pl.LightningModule):
             vis_verts["pred_neutral_verts"] = pred_neutral
             vis_verts["gt_neutral_verts"] = gt_neutral
 
-            # PVE metric (mean vertex L2 in mm)
             metrics["pve"] = torch.sqrt(((pred_neutral - gt_neutral) ** 2).sum(dim=-1)).mean(dim=-1) * 1000.0
 
-            gt_np = gt_neutral.cpu().detach().numpy()
-            pred_neutral_sc = scale_and_translation_transform_batch(
-                pred_neutral.cpu().detach().numpy(), gt_np
-            )
+            pred_neutral_sc = scale_and_translation_transform_batch_torch(pred_neutral, gt_neutral)
             vis_verts["pred_neutral_verts_sc"] = pred_neutral_sc
-            metrics["pvetsc"] = torch.from_numpy(
-                np.linalg.norm(pred_neutral_sc - gt_np, axis=-1).mean(axis=-1)
-            ).to(pred_shape.device) * 1000.0
+            metrics["pvetsc"] = torch.sqrt(
+                ((pred_neutral_sc - gt_neutral) ** 2).sum(dim=-1)
+            ).mean(dim=-1) * 1000.0
 
             if "shape_samples" in predictions.get("uncertainty_output", {}):
                 unc = predictions["uncertainty_output"]
@@ -395,20 +419,19 @@ class Metrics(pl.LightningModule):
                 ).reshape(B, S, *pred_neutral.shape[1:])
                 vis_verts["sample_neutral_verts"] = sample_neutral
 
-                sample_np = sample_neutral.cpu().detach().numpy()
-                gt_exp_np = np.broadcast_to(gt_np[:, None], sample_np.shape)
-                sample_neutral_sc = scale_and_translation_transform_batch(
-                    sample_np.reshape(B * S, *sample_np.shape[2:]),
-                    gt_exp_np.reshape(B * S, *sample_np.shape[2:]),
-                ).reshape(B, S, *sample_np.shape[2:])
+                gt_neutral_exp = gt_neutral[:, None].expand(-1, S, -1, -1)
+                sample_neutral_sc = scale_and_translation_transform_batch_torch(
+                    sample_neutral.reshape(B * S, *sample_neutral.shape[2:]),
+                    gt_neutral_exp.reshape(B * S, *sample_neutral.shape[2:]),
+                ).reshape(B, S, *sample_neutral.shape[2:])
                 vis_verts["sample_neutral_verts_sc"] = sample_neutral_sc
 
                 metrics["pve_samples"] = torch.sqrt(
                     ((sample_neutral - gt_neutral[:, None]) ** 2).sum(dim=-1)
                 ).mean(dim=-1) * 1000.0
-                metrics["pvetsc_samples"] = torch.from_numpy(
-                    np.linalg.norm(sample_neutral_sc - gt_exp_np, axis=-1).mean(axis=-1)
-                ).to(pred_shape.device) * 1000.0
+                metrics["pvetsc_samples"] = torch.sqrt(
+                    ((sample_neutral_sc - gt_neutral[:, None]) ** 2).sum(dim=-1)
+                ).mean(dim=-1) * 1000.0
 
         return metrics, vis_verts
 
@@ -557,6 +580,27 @@ def multiframe_metrics(
         avg_sample_pvetsc = sample_pvetsc_per_s.mean(axis=1)
         best_metric_sample_pvetsc = sample_pvetsc_per_s.min(axis=1)
 
+    # ---------------- sample-param-average (mean of residual samples → MHR once) ----------------
+    sample_param_avg_pampjpe = sample_param_avg_pvetsc = None
+    if "sample_param_avg_neutral_verts" in mhr_dict:
+        sp_avg_verts = mhr_dict["sample_param_avg_neutral_verts"]
+        sp_avg_jcoords = mhr_dict["sample_param_avg_neutral_jcoords"]
+
+        sample_param_avg_pampjpe, _ = reconstruction_error(
+            sp_avg_jcoords.cpu().detach().numpy(),
+            gt_neutral_jcoords.cpu().detach().numpy(),
+            reduction="none",
+        )
+        sample_param_avg_pampjpe = sample_param_avg_pampjpe.mean(axis=-1)
+
+        sp_avg_sc = scale_and_translation_transform_batch(
+            sp_avg_verts.cpu().detach().numpy(),
+            gt_neutral_verts.cpu().detach().numpy(),
+        )
+        sample_param_avg_pvetsc = np.linalg.norm(
+            sp_avg_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
+        ).mean(axis=1)
+
     print(f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {avg_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}")
     print(f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {avg_pve.mean():.4f}, merged: {merged_pve.mean():.4f}")
     print(f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {avg_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}")
@@ -597,6 +641,10 @@ def multiframe_metrics(
         all_metrics["best_mpjpe_sample_mpjpe"].append(best_metric_sample_mpjpe)
         all_metrics["best_pampjpe_sample_pampjpe"].append(best_metric_sample_pampjpe)
         all_metrics["best_pvetsc_sample_pvetsc"].append(best_metric_sample_pvetsc)
+
+    if sample_param_avg_pampjpe is not None:
+        all_metrics["sample_param_avg_pampjpe"].append(sample_param_avg_pampjpe)
+        all_metrics["sample_param_avg_pvetsc"].append(sample_param_avg_pvetsc)
 
     # if batch_idx == 3:
     #     for k, v in all_metrics.items():
