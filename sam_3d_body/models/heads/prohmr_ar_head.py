@@ -272,6 +272,118 @@ class NFARHead(nn.Module):
 
 
     @autocast("cuda", enabled=False)
+    def sample_theta_given_beta(
+        self,
+        flow_context: torch.Tensor,
+        mean_pred: Dict,
+        shape_samples: torch.Tensor,
+        scale_samples_68D: torch.Tensor,
+    ) -> Dict:
+        """Stage 2 of the autoregressive NF: sample pose/glob_rot/cam residuals
+        conditioned on a given ``(shape_samples, scale_samples_68D)``.
+
+        Separated out so the same stage-2 context + flow path can be reused
+        with the *merged* shape/scale (from multi-view merging) in place of
+        the stage-1 sample — yielding a merged-consistent camera.
+
+        Args:
+            flow_context:       (B, 1024) raw flow context, before projection
+            mean_pred:          dict with ``pred_pose_raw`` (B, 6+pose_cont)
+                                 and (if ``self.model_cam``) ``pred_cam`` (B, 3)
+            shape_samples:      (B, N, 45) shape samples to condition on
+            scale_samples_68D:  (B, N, 68) scale samples to condition on
+
+        Returns dict with:
+            ``theta_samples_residual``: (B, N, theta_dim)
+            ``theta_log_prob``:         (B, N)
+            ``pose_samples``:           MHR-compatible pose params (B, N, …)
+            ``global_rot_samples``:     (B, N, 3) Euler XYZ or ``None``
+            ``cam_samples``:            (B, N, 3) ``pred_cam`` or ``None``
+            ``context_theta``:          (B*N, 2048) post-projection context
+        """
+        B, N = shape_samples.shape[0], shape_samples.shape[1]
+
+        pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
+        pose_params_mhr = compact_cont_to_model_params_body(pose_mean_cont)
+        pose_params = convert_pose_cont_to_flow_context(pose_mean_cont)
+        aa_3dofs = pose_params["aa_3dofs"]
+        params_1dofs = pose_params["params_1dofs"]
+
+        flow_context_expanded = flow_context.unsqueeze(1).repeat(1, N, 1)
+        aa_3dofs_expanded = aa_3dofs.unsqueeze(1).repeat(1, N, 1)
+        params_1dofs_expanded = params_1dofs.unsqueeze(1).repeat(1, N, 1)
+
+        context_theta_parts = [
+            flow_context_expanded,
+            shape_samples,
+            scale_samples_68D[..., scale_indices],
+            aa_3dofs_expanded,
+            params_1dofs_expanded,
+        ]
+        if self.model_cam:
+            pred_cam_expanded = mean_pred["pred_cam"].unsqueeze(1).repeat(1, N, 1)
+            context_theta_parts.append(pred_cam_expanded)
+        context_theta = self.theta_context_proj(
+            torch.cat(context_theta_parts, dim=-1).reshape(B * N, -1)
+        )
+
+        theta_residual_flat, theta_log_prob_flat, _ = self.flow_theta.sample_and_log_prob(
+            1, context=context_theta,
+        )
+        theta_samples_residual = theta_residual_flat.squeeze(1).reshape(B, N, self.theta_dim)
+        theta_log_prob = theta_log_prob_flat.squeeze(1).reshape(B, N)
+
+        pose_3dof_residual_samples = theta_samples_residual[..., : self.num_3dof_comps]
+        pose_1dof_residual_samples = theta_samples_residual[
+            ..., self.num_3dof_comps : self.num_3dof_comps + self.num_1dof_comps
+        ]
+        aa_3dof_samples = so3_compose_aa(
+            aa_3dofs.unsqueeze(1), pose_3dof_residual_samples
+        )
+        params_1dofs_samples = (
+            params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
+        )
+        pose_samples = convert_flow_samples_to_mhr_params(
+            aa_3dof_samples, params_1dofs_samples, pose_params_mhr
+        )
+
+        if self.model_glob_rot:
+            gr_offset = self.num_3dof_comps + self.num_1dof_comps
+            glob_rot_aa_residual = theta_samples_residual[
+                ..., gr_offset : gr_offset + self.num_glob_rot_comps
+            ]
+            glob_rot_6d_mean = mean_pred["pred_pose_raw"][:, :6]
+            glob_rot_mean_mat = batch9Dfrom6D(glob_rot_6d_mean).unflatten(-1, (3, 3))
+            glob_rot_delta_mat = axis_angle_to_matrix(glob_rot_aa_residual)
+            glob_rot_mat_samples = glob_rot_mean_mat.unsqueeze(1) @ glob_rot_delta_mat
+            glob_rot_6d_samples = torch.cat(
+                [glob_rot_mat_samples[..., :, 0], glob_rot_mat_samples[..., :, 1]],
+                dim=-1,
+            )
+            glob_rot_euler_samples = batchXYZfrom6D(glob_rot_6d_samples)
+        else:
+            glob_rot_euler_samples = None
+
+        if self.model_cam:
+            cam_offset = (
+                self.num_3dof_comps + self.num_1dof_comps + self.num_glob_rot_comps
+            )
+            cam_residual_samples = theta_samples_residual[
+                ..., cam_offset : cam_offset + 3
+            ]
+            cam_samples = mean_pred["pred_cam"].unsqueeze(1) + cam_residual_samples
+        else:
+            cam_samples = None
+
+        return {
+            "theta_samples_residual": theta_samples_residual,
+            "theta_log_prob": theta_log_prob,
+            "pose_samples": pose_samples,
+            "global_rot_samples": glob_rot_euler_samples,
+            "cam_samples": cam_samples,
+            "context_theta": context_theta,
+        }
+
     def forward(
         self,
         flow_context: torch.Tensor,
@@ -347,87 +459,18 @@ class NFARHead(nn.Module):
         # ----------------------------------------------------------------------
         #  Stage 2: p(Δθ | c, μθ, Δβ) — pose residuals conditioned on sampled β.
         # ----------------------------------------------------------------------
-        pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:] # glob 
-
-        pose_params_mhr = compact_cont_to_model_params_body(pose_mean_cont)
-
-        pose_params = convert_pose_cont_to_flow_context(pose_mean_cont)
-        aa_3dofs = pose_params["aa_3dofs"]  # B, 39
-        params_1dofs = pose_params["params_1dofs"]  # B, 34
-
-        flow_context_expanded = flow_context.unsqueeze(1).repeat(1, N, 1)
-        aa_3dofs_expanded = aa_3dofs.unsqueeze(1).repeat(1, N, 1)
-        params_1dofs_expanded = params_1dofs.unsqueeze(1).repeat(1, N, 1)
-
-        context_theta_parts = [
-            flow_context_expanded,
-            shape_samples,
-            scale_samples_68D[..., scale_indices],
-            aa_3dofs_expanded,
-            params_1dofs_expanded,
-        ]
-        if self.model_cam:
-            pred_cam_expanded = mean_pred["pred_cam"].unsqueeze(1).repeat(1, N, 1)
-            context_theta_parts.append(pred_cam_expanded)
-        context_theta= self.theta_context_proj(
-            torch.cat(context_theta_parts, dim=-1).reshape(B * N, -1)
+        stage2 = self.sample_theta_given_beta(
+            flow_context=flow_context,
+            mean_pred=mean_pred,
+            shape_samples=shape_samples,
+            scale_samples_68D=scale_samples_68D,
         )
-
-        theta_residual_flat, theta_log_prob_flat, theta_z_flat = self.flow_theta.sample_and_log_prob(
-            1,
-            context=context_theta,
-        )
-
-        # theta_residual_flat: [B * N, 1, theta_dim]
-        theta_samples_residual = theta_residual_flat.squeeze(1).reshape(B, N, self.theta_dim)
-        theta_log_prob = theta_log_prob_flat.squeeze(1).reshape(B, N)
-
-        # theta ordering: [3dof(39) | 1dof(34) | glob_rot?(3) | cam?(3)]
-        pose_3dof_residual_samples = theta_samples_residual[
-            ..., : self.num_3dof_comps
-        ]
-        pose_1dof_residual_samples = theta_samples_residual[
-            ...,
-            self.num_3dof_comps : self.num_3dof_comps + self.num_1dof_comps,
-        ]
-
-        # SO(3) right-perturbation: R_sample = R_mean @ Exp(delta)
-        aa_3dof_samples = so3_compose_aa(
-            aa_3dofs.unsqueeze(1), pose_3dof_residual_samples
-        )
-        # 1DOF: additive is exact (SO(2) is abelian)
-        params_1dofs_samples = (
-            params_1dofs.unsqueeze(1).repeat(1, N, 1) + pose_1dof_residual_samples
-        )
-
-        pose_samples = convert_flow_samples_to_mhr_params(
-            aa_3dof_samples, params_1dofs_samples, pose_params_mhr
-        )
-
-        # Global rotation samples: SO(3) right-perturbation in matrix space.
-        if self.model_glob_rot:
-            gr_offset = self.num_3dof_comps + self.num_1dof_comps
-            glob_rot_aa_residual = theta_samples_residual[..., gr_offset : gr_offset + self.num_glob_rot_comps]  # (B, N, 3)
-            glob_rot_6d_mean = mean_pred["pred_pose_raw"][:, :6]  # (B, 6)
-            glob_rot_mean_mat = batch9Dfrom6D(glob_rot_6d_mean).unflatten(-1, (3, 3))  # (B, 3, 3)
-            glob_rot_delta_mat = axis_angle_to_matrix(glob_rot_aa_residual)  # (B, N, 3, 3)
-            glob_rot_mat_samples = glob_rot_mean_mat.unsqueeze(1) @ glob_rot_delta_mat  # (B, N, 3, 3)
-            # Convert rotmat → (x, y, z) euler via batchXYZfrom6D (matches batch6DFromXYZ
-            # convention used by MHR C++ backend).  roma.rotmat_to_euler("ZYX") returns
-            # (z, y, x) which would be misinterpreted.
-            glob_rot_6d_samples = torch.cat([glob_rot_mat_samples[..., :, 0],
-                                             glob_rot_mat_samples[..., :, 1]], dim=-1)
-            glob_rot_euler_samples = batchXYZfrom6D(glob_rot_6d_samples)  # (B, N, 3)
-        else:
-            glob_rot_euler_samples = None
-
-        # Camera samples: add residual to mean pred_cam.
-        if self.model_cam:
-            cam_offset = self.num_3dof_comps + self.num_1dof_comps + self.num_glob_rot_comps
-            cam_residual_samples = theta_samples_residual[..., cam_offset : cam_offset + 3]  # (B, N, 3)
-            cam_samples = mean_pred["pred_cam"].unsqueeze(1) + cam_residual_samples  # (B, N, 3)
-        else:
-            cam_samples = None
+        theta_samples_residual = stage2["theta_samples_residual"]
+        theta_log_prob = stage2["theta_log_prob"]
+        pose_samples = stage2["pose_samples"]
+        glob_rot_euler_samples = stage2["global_rot_samples"]
+        cam_samples = stage2["cam_samples"]
+        context_theta = stage2["context_theta"]
 
         
         # # DEBUG: override samples with GT residual (SO(3) Lie algebra composition).

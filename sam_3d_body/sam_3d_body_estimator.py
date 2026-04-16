@@ -61,6 +61,93 @@ class SAM3DBodyEstimator:
         )
 
     @torch.no_grad()
+    def preprocess_image(
+        self,
+        img: Union[str, np.ndarray],
+        bboxes: Optional[np.ndarray] = None,
+        masks: Optional[np.ndarray] = None,
+        cam_int: Optional[np.ndarray] = None,
+        det_cat_id: int = 0,
+        bbox_thr: float = 0.5,
+        nms_thr: float = 0.3,
+        use_mask: bool = False,
+        single_person: bool = True,
+    ):
+        """Run detector + (optional SAM) + FOV estimator + prepare_batch.
+
+        Returns the batch dict on CUDA ready for model forward, or None if no
+        person is detected. When `single_person` is True, takes the
+        largest-area detection (default for real-image pipelines).
+        """
+        torch.cuda.empty_cache()
+
+        if type(img) == str:
+            img = load_image(img, backend="cv2", image_format="bgr")
+            image_format = "bgr"
+        else:
+            print("####### Please make sure the input image is in RGB format")
+            image_format = "rgb"
+        height, width = img.shape[:2]
+
+        if bboxes is not None:
+            boxes = bboxes.reshape(-1, 4)
+        elif self.detector is not None:
+            if image_format == "rgb":
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                image_format = "bgr"
+            print("Running object detector...")
+            boxes = self.detector.run_human_detection(
+                img,
+                det_cat_id=det_cat_id,
+                bbox_thr=bbox_thr,
+                nms_thr=nms_thr,
+                default_to_full_image=False,
+            )
+            print("Found boxes:", boxes)
+        else:
+            boxes = np.array([0, 0, width, height]).reshape(1, 4)
+
+        if len(boxes) == 0:
+            return None
+
+        if single_person and len(boxes) > 1:
+            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            boxes = boxes[[int(np.argmax(areas))]]
+
+        if image_format == "bgr":
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        masks_score = None
+        if masks is not None:
+            print(f"Using provided masks: {masks.shape}")
+            assert (
+                bboxes is not None
+            ), "Mask-conditioned inference requires bboxes input!"
+            masks = masks.reshape(-1, height, width, 1).astype(np.uint8)
+            masks_score = np.ones(len(masks), dtype=np.float32)
+        elif use_mask and self.sam is not None:
+            print("Running SAM to get mask from bbox...")
+            masks, masks_score = self.sam.run_sam(img, boxes)
+        else:
+            masks, masks_score = None, None
+
+        batch = prepare_batch(img, self.transform, boxes, masks, masks_score)
+        batch = recursive_to(batch, "cuda")
+
+        if cam_int is not None:
+            print("Using provided camera intrinsics...")
+            cam_int = cam_int.to(batch["img"])
+            batch["cam_int"] = cam_int.clone()
+        elif self.fov_estimator is not None:
+            print("Running FOV estimator ...")
+            input_image = batch["img_ori"][0].data
+            batch["cam_int"] = self.fov_estimator.get_cam_intrinsics(
+                input_image
+            ).to(batch["img"])
+
+        return batch
+
+    @torch.no_grad()
     def process_one_image(
         self,
         img: Union[str, np.ndarray],
@@ -94,87 +181,24 @@ class SAM3DBodyEstimator:
         self.image_embeddings = None
         self.output = None
         self.prev_prompt = []
-        torch.cuda.empty_cache()
 
-        if type(img) == str:
-            img = load_image(img, backend="cv2", image_format="bgr")
-            image_format = "bgr"
-        else:
-            print("####### Please make sure the input image is in RGB format")
-            image_format = "rgb"
-        height, width = img.shape[:2]
-
-        if bboxes is not None:
-            boxes = bboxes.reshape(-1, 4)
-            self.is_crop = True
-        elif self.detector is not None:
-            if image_format == "rgb":
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                image_format = "bgr"
-            print("Running object detector...")
-            boxes = self.detector.run_human_detection(
-                img,
-                det_cat_id=det_cat_id,
-                bbox_thr=bbox_thr,
-                nms_thr=nms_thr,
-                default_to_full_image=False,
-            )
-            print("Found boxes:", boxes)
-            self.is_crop = True
-        else:
-            boxes = np.array([0, 0, width, height]).reshape(1, 4)
-            self.is_crop = False
-
-        # If there are no detected humans, don't run prediction
-        if len(boxes) == 0:
+        batch = self.preprocess_image(
+            img,
+            bboxes=bboxes,
+            masks=masks,
+            cam_int=cam_int,
+            det_cat_id=det_cat_id,
+            bbox_thr=bbox_thr,
+            nms_thr=nms_thr,
+            use_mask=use_mask,
+            single_person=False,
+        )
+        if batch is None:
             return []
 
-        # The following models expect RGB images instead of BGR
-        if image_format == "bgr":
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # Handle masks - either provided externally or generated via SAM2
-        masks_score = None
-        if masks is not None:
-            # Use provided masks - ensure they match the number of detected boxes
-            print(f"Using provided masks: {masks.shape}")
-            assert (
-                bboxes is not None
-            ), "Mask-conditioned inference requires bboxes input!"
-            masks = masks.reshape(-1, height, width, 1).astype(np.uint8)
-            masks_score = np.ones(
-                len(masks), dtype=np.float32
-            )  # Set high confidence for provided masks
-            use_mask = True
-        elif use_mask and self.sam is not None:
-            print("Running SAM to get mask from bbox...")
-            # Generate masks using SAM2
-            masks, masks_score = self.sam.run_sam(img, boxes)
-        else:
-            masks, masks_score = None, None
-
-        #################### Construct batch data samples ####################
-        batch = prepare_batch(img, self.transform, boxes, masks, masks_score)
-
-        #################### Run model inference on an image ####################
-        batch = recursive_to(batch, "cuda")
+        self.is_crop = bboxes is not None or self.detector is not None
         self.model._initialize_batch(batch)
-
-        # Handle camera intrinsics
-        # - either provided externally or generated via default FOV estimator
-        if cam_int is not None:
-            print("Using provided camera intrinsics...")
-            cam_int = cam_int.to(batch["img"])
-            batch["cam_int"] = cam_int.clone()
-        elif self.fov_estimator is not None:
-            print("Running FOV estimator ...")
-            input_image = batch["img_ori"][0].data
-            cam_int = self.fov_estimator.get_cam_intrinsics(input_image).to(
-                batch["img"]
-            )
-            batch["cam_int"] = cam_int.clone()
-        else:
-            cam_int = batch["cam_int"].clone()
+        img = batch["img_ori"][0].data  # RGB ndarray recovered from prepare_batch
 
         outputs = self.model.run_inference(
             img,

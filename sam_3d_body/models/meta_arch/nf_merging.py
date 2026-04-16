@@ -768,6 +768,88 @@ def merge_params_nf(
         raise ValueError(f"Unknown merge method {method!r}. Choose from {_MERGE_METHODS}.")
 
 
+@torch.no_grad()
+def resample_cam_for_merged_shape(
+    model,
+    mhr_out,
+    uncertainty_out,
+    param_dict,
+    batch,
+    bs,
+    num_views,
+    num_cam_samples: int = 32,
+):
+    """Draw stage-2 NF samples per view conditioned on the *merged* shape/scale,
+    average them, and return the resulting per-view ``pred_cam_t`` so
+    merged-mesh reprojection is consistent with the merged body size.
+
+    Stage 2 is shape-aware: it models ``p(Δθ, Δcam | c, μθ, μcam, β)``, so
+    feeding it the merged β (instead of the per-view β sample) yields a camera
+    translation matched to the merged mesh. A single NF sample is noisy, so
+    we draw ``num_cam_samples`` and average the resulting ``pred_cam`` before
+    the nonlinear conversion to ``pred_cam_t``.
+
+    Args:
+        model:            SAM3DBody model (needs ``.nf_head`` and ``.head_camera``).
+        mhr_out:          per-view MHR mean predictions (shape_params[B*V, ...]).
+        uncertainty_out:  NF output dict — requires ``flow_context_raw`` (B*V, 1024).
+        param_dict:       output of ``merge_params_nf`` — requires ``merged_shape``
+                          (B, 45) and ``merged_scale`` (B, 68).
+        batch:            multi-view-flattened batch (shape keys ``(B*V, 1, …)``).
+        num_cam_samples:  number of stage-2 camera samples to average.
+
+    Returns:
+        merged_pred_cam_t:  (B*V, 3) camera translation in full-image coordinates.
+    """
+    nf_head = model.nf_head
+    head_camera = model.head_camera
+
+    N = int(num_cam_samples)
+    merged_shape = param_dict["merged_shape"].repeat_interleave(num_views, dim=0)
+    merged_scale = param_dict["merged_scale"].repeat_interleave(num_views, dim=0)
+    # Broadcast to N samples along the stage-2 sample dim.
+    merged_shape = merged_shape.unsqueeze(1).expand(-1, N, -1).contiguous()
+    merged_scale = merged_scale.unsqueeze(1).expand(-1, N, -1).contiguous()
+
+    flow_context_raw = uncertainty_out["flow_context_raw"]  # (B*V, 1024)
+
+    stage2 = nf_head.sample_theta_given_beta(
+        flow_context=flow_context_raw,
+        mean_pred=mhr_out,
+        shape_samples=merged_shape,
+        scale_samples_68D=merged_scale,
+    )
+    cam_samples = stage2["cam_samples"]  # (B*V, N, 3) if model_cam else None
+    if cam_samples is None:
+        # No camera head modelled — fall back to mean camera translation.
+        return mhr_out["pred_cam_t"]
+
+    # Average pred_cam across stage-2 samples. Averaging in pred_cam space
+    # (equivalently, in residual space) is more principled than averaging the
+    # non-linearly-derived ``pred_cam_t``.
+    merged_pred_cam = cam_samples.mean(dim=1)  # (B*V, 3)
+
+    bbox_center = batch["bbox_center"][:, 0]            # (B*V, 2)
+    bbox_size = batch["bbox_scale"][:, 0, 0]            # (B*V,)
+    ori_img_size = batch["ori_img_size"][:, 0]          # (B*V, 2)
+    cam_int = batch["cam_int"]                          # (B*V, 3, 3)
+
+    zeros_pts = torch.zeros(
+        merged_pred_cam.shape[0], 1, 3,
+        device=merged_pred_cam.device, dtype=merged_pred_cam.dtype,
+    )
+    proj = head_camera.perspective_projection(
+        zeros_pts,
+        merged_pred_cam,
+        bbox_center,
+        bbox_size,
+        ori_img_size,
+        cam_int,
+        use_intrin_center=model.cfg.MODEL.DECODER.get("USE_INTRIN_CENTER", False),
+    )
+    return proj["pred_cam_t"]  # (B*V, 3)
+
+
 def get_mhr_outputs(
     mhr_head,
     batch,

@@ -23,7 +23,11 @@ from .metrics.metrics_tracker import (
     scale_and_translation_transform_batch,
 )
 from .models.meta_arch.base_lightning_module import BaseLightningModule
-from .models.meta_arch.nf_merging import get_mhr_outputs, merge_params_nf
+from .models.meta_arch.nf_merging import (
+    get_mhr_outputs,
+    merge_params_nf,
+    resample_cam_for_merged_shape,
+)
 from .models.meta_arch.sam3d_body import SAM3DBody
 from .visualization.my_vis import (
     Visualiser,
@@ -677,6 +681,18 @@ class Trainer(BaseLightningModule):
                 num_views=num_views,
                 uncertainty_out=uncertainty_out,
             )
+
+            # Stage-2 cam resample for shape-consistent merged reprojection.
+            merged_pred_cam_t = resample_cam_for_merged_shape(
+                model=self.model,
+                mhr_out=mhr_out,
+                uncertainty_out=uncertainty_out,
+                param_dict=param_dict,
+                batch=batch,
+                bs=bs,
+                num_views=num_views,
+            )
+            outs["merged_pred_cam_t"] = merged_pred_cam_t
 
             all_metrics = multiframe_metrics(
                 all_metrics, 

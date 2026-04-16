@@ -2237,6 +2237,10 @@ def vis_merging_predictions(
     # merged_verts = input_dict.get("verts_star", None)
     merged_verts = input_dict.get("merged_verts", None)
     merged_neutral_verts = input_dict.get("merged_neutral_verts", None)
+    # Optional: per-view cam_t resampled from stage 2 conditioned on the merged shape.
+    # When available, use it for the merged posed render so reprojection is
+    # consistent with the merged body size.
+    merged_pred_cam_t = input_dict.get("merged_pred_cam_t", None)
 
     metrics = input_dict.get("metrics", {})
 
@@ -2381,10 +2385,15 @@ def vis_merging_predictions(
         merged_colors = build_vertex_colors(
             merged_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
         )
+        merged_cam_t_view = (
+            merged_pred_cam_t[flat_idx].cpu().detach().numpy()
+            if merged_pred_cam_t is not None
+            else cam_t
+        )
         rendered_merged_img = (
             renderer(
                 merged_verts_view,
-                cam_t,
+                merged_cam_t_view,
                 img_for_render.copy(),
                 mesh_base_color=(0.5, 1.0, 0.5),
                 scene_bg_color=(1, 1, 1),
