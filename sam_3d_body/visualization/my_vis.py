@@ -392,6 +392,27 @@ def vis_samples(
     aligned_samples = _to_np(vv["pa_sample_verts"])[b, :n_vis] if "pa_sample_verts" in vv else None
     aligned_mean = _to_np(vv["pa_mean_verts"])[b] if "pa_mean_verts" in vv else None
 
+    # ---- PA per-vertex error colours (distance to GT, shared inferno scale per row) ----
+    vertex_colors_pa_samples = None
+    vertex_colors_pa_mean = None
+    pa_max = 1.0
+    if aligned_samples is not None and aligned_mean is not None:
+        pa_sample_dists = np.linalg.norm(aligned_samples - gt_verts_b[None], axis=-1)  # (n_vis, V)
+        pa_mean_dists = np.linalg.norm(aligned_mean - gt_verts_b, axis=-1)  # (V,)
+        pa_max = float(max(
+            pa_sample_dists.max() if pa_sample_dists.size else 0.0,
+            pa_mean_dists.max(),
+        ))
+        if pa_max == 0.0:
+            pa_max = 1.0
+        vertex_colors_pa_samples = [
+            build_vertex_colors(pa_sample_dists[i], min_dist=0.0, max_dist=pa_max)
+            for i in range(n_vis)
+        ]
+        vertex_colors_pa_mean = build_vertex_colors(
+            pa_mean_dists, min_dist=0.0, max_dist=pa_max
+        )
+
     neutral_available = plot_neutral and all(
         k in vv for k in ("gt_neutral_verts", "pred_neutral_verts", "sample_neutral_verts",
                           "pred_neutral_verts_sc", "sample_neutral_verts_sc")
@@ -528,7 +549,7 @@ def vis_samples(
                 aligned_samples[i] - gt_root,
                 generic_camera,
                 black_bg,
-                vertex_colors=vertex_colors_samples[i],
+                vertex_colors=vertex_colors_pa_samples[i],
                 scene_bg_color=(0, 0, 0),
                 side_view=True,
                 rot_angle=90,
@@ -687,7 +708,7 @@ def vis_samples(
             aligned_mean - gt_root,
             generic_camera,
             black_bg,
-            vertex_colors=vertex_colors_mean,
+            vertex_colors=vertex_colors_pa_mean,
             scene_bg_color=(0, 0, 0),
             side_view=True,
             rot_angle=90,
@@ -799,7 +820,7 @@ def vis_samples(
         ))
     if img_pa_list is not None:
         rows.append(_with_cbar(
-            np.concatenate([mean_pa_panel, img_pa_list], axis=axis), shared_max
+            np.concatenate([mean_pa_panel, img_pa_list], axis=axis), pa_max
         ))
     if img_neutral_sc_list is not None and mean_neutral_sc_panel is not None:
         rows.append(_with_cbar(

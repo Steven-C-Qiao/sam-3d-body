@@ -1,4 +1,5 @@
 import math
+from typing import Optional, Dict
 
 import torch
 
@@ -226,6 +227,7 @@ def merge_params_nf_tempered(
                 residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)
                 logp_j, _ = nf_head.flow_beta.log_prob(inputs=residual_j, context=context_j)
+
                 logw_i = logw_i + logp_j
 
             candidate_beta.append(beta_i)
@@ -236,6 +238,7 @@ def merge_params_nf_tempered(
 
         candidate_w = torch.softmax(candidate_logw, dim=0)
         merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)
+
 
         merged_shape.append(merged_beta[: nf_head.num_shape_comps])
         scale68_merged = pred_scale68[b].mean(dim=0).clone()
@@ -482,7 +485,248 @@ def merge_params_nf_gaussian(
     }
 
 
-_MERGE_METHODS = ("psis", "tempered", "is", "gaussian")
+def _langevin_log_pi_and_grad(state, view_means, view_context, nf_head):
+    """
+    Evaluate log π(β) = Σ_j log p(β - μ_j | c_j) and its gradient w.r.t. β.
+
+    state:        [B, V_chain, D]
+    view_means:   [B, V_view,  D]
+    view_context: [B, V_view,  C]
+    Returns:
+        log_pi: [B, V_chain]
+        grad:   [B, V_chain, D]
+    """
+    B, V_c, D = state.shape
+    V_v = view_means.shape[1]
+    state_req = state.detach().clone().requires_grad_(True)
+
+    # Cross: every chain's state evaluated under every view.
+    residual = state_req.unsqueeze(2) - view_means.unsqueeze(1)           # [B, V_c, V_v, D]
+    context_expanded = view_context.unsqueeze(1).expand(B, V_c, V_v, -1)  # [B, V_c, V_v, C]
+
+    logp_flat, _ = nf_head.flow_beta.log_prob(
+        inputs=residual.reshape(B * V_c * V_v, D),
+        context=context_expanded.reshape(B * V_c * V_v, -1),
+    )
+    log_pi = logp_flat.view(B, V_c, V_v).sum(dim=2)                       # [B, V_c]
+
+    (grad,) = torch.autograd.grad(
+        log_pi.sum(), state_req, create_graph=False, retain_graph=False
+    )
+    grad = grad.clamp(-100.0, 100.0)
+    return log_pi.detach(), grad.detach()
+
+
+def merge_params_nf_langevin(
+    nf_head,
+    mhr_out,
+    uncertainty_out,
+    bs,
+    num_views,
+    num_samples,
+    num_steps: int = 200,
+    burn_in_frac: float = 0.5,
+    tail_frac: float = 0.4,
+    step_size: float = 0.01,
+    adapt_step: bool = True,
+    target_accept: float = 0.574,
+    variant: str = "mala",
+    variance_floor_frac: float = 0.1,
+    init_strategy: str = "gaussian_warm",  # "gaussian_warm" | "view_mean"
+    init_noise_scale: float = 0.5,
+    verbose: bool = False,
+):
+    """
+    Multi-view shape/scale fusion via V-chain preconditioned MALA.
+
+    Target posterior (flat prior, views conditionally independent given β):
+        log π(β) = Σ_j log p(β - μ_j | c_j)       (via nf_head.flow_beta)
+
+    Runs V parallel chains per batch element, each initialised at a view mean
+    μ_i. Preconditioner M_diag is the Gaussian-product posterior variance
+    (per-dim). Step size adapts via Robbins-Monro during burn-in to the 0.574
+    optimal-MALA target. Final estimate is the mean over the last tail_frac of
+    steps, pooled across chains.
+
+    Falls back to merge_params_nf_gaussian when num_views <= 1.
+    """
+    if num_views <= 1:
+        return merge_params_nf_gaussian(
+            nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples
+        )
+
+    assert not nf_head.training, "NFARHead must be in eval mode for Langevin merge."
+    assert variant in ("mala", "ula"), f"Unknown variant {variant!r}"
+
+    D = nf_head.beta_dim
+    num_shape = nf_head.num_shape_comps
+    num_scale = D - num_shape
+
+    # ---- Setup ----
+    pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))                 # [B, V, 45]
+    pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))           # [B, V, 68]
+    view_means = torch.cat(
+        [pred_shape, pred_scale68[..., scale_indices]], dim=-1
+    ).detach()                                                                   # [B, V, 55]
+    view_context = (
+        uncertainty_out["flow_context_beta"]
+        .unflatten(0, (bs, num_views))
+        .detach()
+    )                                                                            # [B, V, C]
+
+    shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
+    scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
+    per_view_samples = torch.cat(
+        [shape_samples, scale68_samples[..., scale_indices]], dim=-1
+    )                                                                            # [B, V, S, 55]
+    var_j = per_view_samples.var(dim=2)                                          # [B, V, 55]
+
+    # Variance floor from NF-trained per-dim GT std (guards against collapsed dims).
+    device = var_j.device
+    dtype = var_j.dtype
+    shape_std = getattr(nf_head, "_shape_perturb_std", None)
+    scale_std = getattr(nf_head, "_scale_perturb_std", None)
+    if shape_std is not None:
+        floor_shape = (shape_std.to(device=device, dtype=dtype) * variance_floor_frac) ** 2
+    else:
+        floor_shape = torch.full((num_shape,), 1e-4, device=device, dtype=dtype)
+    if scale_std is not None:
+        floor_scale = (scale_std.to(device=device, dtype=dtype) * variance_floor_frac) ** 2
+    else:
+        floor_scale = torch.full((num_scale,), 1e-4, device=device, dtype=dtype)
+    floor = torch.cat([floor_shape, floor_scale]).view(1, 1, D)                 # [1, 1, 55]
+    var_j = torch.clamp(var_j, min=floor)
+
+    precision_j = 1.0 / var_j                                                    # [B, V, 55]
+    M_diag = 1.0 / precision_j.sum(dim=1)                                        # [B, 55]
+
+    # Freeze flow params so autograd doesn't build a graph into them.
+    flow_params = list(nf_head.flow_beta.parameters())
+    prev_requires = [p.requires_grad for p in flow_params]
+    for p in flow_params:
+        p.requires_grad_(False)
+
+    try:
+        # ---- V-chain MALA ----
+        if init_strategy == "gaussian_warm":
+            # All V chains init at precision-weighted Gaussian merge estimate,
+            # perturbed per-chain by init_noise_scale * √M_diag so chains explore
+            # different directions around the mode.
+            gauss_mean = (precision_j * per_view_samples.mean(dim=2)).sum(dim=1) / precision_j.sum(dim=1)
+            # gauss_mean: [B, 55] — joint MAP under Gaussian approx.
+            noise = torch.randn_like(view_means) * M_diag.unsqueeze(1).sqrt() * init_noise_scale
+            state = gauss_mean.unsqueeze(1) + noise                              # [B, V, 55]
+        elif init_strategy == "view_mean":
+            state = view_means.clone()                                           # [B, V, 55]
+        else:
+            raise ValueError(f"Unknown init_strategy {init_strategy!r}")
+        log_eps = torch.full(
+            (bs, num_views), math.log(step_size), device=device, dtype=dtype
+        )
+        ema_accept = torch.full(
+            (bs, num_views), target_accept, device=device, dtype=dtype
+        )
+
+        tail_start = int(num_steps * (1.0 - tail_frac))
+        burn_in_steps = int(num_steps * burn_in_frac)
+        trajectory = []
+        accept_history = []
+
+        with torch.enable_grad():
+            for t in range(num_steps):
+                eps = log_eps.exp().unsqueeze(-1)                                # [B, V, 1]
+                M_bcast = M_diag.unsqueeze(1)                                    # [B, 1, 55]
+                var_q = eps * M_bcast                                            # [B, V, 55]
+
+                log_pi_cur, grad_cur = _langevin_log_pi_and_grad(
+                    state, view_means, view_context, nf_head
+                )
+
+                drift = 0.5 * var_q * grad_cur
+                noise = torch.randn_like(state)
+                proposal = state + drift + var_q.sqrt() * noise
+
+                if variant == "mala":
+                    log_pi_prop, grad_prop = _langevin_log_pi_and_grad(
+                        proposal, view_means, view_context, nf_head
+                    )
+                    drift_back = 0.5 * var_q * grad_prop
+
+                    var_q_safe = var_q + 1e-8
+                    log_q_fwd = -0.5 * ((proposal - state - drift) ** 2 / var_q_safe).sum(-1)
+                    log_q_bwd = -0.5 * ((state - proposal - drift_back) ** 2 / var_q_safe).sum(-1)
+
+                    log_alpha = (log_pi_prop - log_pi_cur) + (log_q_bwd - log_q_fwd)
+                    u = torch.rand_like(log_alpha).log()
+                    accept = u < log_alpha                                       # [B, V]
+
+                    state = torch.where(accept.unsqueeze(-1), proposal, state)
+
+                    if adapt_step and t < burn_in_steps:
+                        # Faster adaptation: effective LR = 5/(t+10). Over ~100 steps this
+                        # shifts log_eps by up to ~12 log-units, enough to find the right
+                        # eps magnitude from any initial guess.
+                        gamma = 5.0 / (t + 10.0)
+                        ema_accept = 0.9 * ema_accept + 0.1 * accept.to(dtype)
+                        log_eps = log_eps + gamma * (ema_accept - target_accept)
+
+                    accept_history.append(accept.to(dtype).mean().item())
+                else:  # ULA
+                    state = proposal
+                    accept_history.append(1.0)
+
+                state = state.detach()
+
+                if t >= tail_start:
+                    trajectory.append(state.clone())
+
+        tail = torch.stack(trajectory, dim=0)                                    # [L, B, V, 55]
+        merged_beta = tail.mean(dim=(0, 2))                                       # [B, 55]
+
+        if verbose:
+            mean_accept = sum(accept_history) / max(1, len(accept_history))
+            post_burn = accept_history[burn_in_steps:] or [float("nan")]
+            post_burn_accept = sum(post_burn) / len(post_burn)
+            print(
+                f"[Langevin/{variant}] T={num_steps} burn_in={burn_in_steps} "
+                f"mean_accept={mean_accept:.3f} post_burn_accept={post_burn_accept:.3f} "
+                f"final_eps={math.exp(log_eps.mean().item()):.4f}"
+            )
+
+    finally:
+        for p, prev in zip(flow_params, prev_requires):
+            p.requires_grad_(prev)
+
+    # ---- Assemble outputs (match existing merge API) ----
+    shape_mu_star = merged_beta[:, :num_shape]                                   # [B, 45]
+    scale_mu_star_full = pred_scale68.mean(dim=1).clone()                         # [B, 68]
+    scale_mu_star_full[:, scale_indices] = merged_beta[:, num_shape:]
+
+    shape_avg = pred_shape.mean(dim=1)
+    scale_avg = pred_scale68.mean(dim=1)
+
+    beta_log_prob_ref = uncertainty_out["log_prob_beta"].unflatten(0, (bs, num_views))
+    best_sample_idx = beta_log_prob_ref.argmax(dim=-1)
+    idx_shape = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, shape_samples.shape[-1]
+    )
+    idx_scale = best_sample_idx.unsqueeze(2).unsqueeze(-1).expand(
+        bs, num_views, 1, scale68_samples.shape[-1]
+    )
+    best_shape_per_view = torch.gather(shape_samples, 2, idx_shape).squeeze(2)
+    best_scale_per_view_68D = torch.gather(scale68_samples, 2, idx_scale).squeeze(2)
+
+    return {
+        "avg_shape": shape_avg,
+        "avg_scale": scale_avg,
+        "merged_shape": shape_mu_star,
+        "merged_scale": scale_mu_star_full,
+        "best_logprob_sample_shape": best_shape_per_view,
+        "best_logprob_sample_scale_68D": best_scale_per_view_68D,
+    }
+
+
+_MERGE_METHODS = ("psis", "tempered", "is", "gaussian", "langevin")
 
 
 def merge_params_nf(
@@ -493,6 +737,7 @@ def merge_params_nf(
     num_views,
     num_samples,
     method: str = "psis",
+    langevin_kwargs: Optional[Dict] = None,
 ):
     """
     Multi-view shape/scale fusion dispatcher.
@@ -503,6 +748,8 @@ def merge_params_nf(
             "tempered" — Temperature-scaled IS (T = beta_dim; simple, stable)
             "gaussian" — Precision-weighted Gaussian product (fastest, no NF calls)
             "is"       — Raw IS (reference; collapses in practice for D=55)
+            "langevin" — V-chain MALA over the joint NF posterior
+        langevin_kwargs: Optional kwargs forwarded to merge_params_nf_langevin.
     """
     if method == "psis":
         return merge_params_nf_psis(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
@@ -512,6 +759,11 @@ def merge_params_nf(
         return merge_params_nf_gaussian(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
     elif method == "is":
         return merge_params_nf_is(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
+    elif method == "langevin":
+        return merge_params_nf_langevin(
+            nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples,
+            **(langevin_kwargs or {}),
+        )
     else:
         raise ValueError(f"Unknown merge method {method!r}. Choose from {_MERGE_METHODS}.")
 

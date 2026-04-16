@@ -30,7 +30,7 @@ CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 CONFIG_PATH = "checkpoints/sam-3d-body-dinov3/model_config.yaml"
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered", noplot=False):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered", noplot=False, langevin_kwargs=None):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
@@ -105,7 +105,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
             logger.warning("No model parameters found in checkpoint state_dict!")
             assert False
 
-    results = trainer.run_multiview_prediction(num_view=4, max_batches=20, dataset_name=dataset_name, merge_method=merge_method, noplot=noplot)
+    results = trainer.run_multiview_prediction(num_view=4, max_batches=20, dataset_name=dataset_name, merge_method=merge_method, noplot=noplot, langevin_kwargs=langevin_kwargs)
 
 
 if __name__ == "__main__":
@@ -133,7 +133,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gpus",
         type=str,
-        default=None,
+        default="0",
         help="Comma-separated list of GPU indices to use. E.g., '0,1,2'",
     )
     parser.add_argument(
@@ -151,9 +151,38 @@ if __name__ == "__main__":
         "-M",
         type=str,
         default="tempered",
-        help="Merge method: psis, tempered, gaussian, is",
+        help="Merge method: psis, tempered, gaussian, is, langevin",
     )
+    parser.add_argument("--langevin-num-steps", type=int, default=200)
+    parser.add_argument("--langevin-step-size", type=float, default=0.01)
+    parser.add_argument(
+        "--langevin-variant", type=str, default="mala", choices=["mala", "ula"]
+    )
+    parser.add_argument(
+        "--langevin-no-adapt",
+        dest="langevin_adapt_step",
+        action="store_false",
+        default=True,
+    )
+    parser.add_argument(
+        "--langevin-init",
+        type=str,
+        default="gaussian_warm",
+        choices=["gaussian_warm", "view_mean"],
+    )
+    parser.add_argument("--langevin-init-noise-scale", type=float, default=0.5)
+    parser.add_argument("--langevin-verbose", action="store_true", default=False)
     args = parser.parse_args()
+
+    langevin_kwargs = {
+        "num_steps": args.langevin_num_steps,
+        "step_size": args.langevin_step_size,
+        "variant": args.langevin_variant,
+        "adapt_step": args.langevin_adapt_step,
+        "init_strategy": args.langevin_init,
+        "init_noise_scale": args.langevin_init_noise_scale,
+        "verbose": args.langevin_verbose,
+    }
 
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -174,4 +203,5 @@ if __name__ == "__main__":
         dataset_name=args.dataset_name,
         merge_method=args.method,
         noplot=args.noplot,
+        langevin_kwargs=langevin_kwargs,
     )

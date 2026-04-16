@@ -601,8 +601,8 @@ def multiframe_metrics(
             sp_avg_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
         ).mean(axis=1)
 
-    print(f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {avg_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}")
-    print(f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {avg_pve.mean():.4f}, merged: {merged_pve.mean():.4f}")
+    # print(f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {avg_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}")
+    # print(f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {avg_pve.mean():.4f}, merged: {merged_pve.mean():.4f}")
     print(f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {avg_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}")
     print(f"pvetsc: view avg: {per_view_pvetsc.mean():.4f}, view min: {per_view_pvetsc.min():.4f}, mean: {avg_pvetsc.mean():.4f}, merged: {merged_pvetsc.mean():.4f}")
 
@@ -645,61 +645,11 @@ def multiframe_metrics(
     if sample_param_avg_pampjpe is not None:
         all_metrics["sample_param_avg_pampjpe"].append(sample_param_avg_pampjpe)
         all_metrics["sample_param_avg_pvetsc"].append(sample_param_avg_pvetsc)
-
-    # if batch_idx == 3:
-    #     for k, v in all_metrics.items():
-    #         print(k, v)
-
-    # x = np.linalg.norm(merged_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1) # (B, 18439)
-    # y = np.linalg.norm(pred_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1) # (B, 18439)
-
-    # import matplotlib.pyplot as plt
-    # all_dists_for_color = np.concatenate([x.reshape(-1), y.reshape(-1)])
-    # max_dist = float(all_dists_for_color.max()) if all_dists_for_color.size > 0 else 0.1
-    # if max_dist <= 0:
-    #     max_dist = 0.1
-
-    # bins = np.linspace(0.0, max_dist, 51)
-    # fig, axs = plt.subplots(5, 1, figsize=(6, 15), sharex=True)
-
-    # def plot_hist_inferno(ax, data, *, title: str, alpha: float = 0.7):
-    #     counts, edges = np.histogram(data, bins=bins)
-    #     bin_centers = 0.5 * (edges[:-1] + edges[1:])
-
-    #     # Anchor at 0, exactly matching mesh color normalization.
-    #     denom = max_dist - 0.0
-    #     if denom <= 0:
-    #         denom = 1.0
-    #     normalized = np.clip((bin_centers - 0.0) / denom, 0.0, 1.0)
-    #     cmap = plt.get_cmap("inferno")
-    #     rgba = cmap(normalized)  # (N,4)
-
-    #     ax.bar(
-    #         edges[:-1],
-    #         counts,
-    #         width=np.diff(edges),
-    #         align="edge",
-    #         color=rgba,
-    #         alpha=alpha,
-    #         linewidth=0,
-    #     )
-    #     ax.set_title(title)
-    #     ax.set_ylabel("Frequency")
-    #     ax.grid(True)
-
-    # plot_hist_inferno(axs[0], x[0], title="merged_sc")
-    # for i in range(4):
-    #     plot_hist_inferno(axs[i + 1], y[i], title=f"pred_sc{i}")
-
-    # axs[-1].set_xlabel("Distance")
-    # plt.tight_layout()
-    # hist_path = os.path.join(save_dir, f"b{batch_idx:03d}_error_hist.png")
-    # plt.savefig(hist_path)
-    # print(f"Saved histogram column to {hist_path}")
-    # plt.close()
-
-    # # print(x.shape, y.shape)
-    # # import ipdb; ipdb.set_trace()
+        all_metrics["best_sample_param_avg_pampjpe"].append(sample_param_avg_pampjpe.min().item())
+        all_metrics["best_sample_param_avg_pvetsc"].append(sample_param_avg_pvetsc.min().item())
+        print(sample_param_avg_pampjpe, sample_param_avg_pvetsc)
+        print(f"best_sample_param_avg_pampjpe: {sample_param_avg_pampjpe.min().item():.4f}, best_sample_param_avg_pvetsc: {sample_param_avg_pvetsc.min().item():.4f}")
+        print('')
 
 
     return all_metrics

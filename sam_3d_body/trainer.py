@@ -607,6 +607,7 @@ class Trainer(BaseLightningModule):
         dataset_name: str = "4d-dress",
         merge_method: str = "psis",
         noplot: bool = False,
+        langevin_kwargs: Optional[Dict] = None,
     ):
         """
         Run MHR predictions for each view loaded by MultiViewEvaluationDataset.
@@ -664,6 +665,7 @@ class Trainer(BaseLightningModule):
                 num_views,
                 num_samples,
                 method=merge_method,
+                langevin_kwargs=langevin_kwargs,
             )
 
             outs = get_mhr_outputs(
@@ -715,7 +717,7 @@ class Trainer(BaseLightningModule):
 
             if not noplot:
                 vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-                vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=True)
+                vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)
