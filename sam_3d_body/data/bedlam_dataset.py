@@ -231,10 +231,34 @@ class DatasetHMR(Dataset):
 
         # item["scale"] = (sc * scale).astype(np.float32)
         # item["center"] = center.astype(np.float32)
+
+        # BEDLAM-specific alignment: encode the body-frame shift (-2c meters)
+        # directly into model_params[:3] so MHR forward produces the trainer-
+        # frame body with pelvis at (0, -0.923986, 0) — no align() step needed
+        # downstream. Units: model_params[:3] / 10 = meters, so a shift of
+        # -2c metres corresponds to model_params[:3] = -20c. The subject's
+        # original global translation is stripped here and baked into cam_ext
+        # along with the +2c camera compensation, preserving 2D reprojection.
+        c = np.array([0., 0.923986, 0.], dtype=np.float32)
+        model_params = self.model_params[index].copy()
+        mhr_transl = model_params[:3] / 10.0
+        model_params[:3] = -20.0 * c
+        cam_ext = self.cam_ext[index].copy()
+        cam_ext[:3, 3] = cam_ext[:3, 3] + self.trans_cam[index] + 2.0 * c + mhr_transl
+
+        # def align(x, c=torch.tensor([0., 0.923986, 0.])):
+            # c = c.to(x.device)
+            # x -= c[None, :]
+            # x[..., [1, 2]] *= -1
+            # x += c[None, :]
+            # x[..., [1, 2]] *= -1
+            # return x
+
+
         item["shape_params"] = self.shape_params[index]
-        item["model_params"] = self.model_params[index]
+        item["model_params"] = model_params
         item["face_expr_coeffs"] = self.face_expr_params[index]
-        item["scale_params"] = self.model_params[index, -68:]
+        item["scale_params"] = model_params[-68:]
         item["visibility"] = self.visibility[index, :70]
         item["dense_visibility"] = self.dense_visibility[index]
 
@@ -242,8 +266,7 @@ class DatasetHMR(Dataset):
         item["focal_length"] = torch.tensor(
             [self.cam_int[index][0, 0], self.cam_int[index][1, 1]],
         )
-        self.cam_ext[index][:3, 3] += self.trans_cam[index]
-        item["cam_ext"] = self.cam_ext[index]
+        item["cam_ext"] = cam_ext
         item["trans_cam"] = self.trans_cam[index]
 
         item["dataset_name"] = self.dataset
@@ -540,12 +563,24 @@ class MultiViewEvaluationDataset(Dataset):
         item["mask"] = item["mask"].float().unsqueeze(-3) * -1.0  # N, 1, H, W
         item["mask_score"] = torch.ones((item["mask"].shape[0], 1, 1, 1))
         item["cam_int"] = torch.from_numpy(self.cam_int[index]).float()
+
+        # BEDLAM-specific alignment: see DatasetHMR.__getitem__.
+        c = np.array([0., 0.923986, 0.], dtype=np.float32)
+        model_params = self.model_params[index].copy()
+        mhr_transl = model_params[:3] / 10.0
+        model_params[:3] = -20.0 * c
+        cam_ext = self.cam_ext[index].copy()
+        if "trans_cam" in self.data.files:
+            cam_ext[:3, 3] = cam_ext[:3, 3] + self.trans_cam[index] + 2.0 * c + mhr_transl
+        else:
+            cam_ext[:3, 3] = cam_ext[:3, 3] + 2.0 * c + mhr_transl
+
         item["shape_params"] = torch.from_numpy(self.shape_params[index]).float()
-        item["model_params"] = torch.from_numpy(self.model_params[index]).float()
+        item["model_params"] = torch.from_numpy(model_params).float()
         item["face_expr_coeffs"] = torch.from_numpy(
             self.face_expr_params[index]
         ).float()
-        item["scale_params"] = torch.from_numpy(self.model_params[index, -68:]).float()
+        item["scale_params"] = torch.from_numpy(model_params[-68:]).float()
 
         item["img"] = img
         item["pose"] = torch.from_numpy(pose).float()
@@ -555,14 +590,9 @@ class MultiViewEvaluationDataset(Dataset):
             item["focal_length"] = torch.tensor(
                 [self.cam_int[index][0, 0], self.cam_int[index][1, 1]]
             )
-        item["cam_ext"] = self.cam_ext[index]
-        item["translation"] = self.cam_ext[index][:, 3]
-        if "trans_cam" in self.data.files:
-            # NOTE: This also modifies 'trans_cam', which results in the correct cam_t
-            item["translation"][:3] += self.trans_cam[index]
-
+        item["cam_ext"] = torch.from_numpy(cam_ext).float()
+        item["translation"] = item["cam_ext"][:, 3]
         item["trans_cam"] = torch.from_numpy(self.trans_cam[index]).float()
-        item["cam_ext"] = torch.from_numpy(self.cam_ext[index]).float()
         # item["keypoints_orig"] = torch.from_numpy(mhr_keypoints_2d_orig).float()
         # item["keypoints"] = normalized_keypoints.float()
         item["scale"] = float(sc * scale)

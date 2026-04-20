@@ -386,8 +386,11 @@ class Trainer(BaseLightningModule):
     def preprocess(self, batch: Dict):
         mhr_model = self.model.head_pose
 
-        mhr_transl = batch["model_params"][:, :3] / 10.0 
-        batch["model_params"][:, :3] = 0
+        # Non-BEDLAM datasets (4d-dress, ssp3d) rely on a centred body from MHR.
+        # BEDLAM datasets pre-set model_params[:3] to encode the body-frame
+        # alignment; do NOT zero it here, or the alignment would be lost.
+        # if batch["dataset_name"][0] in ("4d-dress", "ssp3d"):
+        #     batch["model_params"][:, :3] = 0
 
         gt_mhr_output = mhr_model.mhr(
             identity_coeffs=batch["shape_params"],
@@ -400,17 +403,6 @@ class Trainer(BaseLightningModule):
         )
         gt_verts = gt_verts / 100
         gt_joint_coords = gt_joint_coords / 100
-
-        def align(x, c=torch.tensor([0., 0.923986, 0.])):
-            c = c.to(x.device)
-            x -= c[None, :]
-            x[..., [1, 2]] *= -1
-            x += c[None, :]
-            x[..., [1, 2]] *= -1
-            return x
-
-        gt_verts = align(gt_verts)
-        gt_joint_coords = align(gt_joint_coords[None, ...]).squeeze()
 
         gt_vert_joints = torch.cat(
             [gt_verts, gt_joint_coords], dim=1
@@ -443,8 +435,6 @@ class Trainer(BaseLightningModule):
             cam_ext = batch["cam_ext"]
             trans_cam = cam_ext[:, :3, 3]
 
-        c = torch.tensor([0., 0.923986, 0.]).to(trans_cam.device)
-        trans_cam += (c * 2 + mhr_transl)
 
         def project(points, cam_trans, cam_int):
             points = points + cam_trans

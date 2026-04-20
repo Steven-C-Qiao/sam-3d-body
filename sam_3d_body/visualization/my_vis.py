@@ -3274,7 +3274,8 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     num_views = input_dict["num_views"]
     batch_idx = input_dict["batch_idx"]
     renderer = input_dict["renderer"]
-    side_renderer = input_dict["neutral_renderer"]
+    # Match vis_samples: black-background side view at focal_length=1000, cam=[0,0,4]
+    side_renderer = Renderer(focal_length=1000, faces=renderer.faces)
 
     outputs = input_dict["outputs"]
     batch = input_dict["batch"]
@@ -3283,10 +3284,13 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
         return x.cpu().detach().numpy() if isinstance(x, torch.Tensor) else x
 
     verts_samples = _to_np(outputs["verts_samples"])                      # (V_f, N, V, 3)
+    j3d_samples_all = _to_np(outputs["j3d_samples"])                      # (V_f, N, J, 3)
     mean_verts_all = _to_np(outputs["mhr"]["pred_vertices"])              # (V_f, V, 3)
     mean_cam_t_all = _to_np(outputs["mhr"]["pred_cam_t"])                 # (V_f, 3)
+    mean_root_all = _to_np(outputs["mhr"]["pred_joint_coords"])[..., 1, :]  # (V_f, 3)
     gt_verts_all = _to_np(batch["vertices"])                              # (V_f, V, 3)
     gt_cam_t_all = _to_np(batch["cam_ext"][..., :3, -1])                  # (V_f, 3)
+    gt_root_all = _to_np(batch["joint_coords"])[..., 1, :]                # (V_f, 3)
     cam_int_all = _to_np(batch["cam_int"])                                # (V_f, 3, 3)
     affine_all = _to_np(batch["affine_trans"])                            # (V_f, 1, 2, 3)
     img_size_all = _to_np(batch["img_size"])                              # (V_f, 1, 2)
@@ -3301,12 +3305,17 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     n_vis = min(max_samples, N_avail)
 
     # ---- First pass: pick top-N sample indices per view, collect distances for a shared colour scale ----
+    # Distances are computed on root-subtracted vertices (each mesh centred at
+    # its own root joint before subtracting GT). This removes per-sample
+    # translation from the error heatmap so colours reflect only pose/shape
+    # differences — same colours are then used for front and side views.
     picked_idx = {}   # view -> array of sample indices (len <= n_vis)
     mean_dists = {}   # view -> (V,)
     sample_dists = {} # view -> (n_vis, V)
     all_dists = []
     for view in range(num_views):
         gt_v = gt_verts_all[view]
+        gt_v_rooted = gt_v - gt_root_all[view]
 
         if log_prob is not None:
             order = np.argsort(-log_prob[view])[:n_vis]
@@ -3319,11 +3328,14 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             order = np.arange(n_vis)
         picked_idx[view] = order
 
-        mean_d = np.linalg.norm(mean_verts_all[view] - gt_v, axis=1) * 1000.0
+        mean_v_rooted = mean_verts_all[view] - mean_root_all[view]
+        mean_d = np.linalg.norm(mean_v_rooted - gt_v_rooted, axis=1) * 1000.0
         mean_dists[view] = mean_d
         all_dists.append(mean_d)
 
-        s_d = np.linalg.norm(verts_samples[view, order] - gt_v[None], axis=-1) * 1000.0
+        sample_roots = j3d_samples_all[view, order, 1, :]       # (n_vis, 3)
+        sample_v_rooted = verts_samples[view, order] - sample_roots[:, None]
+        s_d = np.linalg.norm(sample_v_rooted - gt_v_rooted[None], axis=-1) * 1000.0
         sample_dists[view] = s_d
         all_dists.append(s_d.reshape(-1))
 
@@ -3348,17 +3360,17 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     def _to_uint8(arr01):
         return (arr01 * 255.0).clip(0, 255).astype(np.uint8)
 
-    generic_cam_t = np.array([0.0, -0.25, 2.5])
+    generic_cam_t = np.array([0.0, 0.0, 4.0])
     all_rows = []
 
     for view in range(num_views):
         img = _to_np(batch["img_ori"][view][0]).astype(np.uint8)
         gt_v = gt_verts_all[view]
         gt_t = gt_cam_t_all[view]
+        gt_root = gt_root_all[view]
         cc = (cam_int_all[view, 0, 2], cam_int_all[view, 1, 2])
         affine = affine_all[view, 0]
         img_size_v = (int(img_size_all[view, 0, 0]), int(img_size_all[view, 0, 1]))  # (W, H)
-        body_center = gt_v.mean(axis=0, keepdims=True)
         black_bg = np.zeros((H_ref, W_ref, 3), dtype=np.uint8)
 
         def render_front(verts_pred, cam_t_pred, dists_mm):
@@ -3382,16 +3394,16 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             img_out = cv2.warpAffine(img_out, affine, img_size_v)
             return img_out
 
-        def render_side(verts_pred, dists_mm):
+        def render_side(verts_pred, root_joint, dists_mm):
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
             p = side_renderer(
-                verts_pred - body_center, generic_cam_t, black_bg.copy(),
+                verts_pred - root_joint, generic_cam_t, black_bg.copy(),
                 scene_bg_color=(0, 0, 0),
                 vertex_colors=colors,
                 side_view=True, rot_angle=90,
             )
             g = side_renderer(
-                gt_v - body_center, generic_cam_t, black_bg.copy(),
+                gt_v - gt_root, generic_cam_t, black_bg.copy(),
                 mesh_base_color=LIGHT_BLUE,
                 scene_bg_color=(0, 0, 0),
                 side_view=True, rot_angle=90,
@@ -3421,10 +3433,11 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
 
         # --- side row ---
         row2 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
-        mean_side = render_side(mean_verts_all[view], mean_dists[view])
+        mean_side = render_side(mean_verts_all[view], mean_root_all[view], mean_dists[view])
         row2.append(_label(_resize(mean_side), "mean side"))
         for rank, k in enumerate(order):
-            side = render_side(verts_samples[view, k], sample_dists[view][rank])
+            sample_root = j3d_samples_all[view, k, 1, :]
+            side = render_side(verts_samples[view, k], sample_root, sample_dists[view][rank])
             row2.append(_label(_resize(side), f"s{rank} side"))
         while len(row2) < 2 + max_samples:
             row2.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
