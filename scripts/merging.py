@@ -30,7 +30,7 @@ CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 CONFIG_PATH = "checkpoints/sam-3d-body-dinov3/model_config.yaml"
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered", noplot=False, langevin_kwargs=None):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered", noplot=False, langevin_kwargs=None, num_samples=100):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
@@ -105,7 +105,15 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
             logger.warning("No model parameters found in checkpoint state_dict!")
             assert False
 
-    results = trainer.run_multiview_prediction(num_view=4, max_batches=20, dataset_name=dataset_name, merge_method=merge_method, noplot=noplot, langevin_kwargs=langevin_kwargs)
+    results = trainer.run_multiview_prediction(
+        num_view=4,
+        num_samples=num_samples,
+        max_batches=20,
+        dataset_name=dataset_name,
+        merge_method=merge_method,
+        noplot=noplot,
+        langevin_kwargs=langevin_kwargs,
+    )
 
 
 if __name__ == "__main__":
@@ -172,6 +180,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--langevin-init-noise-scale", type=float, default=0.5)
     parser.add_argument("--langevin-verbose", action="store_true", default=False)
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=100,
+        help="Number of NF samples to draw per view during merging.",
+    )
     args = parser.parse_args()
 
     langevin_kwargs = {
@@ -190,9 +204,14 @@ if __name__ == "__main__":
 
     if args.plot:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        os.environ["EGL_DEVICE_ID"] = "0"
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
 
     device_ids = list(map(int, args.gpus.split(",")))
+    # EGL (used by pyrender) selects its GPU via EGL_DEVICE_ID, which is
+    # independent of CUDA_VISIBLE_DEVICES and defaults to physical device 0.
+    # Set it explicitly to keep the renderer on the same GPU as merging.
+    os.environ["EGL_DEVICE_ID"] = str(device_ids[0])
     logger.info(f"Using GPUs: {args.gpus} (Device IDs: {device_ids})")
 
     run_train(
@@ -204,4 +223,5 @@ if __name__ == "__main__":
         merge_method=args.method,
         noplot=args.noplot,
         langevin_kwargs=langevin_kwargs,
+        num_samples=args.num_samples,
     )

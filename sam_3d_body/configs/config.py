@@ -2,7 +2,7 @@ import os
 from yacs.config import CfgNode 
 from sam_3d_body.configs.paths import DATA_PATH as PATH
 
-INDICES_PATH = "/scratches/juban/cq244/sam-3d-body/tinker/mhr_kp_sample_128.npy"
+INDICES_PATH = "checkpoints/sam-3d-body-dinov3/assets/mhr_kp_sample_128.npy"
 
 _C = CfgNode()
 
@@ -21,7 +21,7 @@ _C.MODEL = CfgNode()
 _C.MODEL.DECODER = CfgNode()
 _C.MODEL.ENABLE_BODY = True
 _C.MODEL.ENABLE_HAND = True
-_C.MODEL.DENSE_KEYPOINTS = False
+_C.MODEL.DENSE_KEYPOINTS = True
 _C.MODEL.SAMPLE_SHAPE = True
 _C.MODEL.SAMPLE_SCALE = True
 _C.MODEL.SAMPLE_POSE = True 

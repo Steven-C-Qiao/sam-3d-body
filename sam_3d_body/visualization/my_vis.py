@@ -344,6 +344,12 @@ def vis_samples(
     if "uncertainty_output" in outputs:
         log_prob = _to_np(outputs["uncertainty_output"].get("log_prob"))
 
+    # Rank samples by log-prob (highest first) so the first `n_vis` are the most likely.
+    if log_prob is not None:
+        order = np.argsort(-log_prob[b])[:n_vis]
+    else:
+        order = np.arange(n_vis)
+
     mhr_outputs = {k: _to_np(v) for k, v in outputs["mhr"].items()}
     mean_pred_vertices_np = mhr_outputs["pred_vertices"][b]
 
@@ -361,7 +367,7 @@ def vis_samples(
 
     # ---- per-vertex spread colours, shared inferno scale ----
     per_sample_dists = np.linalg.norm(
-        mhr_samples[b, :n_vis] - mean_pred_vertices_np[None], axis=-1
+        mhr_samples[b, order] - mean_pred_vertices_np[None], axis=-1
     )  # (n_vis, V)
     shared_max = float(per_sample_dists.max()) if per_sample_dists.size else 1.0
     vertex_colors_samples = [
@@ -389,7 +395,7 @@ def vis_samples(
     gt_verts_b = gt_verts[b]
     gt_root = gt_root_joint[b]  # (1, 3)
     vv = vis_verts or {}
-    aligned_samples = _to_np(vv["pa_sample_verts"])[b, :n_vis] if "pa_sample_verts" in vv else None
+    aligned_samples = _to_np(vv["pa_sample_verts"])[b, order] if "pa_sample_verts" in vv else None
     aligned_mean = _to_np(vv["pa_mean_verts"])[b] if "pa_mean_verts" in vv else None
 
     # ---- PA per-vertex error colours (distance to GT, shared inferno scale per row) ----
@@ -420,19 +426,19 @@ def vis_samples(
     if neutral_available:
         gt_neutral = _to_np(vv["gt_neutral_verts"])[b]
         pred_neutral = _to_np(vv["pred_neutral_verts"])[b]
-        sample_neutral = _to_np(vv["sample_neutral_verts"])[b, :n_vis]
+        sample_neutral = _to_np(vv["sample_neutral_verts"])[b, order]
         pred_neutral_sc = _to_np(vv["pred_neutral_verts_sc"])[b]
-        sample_neutral_sc = _to_np(vv["sample_neutral_verts_sc"])[b, :n_vis]
+        sample_neutral_sc = _to_np(vv["sample_neutral_verts_sc"])[b, order]
         neutral_center = gt_neutral.mean(axis=0, keepdims=True) + np.array([[0.0, 0.1, 0.0]])
 
         pve_samples = m.get("pve_samples")
-        pve_samples = _to_np(pve_samples)[b, :n_vis] if pve_samples is not None else \
+        pve_samples = _to_np(pve_samples)[b, order] if pve_samples is not None else \
             np.linalg.norm(sample_neutral - gt_neutral[None], axis=-1).mean(axis=-1) * 1000.0
         pve_mean = m.get("pve")
         pve_mean = float(_to_np(pve_mean)[b]) if pve_mean is not None else \
             float(np.linalg.norm(pred_neutral - gt_neutral, axis=-1).mean()) * 1000.0
         pvetsc_samples = m.get("pvetsc_samples")
-        pvetsc_samples = _to_np(pvetsc_samples)[b, :n_vis] if pvetsc_samples is not None else \
+        pvetsc_samples = _to_np(pvetsc_samples)[b, order] if pvetsc_samples is not None else \
             np.linalg.norm(sample_neutral_sc - gt_neutral[None], axis=-1).mean(axis=-1) * 1000.0
         pvetsc_mean = m.get("pvetsc")
         pvetsc_mean = float(_to_np(pvetsc_mean)[b]) if pvetsc_mean is not None else \
@@ -472,10 +478,11 @@ def vis_samples(
         return (float_rgb * 255.0).clip(0, 255).astype(np.uint8)
 
     for i in range(n_vis):
+        orig_i = int(order[i])
         # ----------------------- front view -----------------------
-        sample_cam_t = pred_cam_t_samples[b, i] if pred_cam_t_samples is not None else outputs["pred_cam_t"][b]
+        sample_cam_t = pred_cam_t_samples[b, orig_i] if pred_cam_t_samples is not None else outputs["pred_cam_t"][b]
         pred_rgb = renderer(
-            mhr_samples[b, i],
+            mhr_samples[b, orig_i],
             sample_cam_t,
             img_cv2.copy(),
             scene_bg_color=(1, 1, 1),
@@ -502,10 +509,10 @@ def vis_samples(
 
         front_lines = []
         if kp2d_visible_samples_px is not None:
-            front_lines.append(f"2D err vis: {float(kp2d_visible_samples_px[b, i]):.1f} px")
+            front_lines.append(f"2D err vis: {float(kp2d_visible_samples_px[b, orig_i]):.1f} px")
         if spread_invisible_samples is not None:
             front_lines.append(
-                f"3D dist to mean: {float(spread_invisible_samples[b, i]) * 1000.0:.1f} mm"
+                f"3D dist to mean: {float(spread_invisible_samples[b, orig_i]) * 1000.0:.1f} mm"
             )
         _draw_label_lines(img_mesh, front_lines)
 
@@ -514,7 +521,7 @@ def vis_samples(
         # ----------------------- side view -----------------------
         if plot_side:
             pred_side = renderer_side(
-                mhr_samples[b, i] - mhr_root_joint_samples[b, i],
+                mhr_samples[b, orig_i] - mhr_root_joint_samples[b, orig_i],
                 generic_camera,
                 black_bg,
                 vertex_colors=vertex_colors_samples[i],
@@ -538,9 +545,9 @@ def vis_samples(
 
             side_lines = []
             if log_prob is not None:
-                side_lines.append(f"log p: {float(log_prob[b, i]):.1f}")
+                side_lines.append(f"log p: {float(log_prob[b, orig_i]):.1f}")
             if mpjpe_samples is not None:
-                side_lines.append(f"MPJPE: {float(mpjpe_samples[b, i]):.1f} mm")
+                side_lines.append(f"MPJPE: {float(mpjpe_samples[b, orig_i]):.1f} mm")
             _draw_label_lines(img_side, side_lines)
             img_side_list.append(img_side)
 
@@ -570,7 +577,7 @@ def vis_samples(
 
             pa_lines = []
             if pampjpe_samples is not None:
-                pa_lines.append(f"PA-MPJPE: {float(pampjpe_samples[b, i]):.1f} mm")
+                pa_lines.append(f"PA-MPJPE: {float(pampjpe_samples[b, orig_i]):.1f} mm")
             _draw_label_lines(img_pa, pa_lines)
             img_pa_list.append(img_pa)
 
@@ -830,6 +837,127 @@ def vis_samples(
 
     cur_img = np.concatenate(rows, axis=1 - axis)
     return cur_img
+
+
+def vis_directional_variance(img_cv2, outputs, faces, batch):
+    """
+    Render the highest-probability NF sample coloured by per-vertex directional
+    sample std along the three axes (x, y on the image, z into the image).
+
+    Produces a single row of 5 panels for the first batch element:
+      1. Cropped image
+      2. GT mesh (blue) overlaid on the mean prediction
+      3. Mesh coloured by std along image-x  (horizontal)
+      4. Mesh coloured by std along image-y  (vertical)
+      5. Mesh coloured by std along image-z  (depth)
+    """
+    def _to_np(x):
+        return x.cpu().detach().numpy() if isinstance(x, torch.Tensor) else x
+
+    def _to_uint8(float_rgb):
+        return (float_rgb * 255.0).clip(0, 255).astype(np.uint8)
+
+    b = 0
+
+    affine_all = _to_np(batch["affine_trans"]) if "affine_trans" in batch else None
+    img_size_all = _to_np(batch["img_size"]) if "img_size" in batch else None
+    affine = affine_all[b, 0] if affine_all is not None else None
+    img_size = img_size_all[b, 0] if img_size_all is not None else None
+    cam_int = batch["cam_int"]
+    camera_center = (cam_int[b, 0, 2], cam_int[b, 1, 2])
+
+    verts_samples = _to_np(outputs["verts_samples"])  # (B, N, V, 3)
+    mhr_outputs = {k: _to_np(v) for k, v in outputs["mhr"].items()}
+    focal_length = mhr_outputs["focal_length"][b]
+
+    log_prob = None
+    if "uncertainty_output" in outputs and outputs["uncertainty_output"] is not None:
+        log_prob = _to_np(outputs["uncertainty_output"].get("log_prob"))
+
+    best_idx = int(np.argmax(log_prob[b])) if log_prob is not None else 0
+    best_verts = verts_samples[b, best_idx]
+
+    pred_cam_t_samples = _to_np(outputs.get("pred_cam_t_samples")) if "pred_cam_t_samples" in outputs else None
+    if pred_cam_t_samples is not None:
+        best_cam_t = pred_cam_t_samples[b, best_idx]
+    else:
+        best_cam_t = mhr_outputs["pred_cam_t"][b]
+
+    # Per-vertex std along each of the 3 axes (metres -> mm).
+    samples = verts_samples[b]  # (N, V, 3)
+    std_mm = samples.std(axis=0) * 1000.0  # (V, 3)
+
+    renderer = Renderer(focal_length=focal_length, faces=faces)
+
+    base_img = img_cv2.copy().astype(np.uint8)
+    if affine is not None:
+        base_img = cv2.warpAffine(base_img, affine, img_size)
+    _draw_label_lines(base_img, ["image"])
+
+    # GT overlaid on mean prediction.
+    gt_verts = _to_np(batch["vertices"])[b]
+    gt_cam_t = _to_np(batch["cam_ext"][..., :3, -1])[b]
+    mean_pred_verts = mhr_outputs["pred_vertices"][b]
+    mean_pred_cam_t = mhr_outputs["pred_cam_t"][b]
+
+    mean_pred_rgb = renderer(
+        mean_pred_verts,
+        mean_pred_cam_t,
+        img_cv2.copy(),
+        mesh_base_color=LIGHT_ORANGE,
+        scene_bg_color=(1, 1, 1),
+        camera_center=camera_center,
+    )
+    gt_rgba = renderer(
+        gt_verts,
+        gt_cam_t,
+        img_cv2.copy(),
+        mesh_base_color=BLUE,
+        scene_bg_color=(1, 1, 1),
+        return_rgba=True,
+        camera_center=camera_center,
+    )
+    alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
+    blended = alpha * gt_rgba[..., :3].astype(np.float32) + (1.0 - alpha) * mean_pred_rgb
+    gt_mean_img = _to_uint8(blended)
+    if affine is not None:
+        gt_mean_img = cv2.warpAffine(gt_mean_img, affine, img_size)
+    _draw_label_lines(gt_mean_img, ["gt (blue) + mean pred (orange)"])
+
+    axis_names = ["std x (horizontal)", "std y (vertical)", "std z (depth)"]
+    panels = [base_img, gt_mean_img]
+
+    # Shared colour scale across the three axes.
+    shared_max = float(std_mm.max()) if std_mm.size else 1.0
+    if shared_max <= 0.0:
+        shared_max = 1.0
+
+    for axis_idx in range(3):
+        dists = std_mm[:, axis_idx]
+        vert_colors = build_vertex_colors(dists, min_dist=0.0, max_dist=shared_max)
+
+        rendered = renderer(
+            best_verts,
+            best_cam_t,
+            img_cv2.copy(),
+            scene_bg_color=(1, 1, 1),
+            vertex_colors=vert_colors,
+            camera_center=camera_center,
+        )
+        img_out = _to_uint8(rendered)
+        if affine is not None:
+            img_out = cv2.warpAffine(img_out, affine, img_size)
+        _draw_label_lines(img_out, [axis_names[axis_idx]])
+        panels.append(img_out)
+
+    row = np.concatenate(panels, axis=1)
+    cbar = build_distance_colorbar_rgb(
+        min_dist=0.0,
+        max_dist=shared_max,
+        height=row.shape[0],
+        width=40,
+    )
+    return np.concatenate([row, cbar], axis=1)
 
 
 class Visualiser(pl.LightningModule):
@@ -3127,3 +3255,194 @@ def vis_merging_neutral(
 #         )
 #         # logger.info(f"LoRA trainable parameters: {lora_param_count:,}")
 #     logger.info("=" * 60)
+
+
+def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
+    """
+    Per-view gallery of the NF samples with GT overlay for a single serno
+    from the multi-view eval pipeline.
+
+    For each of `num_views` input images, two rows are produced:
+
+      Row 1 (front on-image): input image | mean pred + GT | top-N samples + GT
+      Row 2 (side):              blank     | mean side + GT | top-N sample sides + GT
+
+    Samples are coloured per-vertex by distance to GT (inferno), with a
+    shared colour scale across all views/samples/means, matching
+    `vis_merging_predictions`. GT is overlaid in blue at 50% alpha.
+    """
+    num_views = input_dict["num_views"]
+    batch_idx = input_dict["batch_idx"]
+    renderer = input_dict["renderer"]
+    side_renderer = input_dict["neutral_renderer"]
+
+    outputs = input_dict["outputs"]
+    batch = input_dict["batch"]
+
+    def _to_np(x):
+        return x.cpu().detach().numpy() if isinstance(x, torch.Tensor) else x
+
+    verts_samples = _to_np(outputs["verts_samples"])                      # (V_f, N, V, 3)
+    mean_verts_all = _to_np(outputs["mhr"]["pred_vertices"])              # (V_f, V, 3)
+    mean_cam_t_all = _to_np(outputs["mhr"]["pred_cam_t"])                 # (V_f, 3)
+    gt_verts_all = _to_np(batch["vertices"])                              # (V_f, V, 3)
+    gt_cam_t_all = _to_np(batch["cam_ext"][..., :3, -1])                  # (V_f, 3)
+    cam_int_all = _to_np(batch["cam_int"])                                # (V_f, 3, 3)
+    affine_all = _to_np(batch["affine_trans"])                            # (V_f, 1, 2, 3)
+    img_size_all = _to_np(batch["img_size"])                              # (V_f, 1, 2)
+
+    log_prob_t = outputs.get("uncertainty_output", {}).get("log_prob")
+    log_prob = _to_np(log_prob_t) if log_prob_t is not None else None     # (V_f, N) or None
+
+    pred_cam_t_samples_t = outputs.get("pred_cam_t_samples")
+    pred_cam_t_samples = _to_np(pred_cam_t_samples_t) if pred_cam_t_samples_t is not None else None
+
+    N_avail = verts_samples.shape[1]
+    n_vis = min(max_samples, N_avail)
+
+    # ---- First pass: pick top-N sample indices per view, collect distances for a shared colour scale ----
+    picked_idx = {}   # view -> array of sample indices (len <= n_vis)
+    mean_dists = {}   # view -> (V,)
+    sample_dists = {} # view -> (n_vis, V)
+    all_dists = []
+    for view in range(num_views):
+        gt_v = gt_verts_all[view]
+
+        if log_prob is not None:
+            order = np.argsort(-log_prob[view])[:n_vis]
+        else:
+            if log_prob is None and view == 0:
+                logger.warning(
+                    "vis_merging_samples: log_prob unavailable; using first "
+                    f"{n_vis} samples instead of top-log-prob ranking"
+                )
+            order = np.arange(n_vis)
+        picked_idx[view] = order
+
+        mean_d = np.linalg.norm(mean_verts_all[view] - gt_v, axis=1) * 1000.0
+        mean_dists[view] = mean_d
+        all_dists.append(mean_d)
+
+        s_d = np.linalg.norm(verts_samples[view, order] - gt_v[None], axis=-1) * 1000.0
+        sample_dists[view] = s_d
+        all_dists.append(s_d.reshape(-1))
+
+    all_concat = np.concatenate(all_dists) if all_dists else np.array([0.0])
+    max_dist_mm = float(all_concat.max()) if all_concat.size else 1.0
+    if max_dist_mm <= 0.0:
+        max_dist_mm = 1.0
+
+    # ---- Reference panel size: cropped image size of view 0 (W, H) ----
+    img_size_0 = img_size_all[0, 0]
+    W_ref, H_ref = int(img_size_0[0]), int(img_size_0[1])
+
+    def _resize(img):
+        if img.shape[0] != H_ref or img.shape[1] != W_ref:
+            return cv2.resize(img, (W_ref, H_ref), interpolation=cv2.INTER_AREA)
+        return img
+
+    def _label(img, text):
+        _draw_label_lines(img, [text])
+        return img
+
+    def _to_uint8(arr01):
+        return (arr01 * 255.0).clip(0, 255).astype(np.uint8)
+
+    generic_cam_t = np.array([0.0, -0.25, 2.5])
+    all_rows = []
+
+    for view in range(num_views):
+        img = _to_np(batch["img_ori"][view][0]).astype(np.uint8)
+        gt_v = gt_verts_all[view]
+        gt_t = gt_cam_t_all[view]
+        cc = (cam_int_all[view, 0, 2], cam_int_all[view, 1, 2])
+        affine = affine_all[view, 0]
+        img_size_v = (int(img_size_all[view, 0, 0]), int(img_size_all[view, 0, 1]))  # (W, H)
+        body_center = gt_v.mean(axis=0, keepdims=True)
+        black_bg = np.zeros((H_ref, W_ref, 3), dtype=np.uint8)
+
+        def render_front(verts_pred, cam_t_pred, dists_mm):
+            colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
+            pred_rgb = renderer(
+                verts_pred, cam_t_pred, img.copy(),
+                scene_bg_color=(1, 1, 1),
+                camera_center=cc,
+                vertex_colors=colors,
+            )
+            gt_rgba = renderer(
+                gt_v, gt_t, np.ones_like(img) * 255,
+                mesh_base_color=LIGHT_BLUE,
+                scene_bg_color=(1, 1, 1),
+                camera_center=cc,
+                return_rgba=True,
+            )
+            a = gt_rgba[..., 3:4].astype(np.float32) * 0.5
+            blended = a * gt_rgba[..., :3].astype(np.float32) + (1.0 - a) * pred_rgb
+            img_out = _to_uint8(blended)
+            img_out = cv2.warpAffine(img_out, affine, img_size_v)
+            return img_out
+
+        def render_side(verts_pred, dists_mm):
+            colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
+            p = side_renderer(
+                verts_pred - body_center, generic_cam_t, black_bg.copy(),
+                scene_bg_color=(0, 0, 0),
+                vertex_colors=colors,
+                side_view=True, rot_angle=90,
+            )
+            g = side_renderer(
+                gt_v - body_center, generic_cam_t, black_bg.copy(),
+                mesh_base_color=LIGHT_BLUE,
+                scene_bg_color=(0, 0, 0),
+                side_view=True, rot_angle=90,
+                return_rgba=True,
+            )
+            a = g[..., 3:4].astype(np.float32) * 0.5
+            blended = a * g[..., :3].astype(np.float32) + (1.0 - a) * p
+            return _to_uint8(blended)
+
+        # --- front row ---
+        img_crop = cv2.warpAffine(img.copy(), affine, img_size_v)
+        row1 = [_label(_resize(img_crop), f"view {view}")]
+        mean_front = render_front(mean_verts_all[view], mean_cam_t_all[view], mean_dists[view])
+        row1.append(_label(_resize(mean_front), "mean"))
+
+        order = picked_idx[view]
+        for rank, k in enumerate(order):
+            cam_k = pred_cam_t_samples[view, k] if pred_cam_t_samples is not None else mean_cam_t_all[view]
+            front = render_front(verts_samples[view, k], cam_k, sample_dists[view][rank])
+            label = (
+                f"s{rank} lp={float(log_prob[view, k]):.1f}"
+                if log_prob is not None else f"s{rank}"
+            )
+            row1.append(_label(_resize(front), label))
+        while len(row1) < 2 + max_samples:
+            row1.append(np.full((H_ref, W_ref, 3), 255, dtype=np.uint8))
+
+        # --- side row ---
+        row2 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
+        mean_side = render_side(mean_verts_all[view], mean_dists[view])
+        row2.append(_label(_resize(mean_side), "mean side"))
+        for rank, k in enumerate(order):
+            side = render_side(verts_samples[view, k], sample_dists[view][rank])
+            row2.append(_label(_resize(side), f"s{rank} side"))
+        while len(row2) < 2 + max_samples:
+            row2.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
+
+        all_rows.append(np.concatenate(row1, axis=1))
+        all_rows.append(np.concatenate(row2, axis=1))
+
+    grid = np.concatenate(all_rows, axis=0)
+    cbar = build_distance_colorbar_rgb(
+        min_dist=0.0,
+        max_dist=max_dist_mm,
+        height=grid.shape[0],
+        width=60,
+    )
+    grid = np.concatenate([grid, cbar], axis=1)
+
+    if save_dir is not None:
+        out_path = os.path.join(save_dir, f"b{batch_idx:03d}_merging_samples.png")
+        cv2.imwrite(out_path, cv2.cvtColor(grid, cv2.COLOR_RGB2BGR))
+        print(f"Saved merging samples to {out_path}")
+    return grid

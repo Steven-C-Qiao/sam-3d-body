@@ -88,13 +88,13 @@ class DatasetHMR(Dataset):
         visibility_path = DATASET_FILES[is_train][dataset].replace('all_npz_12_training_mhr_conditioned', 'visibility_labels')
         self.visibility = np.load(visibility_path[:-4] + "_visibility_308.npz")["visibility_308"]
 
-        # Dense-vertex visibility subset at the MHR_DENSE_KP_INDICES vertices.
+        # Dense-vertex visibility at the MHR_DENSE_KP_INDICES vertices — loaded
+        # from a pre-subset (N, K) file. Regenerate with
+        # `python tinker/subset_vertex_visibility.py` if MHR_DENSE_KP_INDICES changes.
         # Fallback to all-true if the precomputed file is missing for this shard.
-        vv_path = visibility_path[:-4] + "_vertex_visibility.npz"
+        vv_path = visibility_path[:-4] + "_selected_vertex_visibility.npz"
         if os.path.exists(vv_path):
-            vv_full = np.load(vv_path)["vertex_visibility"]
-            self.dense_visibility = vv_full[:, MHR_DENSE_KP_INDICES].astype(bool)
-            del vv_full
+            self.dense_visibility = np.load(vv_path)["vertex_visibility"].astype(bool)
         else:
             logger.info(f"[dense-kp] {vv_path} missing; using all-true fallback for {dataset}")
             self.dense_visibility = np.ones(
@@ -287,16 +287,15 @@ class MultiViewEvaluationDataset(Dataset):
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
         self.imgname = self.data["imgname"]
 
-        # Dense-vertex visibility subset at the MHR_DENSE_KP_INDICES vertices.
+        # Dense-vertex visibility at the MHR_DENSE_KP_INDICES vertices — loaded
+        # from a pre-subset (N, K) file. See `tinker/subset_vertex_visibility.py`.
         # Fallback to all-true if the precomputed file is missing for this shard.
         vis_path = DATASET_FILES[is_train][dataset].replace(
             "all_npz_12_training_mhr_conditioned", "visibility_labels"
         )
-        vv_path = vis_path[:-4] + "_vertex_visibility.npz"
+        vv_path = vis_path[:-4] + "_selected_vertex_visibility.npz"
         if os.path.exists(vv_path):
-            vv_full = np.load(vv_path)["vertex_visibility"]
-            self.dense_visibility = vv_full[:, MHR_DENSE_KP_INDICES].astype(bool)
-            del vv_full
+            self.dense_visibility = np.load(vv_path)["vertex_visibility"].astype(bool)
         else:
             logger.info(f"[dense-kp] {vv_path} missing; using all-true fallback for {dataset}")
             self.dense_visibility = np.ones(

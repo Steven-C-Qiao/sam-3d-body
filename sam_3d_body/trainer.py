@@ -33,8 +33,10 @@ from .visualization.my_vis import (
     Visualiser,
     vis_prediction,
     vis_samples,
+    vis_directional_variance,
     vis_merging_neutral,
     vis_merging_predictions,
+    vis_merging_samples,
 )
 from .visualization.renderer import Renderer
 
@@ -290,10 +292,17 @@ class Trainer(BaseLightningModule):
                 stack_vertically=self.stack_vertically,
                 batch=batch,
             )
+            rend_img_dir_var = vis_directional_variance(
+                image,
+                outputs,
+                self.faces,
+                batch=batch,
+            )
             rend_img_bgr = cv2.cvtColor(rend_img, cv2.COLOR_RGB2BGR)
             rend_img_samples_crops_bgr = cv2.cvtColor(
                 rend_img_samples_crops, cv2.COLOR_RGB2BGR
             )
+            rend_img_dir_var_bgr = cv2.cvtColor(rend_img_dir_var, cv2.COLOR_RGB2BGR)
             # Build filenames with unified format:
             # - Train: ep_xxx_train_xxxxxx_*.png
             # - Val:   ep_xxx_val[_dataset]_*.png
@@ -312,11 +321,16 @@ class Trainer(BaseLightningModule):
 
             img_name = f"{base}_img.png"
             samples_name = f"{base}_samples_crops.png"
+            dir_var_name = f"{base}_dir_var.png"
 
             cv2.imwrite(os.path.join(self.vis_save_dir, img_name), rend_img_bgr)
             cv2.imwrite(
                 os.path.join(self.vis_save_dir, samples_name),
                 rend_img_samples_crops_bgr,
+            )
+            cv2.imwrite(
+                os.path.join(self.vis_save_dir, dir_var_name),
+                rend_img_dir_var_bgr,
             )
 
             # Build split name for Visualiser so filenames include epoch & dataset
@@ -674,7 +688,7 @@ class Trainer(BaseLightningModule):
             batch = self.preprocess(batch)
 
             outputs = self.model(
-                batch, 
+                batch,
                 num_samples=num_samples
             )
             mhr_out = outputs["mhr"]
@@ -710,11 +724,12 @@ class Trainer(BaseLightningModule):
                 batch=batch,
                 bs=bs,
                 num_views=num_views,
+                num_cam_samples=32,
             )
             outs["merged_pred_cam_t"] = merged_pred_cam_t
 
             all_metrics = multiframe_metrics(
-                all_metrics, 
+                all_metrics,
                 outs,
                 batch_idx=batch_idx,
                 save_dir=self.vis_save_dir
@@ -753,6 +768,7 @@ class Trainer(BaseLightningModule):
             if not noplot:
                 vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
                 vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False)
+                vis_merging_samples(outs, save_dir=self.vis_save_dir, max_samples=4)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)

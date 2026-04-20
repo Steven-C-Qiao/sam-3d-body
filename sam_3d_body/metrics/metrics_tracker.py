@@ -437,8 +437,20 @@ class Metrics(pl.LightningModule):
 
 
 
+def _pampjpe_torch(pred, gt):
+    """Procrustes-aligned MPJPE per item (mean over joints). Returns (B,)."""
+    aligned = compute_similarity_transform_batch_torch(pred, gt)
+    return torch.sqrt(((aligned - gt) ** 2).sum(dim=-1)).mean(dim=-1)
+
+
+def _pvetsc_torch(pred, gt):
+    """Scale+translation-aligned PVE per item (mean over vertices). Returns (B,)."""
+    pred_sc = scale_and_translation_transform_batch_torch(pred, gt)
+    return torch.sqrt(((pred_sc - gt) ** 2).sum(dim=-1)).mean(dim=-1)
+
+
 def multiframe_metrics(
-    all_metrics, 
+    all_metrics,
     mhr_dict,
     batch_idx=None,
     save_dir=None
@@ -452,7 +464,7 @@ def multiframe_metrics(
     per_view_neutral_verts = mhr_dict["per_view_neutral_verts"]
     avg_neutral_verts = mhr_dict["avg_neutral_verts"]
     merged_neutral_verts = mhr_dict["merged_neutral_verts"]
-    
+
     # ---------------- mpjpe ----------------
     per_view_mpjpe = torch.sqrt(((per_view_neutral_jcoords - gt_neutral_jcoords) ** 2).sum(dim=-1)).mean(dim=1)
     avg_mpjpe = torch.sqrt(((avg_neutral_jcoords - gt_neutral_jcoords) ** 2).sum(dim=-1)).mean(dim=1)
@@ -463,55 +475,15 @@ def multiframe_metrics(
     avg_pve = torch.sqrt(((avg_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)).mean(dim=1)
     merged_pve = torch.sqrt(((merged_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)).mean(dim=1)
 
-    # ---------------- pampjpe ----------------
-    per_view_pampjpe, _ = reconstruction_error(
-        per_view_neutral_jcoords.cpu().detach().numpy(),
-        gt_neutral_jcoords.cpu().detach().numpy(),
-        reduction="none",
-    )
-    per_view_pampjpe = per_view_pampjpe.mean(axis=-1)
-    avg_pampjpe, _ = reconstruction_error(
-        avg_neutral_jcoords.cpu().detach().numpy(),
-        gt_neutral_jcoords.cpu().detach().numpy(),
-        reduction="none",
-    )
-    avg_pampjpe = avg_pampjpe.mean(axis=-1)
-    merged_pampjpe, _ = reconstruction_error(
-        merged_neutral_jcoords.cpu().detach().numpy(),
-        gt_neutral_jcoords.cpu().detach().numpy(),
-        reduction="none",
-    )
-    merged_pampjpe = merged_pampjpe.mean(axis=-1)
+    # ---------------- pampjpe (batched torch Procrustes) ----------------
+    per_view_pampjpe = _pampjpe_torch(per_view_neutral_jcoords, gt_neutral_jcoords)
+    avg_pampjpe = _pampjpe_torch(avg_neutral_jcoords, gt_neutral_jcoords)
+    merged_pampjpe = _pampjpe_torch(merged_neutral_jcoords, gt_neutral_jcoords)
 
-    # ---------------- pvetsc ----------------
-    pred_sc = scale_and_translation_transform_batch(
-        per_view_neutral_verts.cpu().detach().numpy(),
-        gt_neutral_verts.cpu().detach().numpy(),
-    )
-    merged_sc = scale_and_translation_transform_batch(
-        merged_neutral_verts.cpu().detach().numpy(),
-        gt_neutral_verts.cpu().detach().numpy(),
-    )
-    avg_sc = scale_and_translation_transform_batch(
-        avg_neutral_verts.cpu().detach().numpy(),
-        gt_neutral_verts.cpu().detach().numpy(),
-    )
-    per_view_pvetsc = np.linalg.norm(
-        pred_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-    )
-    per_view_pvetsc = per_view_pvetsc.mean(axis=1)
-    merged_pvetsc = np.linalg.norm(
-        merged_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-    )
-    merged_pvetsc = merged_pvetsc.mean(axis=1)
-    avg_pvetsc = np.linalg.norm(
-        avg_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-    )
-    avg_pvetsc = avg_pvetsc.mean(axis=1)
-
-    # print(per_view_pvetsc)
-    # print(merged_pvetsc)
-    # import ipdb; ipdb.set_trace()
+    # ---------------- pvetsc (batched torch scale+trans) ----------------
+    per_view_pvetsc = _pvetsc_torch(per_view_neutral_verts, gt_neutral_verts)
+    merged_pvetsc = _pvetsc_torch(merged_neutral_verts, gt_neutral_verts)
+    avg_pvetsc = _pvetsc_torch(avg_neutral_verts, gt_neutral_verts)
 
     # ---------------- best NF sample by log-prob (per-view argmax of stage-1 log-prob) ----------------
     best_logprob_sample_mpjpe = best_logprob_sample_pve = best_logprob_sample_pampjpe = best_logprob_sample_pvetsc = None
@@ -522,20 +494,8 @@ def multiframe_metrics(
         best_logprob_sample_mpjpe = torch.sqrt(((best_logprob_neutral_jcoords - gt_neutral_jcoords) ** 2).sum(dim=-1)).mean(dim=1)
         best_logprob_sample_pve = torch.sqrt(((best_logprob_neutral_verts - gt_neutral_verts) ** 2).sum(dim=-1)).mean(dim=1)
 
-        best_logprob_sample_pampjpe, _ = reconstruction_error(
-            best_logprob_neutral_jcoords.cpu().detach().numpy(),
-            gt_neutral_jcoords.cpu().detach().numpy(),
-            reduction="none",
-        )
-        best_logprob_sample_pampjpe = best_logprob_sample_pampjpe.mean(axis=-1)
-
-        best_logprob_sc = scale_and_translation_transform_batch(
-            best_logprob_neutral_verts.cpu().detach().numpy(),
-            gt_neutral_verts.cpu().detach().numpy(),
-        )
-        best_logprob_sample_pvetsc = np.linalg.norm(
-            best_logprob_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-        ).mean(axis=1)
+        best_logprob_sample_pampjpe = _pampjpe_torch(best_logprob_neutral_jcoords, gt_neutral_jcoords)
+        best_logprob_sample_pvetsc = _pvetsc_torch(best_logprob_neutral_verts, gt_neutral_verts)
 
     # ---------------- avg / oracle-best over all NF samples ----------------
     avg_sample_mpjpe = avg_sample_pve = avg_sample_pampjpe = avg_sample_pvetsc = None
@@ -561,24 +521,13 @@ def multiframe_metrics(
         gt_verts_tiled = gt_neutral_verts.unsqueeze(1).expand(-1, S, -1, -1).reshape(BV * S, *gt_neutral_verts.shape[1:])
         gt_jcoords_tiled = gt_neutral_jcoords.unsqueeze(1).expand(-1, S, -1, -1).reshape(BV * S, *gt_neutral_jcoords.shape[1:])
 
-        sample_pampjpe_flat, _ = reconstruction_error(
-            sample_jcoords_flat.cpu().detach().numpy(),
-            gt_jcoords_tiled.cpu().detach().numpy(),
-            reduction="none",
-        )
-        sample_pampjpe_per_s = sample_pampjpe_flat.mean(axis=-1).reshape(BV, S)
-        avg_sample_pampjpe = sample_pampjpe_per_s.mean(axis=1)
-        best_metric_sample_pampjpe = sample_pampjpe_per_s.min(axis=1)
+        sample_pampjpe_per_s = _pampjpe_torch(sample_jcoords_flat, gt_jcoords_tiled).reshape(BV, S)
+        avg_sample_pampjpe = sample_pampjpe_per_s.mean(dim=1)
+        best_metric_sample_pampjpe = sample_pampjpe_per_s.min(dim=1).values
 
-        sample_sc_flat = scale_and_translation_transform_batch(
-            sample_verts_flat.cpu().detach().numpy(),
-            gt_verts_tiled.cpu().detach().numpy(),
-        )
-        sample_pvetsc_per_s = np.linalg.norm(
-            sample_sc_flat - gt_verts_tiled.cpu().detach().numpy(), axis=-1
-        ).mean(axis=1).reshape(BV, S)
-        avg_sample_pvetsc = sample_pvetsc_per_s.mean(axis=1)
-        best_metric_sample_pvetsc = sample_pvetsc_per_s.min(axis=1)
+        sample_pvetsc_per_s = _pvetsc_torch(sample_verts_flat, gt_verts_tiled).reshape(BV, S)
+        avg_sample_pvetsc = sample_pvetsc_per_s.mean(dim=1)
+        best_metric_sample_pvetsc = sample_pvetsc_per_s.min(dim=1).values
 
     # ---------------- sample-param-average (mean of residual samples → MHR once) ----------------
     sample_param_avg_pampjpe = sample_param_avg_pvetsc = None
@@ -586,20 +535,8 @@ def multiframe_metrics(
         sp_avg_verts = mhr_dict["sample_param_avg_neutral_verts"]
         sp_avg_jcoords = mhr_dict["sample_param_avg_neutral_jcoords"]
 
-        sample_param_avg_pampjpe, _ = reconstruction_error(
-            sp_avg_jcoords.cpu().detach().numpy(),
-            gt_neutral_jcoords.cpu().detach().numpy(),
-            reduction="none",
-        )
-        sample_param_avg_pampjpe = sample_param_avg_pampjpe.mean(axis=-1)
-
-        sp_avg_sc = scale_and_translation_transform_batch(
-            sp_avg_verts.cpu().detach().numpy(),
-            gt_neutral_verts.cpu().detach().numpy(),
-        )
-        sample_param_avg_pvetsc = np.linalg.norm(
-            sp_avg_sc - gt_neutral_verts.cpu().detach().numpy(), axis=-1
-        ).mean(axis=1)
+        sample_param_avg_pampjpe = _pampjpe_torch(sp_avg_jcoords, gt_neutral_jcoords)
+        sample_param_avg_pvetsc = _pvetsc_torch(sp_avg_verts, gt_neutral_verts)
 
     # print(f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {avg_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}")
     # print(f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {avg_pve.mean():.4f}, merged: {merged_pve.mean():.4f}")
