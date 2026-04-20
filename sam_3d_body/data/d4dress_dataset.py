@@ -101,6 +101,21 @@ class FakeGetBBoxCenterScale(nn.Module):
         return results
 
 
+def bbox_from_mask(mask, padding: float = 1.1):
+    """Tight square bbox around foreground pixels.
+
+    Returns (center[xy], scale) matching the (center, scalar-scale*200 → square bbox)
+    convention consumed by ``FakeGetBBoxCenterScale``.
+    """
+    fg = mask.any(axis=-1) if mask.ndim == 3 else mask > 0
+    ys, xs = np.where(fg)
+    x0, x1 = float(xs.min()), float(xs.max())
+    y0, y1 = float(ys.min()), float(ys.max())
+    center = np.array([0.5 * (x0 + x1), 0.5 * (y0 + y1)], dtype=np.float32)
+    side = max(x1 - x0, y1 - y0) * padding
+    return center, float(side / 200.0)
+
+
 PATH_TO_DATASET = "/scratches/kyuban/share/4DDress"
 
 # Use timm's names
@@ -246,9 +261,7 @@ class D4DressDataset(Dataset):
             img_h >= img_w
         ), f"D4Dress images expected portrait mode (H>=W), got H={img_h}, W={img_w}"
 
-        # Use principal point as crop center (matches MultiD4DressDataset)
-        bbox_center = np.array([cam_int[0, 2], cam_int[1, 2]], dtype=np.float32)
-        bbox_scale = img_w / 200.0
+        bbox_center, bbox_scale = bbox_from_mask(mask)
 
         data_info = dict(
             img=img,
@@ -415,12 +428,8 @@ class MultiD4DressDataset(Dataset):
             assert (
                 img_h >= img_w
             ), f"D4Dress images expected portrait mode (H>=W), got H={img_h}, W={img_w}"
-            # bbox_center = np.array([img_w / 4.0, img_h / 4.0], dtype=np.float32)
-            bbox_center = np.array([cam_int[i][0, 2], cam_int[i][1, 2]], dtype=np.float32)
-            bbox_scale = img_w / 200.0
 
-            # view['center'] = bbox_center
-            # view['scale'] = bbox_scale
+            bbox_center, bbox_scale = bbox_from_mask(mask)
 
             data_info = dict(
                 img=img,
