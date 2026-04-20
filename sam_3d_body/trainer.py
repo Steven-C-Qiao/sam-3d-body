@@ -9,7 +9,7 @@ from loguru import logger
 from torch.utils.data import ConcatDataset, DataLoader
 from yacs.config import CfgNode
 
-from .configs.config import INDICES_PATH
+from .data.bedlam_dataset import MHR_DENSE_KP_INDICES
 from .data.bedlam_dataset import (
     DatasetHMR as BEDLAMDataset,
     MultiViewEvaluationDataset,
@@ -112,8 +112,7 @@ class Trainer(BaseLightningModule):
         )
         self.mhr_dense_kp_indices = None
         if self.use_dense_keypoints:
-            mhr_dense_kp_indices_np = np.load(INDICES_PATH)
-            self.mhr_dense_kp_indices = torch.from_numpy(mhr_dense_kp_indices_np).long()
+            self.mhr_dense_kp_indices = torch.from_numpy(MHR_DENSE_KP_INDICES).long()
             # Expose to the meta-arch and the MHR head for dense keypoint extraction
             setattr(self.model, "mhr_dense_kp_indices", self.mhr_dense_kp_indices)
             setattr(
@@ -407,6 +406,10 @@ class Trainer(BaseLightningModule):
             .reshape(-1, gt_vert_joints.shape[0], 3)
             .permute(1, 0, 2)
         )[..., :70, :]
+        if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
+            dense_idx = self.mhr_dense_kp_indices.to(gt_verts.device)
+            dense_kp3d_gt = gt_verts[:, dense_idx, :]
+            gt_keypoints_3d = torch.cat([gt_keypoints_3d, dense_kp3d_gt], dim=1)
         if batch["dataset_name"][0] == "4d-dress":
             R = batch["cam_ext"][:, :3, :3]
             gt_verts = gt_verts @ R.transpose(-2, -1)
@@ -455,8 +458,24 @@ class Trainer(BaseLightningModule):
         gt_kp2d_crop = gt_kp2d_crop / img_size.unsqueeze(1) - 0.5  # [B, 70, 2]
         batch["keypoints_2d"] = gt_kp2d_crop
 
-        if "visibility" not in batch: # eg. 4d-dress 
+        if "visibility" not in batch: # eg. 4d-dress
             batch["visibility"] = torch.ones_like(batch["keypoints_2d"][:, :70, 0]).bool()
+
+        # Extend visibility with dense-vertex visibility (from the dataset when
+        # available, all-ones fallback otherwise) so the last axis matches the
+        # dense-extended keypoints (70 + K).
+        if self.use_dense_keypoints and self.mhr_dense_kp_indices is not None:
+            K = self.mhr_dense_kp_indices.numel()
+            if "dense_visibility" in batch:
+                dense_v = batch.pop("dense_visibility").bool()
+            else:
+                dense_v = torch.ones(
+                    batch["visibility"].shape[0], K,
+                    dtype=torch.bool, device=batch["visibility"].device,
+                )
+            batch["visibility"] = torch.cat(
+                [batch["visibility"].bool(), dense_v], dim=1
+            )
 
         # --- temp mirror for joints ---
         j2d = project(gt_joint_coords, trans_cam.unsqueeze(1), cam_int)[..., :2]

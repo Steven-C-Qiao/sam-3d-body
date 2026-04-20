@@ -1737,13 +1737,15 @@ class Visualiser(pl.LightningModule):
         gt_kp2d_normalized = batch["keypoints_2d"][batch_idx, :70, :]  # joints_2d
         gt_kp2d = (gt_kp2d_normalized + 0.5) * img_size  # [N, 2]
 
-        # Visibility mask for the first 70 keypoints (1 = visible, 0 = invisible)
-        visibility = batch["visibility"][batch_idx]  # [N]
+        # Visibility mask for the first 70 keypoints (1 = visible, 0 = invisible).
+        # Slice to first 70 because batch["visibility"] may have been extended
+        # with dense-vertex visibility (length 70 + K) for the loss path.
+        visibility = batch["visibility"][batch_idx, :70]  # [N]
         visible_mask = visibility
         invisible_mask = ~visible_mask
 
         pred_kp2d_cropped_normalised = predictions["mhr"]["pred_keypoints_2d_cropped"][
-            batch_idx
+            batch_idx, :70
         ]  # [N, 2]
         pred_kp2d_cropped_coords = (
             pred_kp2d_cropped_normalised + 0.5
@@ -1752,7 +1754,7 @@ class Visualiser(pl.LightningModule):
         sample_kp2d_cropped_normalized = predictions[
             "kp2d_samples_cropped"
         ][  # j2d_samples_cropped
-            batch_idx
+            batch_idx, :, :70
         ]  # [num_samples, N, 2]
         num_samples = sample_kp2d_cropped_normalized.shape[0]
         if self.max_plots is not None:

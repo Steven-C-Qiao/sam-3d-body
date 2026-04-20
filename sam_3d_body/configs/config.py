@@ -12,6 +12,7 @@ _C.TRAIN.USE_FP16 = True
 _C.TRAIN.FP16_TYPE = "high"
 _C.TRAIN.LR = 2e-5
 _C.TRAIN.NUM_EPOCHS = 50
+_C.TRAIN.MAX_STEPS = -1
 _C.TRAIN.CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 _C.TRAIN.FREEZE_BACKBONE = True
 

@@ -1,0 +1,12 @@
+DATASET:
+  BATCH_SIZE: 4
+  NUM_WORKERS: 2
+  DATASETS_AND_RATIOS: closeup-suburbc-bmi
+  VAL_DS: closeup-suburbc-bmi
+MODEL:
+  DENSE_KEYPOINTS: true
+LOSS:
+  BYPASS_VISIBILITY: false
+  KP3D_WEIGHT: 0.0
+TRAIN:
+  MAX_STEPS: 10

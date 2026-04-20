@@ -12,7 +12,7 @@ from torch.utils.data import default_collate
 from .bedlam import constants
 from .bedlam.constants import NUM_JOINTS_SMPLX
 from .bedlam.utils.image_utils import random_crop, read_img
-from ..configs.config import DATASET_FILES, DATASET_FOLDERS
+from ..configs.config import DATASET_FILES, DATASET_FOLDERS, INDICES_PATH
 from ..configs.config import (
     SMPL_MODEL_DIR,
     SMPLX_MODEL_DIR,
@@ -20,6 +20,10 @@ from ..configs.config import (
     SMPLX2SMPL,
 )
 from smplx import SMPL, SMPLX
+
+# Mesh-vertex indices used to extract dense keypoint supervision. Loaded once
+# so datasets and the trainer share the same ordering.
+MHR_DENSE_KP_INDICES = np.load(INDICES_PATH)
 
 
 def bedlam_collate(batch):
@@ -80,9 +84,22 @@ class DatasetHMR(Dataset):
             .replace("png", "masks")
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
-        
+
         visibility_path = DATASET_FILES[is_train][dataset].replace('all_npz_12_training_mhr_conditioned', 'visibility_labels')
         self.visibility = np.load(visibility_path[:-4] + "_visibility_308.npz")["visibility_308"]
+
+        # Dense-vertex visibility subset at the MHR_DENSE_KP_INDICES vertices.
+        # Fallback to all-true if the precomputed file is missing for this shard.
+        vv_path = visibility_path[:-4] + "_vertex_visibility.npz"
+        if os.path.exists(vv_path):
+            vv_full = np.load(vv_path)["vertex_visibility"]
+            self.dense_visibility = vv_full[:, MHR_DENSE_KP_INDICES].astype(bool)
+            del vv_full
+        else:
+            logger.info(f"[dense-kp] {vv_path} missing; using all-true fallback for {dataset}")
+            self.dense_visibility = np.ones(
+                (self.visibility.shape[0], len(MHR_DENSE_KP_INDICES)), dtype=bool
+            )
         # self.visibility = np.ones((self.data["imgname"].shape[0], 1))
         self.imgname = self.data["imgname"]
         # Bounding boxes are assumed to be in the center and scale format
@@ -219,6 +236,7 @@ class DatasetHMR(Dataset):
         item["face_expr_coeffs"] = self.face_expr_params[index]
         item["scale_params"] = self.model_params[index, -68:]
         item["visibility"] = self.visibility[index, :70]
+        item["dense_visibility"] = self.dense_visibility[index]
 
         item["cam_int"] = self.cam_int[index]
         item["focal_length"] = torch.tensor(
@@ -252,7 +270,7 @@ class MultiViewEvaluationDataset(Dataset):
     """
 
     def __init__(
-        self, options, dataset, num_view=2, use_augmentation=False, is_train=False
+        self, options, dataset, num_view=2, use_augmentation=False, is_train=False,
     ):
         super(MultiViewEvaluationDataset, self).__init__()
 
@@ -268,6 +286,22 @@ class MultiViewEvaluationDataset(Dataset):
         )
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
         self.imgname = self.data["imgname"]
+
+        # Dense-vertex visibility subset at the MHR_DENSE_KP_INDICES vertices.
+        # Fallback to all-true if the precomputed file is missing for this shard.
+        vis_path = DATASET_FILES[is_train][dataset].replace(
+            "all_npz_12_training_mhr_conditioned", "visibility_labels"
+        )
+        vv_path = vis_path[:-4] + "_vertex_visibility.npz"
+        if os.path.exists(vv_path):
+            vv_full = np.load(vv_path)["vertex_visibility"]
+            self.dense_visibility = vv_full[:, MHR_DENSE_KP_INDICES].astype(bool)
+            del vv_full
+        else:
+            logger.info(f"[dense-kp] {vv_path} missing; using all-true fallback for {dataset}")
+            self.dense_visibility = np.ones(
+                (self.imgname.shape[0], len(MHR_DENSE_KP_INDICES)), dtype=bool
+            )
         self.scale = self.data["scale"].astype(np.float32)
         self.center = self.data["center"].astype(np.float32)
         self.cam_int = self.data["cam_int"].astype(np.float32)
@@ -538,6 +572,8 @@ class MultiViewEvaluationDataset(Dataset):
         item["sample_index"] = index
         item["dataset_name"] = self.dataset
         item["serno"] = self.serno[index]
+
+        item["dense_visibility"] = torch.from_numpy(self.dense_visibility[index])
 
         return item
 

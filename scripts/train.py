@@ -143,7 +143,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, con
 
     trainer = pl.Trainer(
         max_epochs=cfg.TRAIN.NUM_EPOCHS,
-        # max_steps=50,  # stop training after 100 steps for profiling
+        max_steps=getattr(cfg.TRAIN, "MAX_STEPS", -1),
         devices="auto",
         # strategy=DDPStrategy(find_unused_parameters=True),
         strategy="auto",

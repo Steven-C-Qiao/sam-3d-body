@@ -1,35 +1,5 @@
 # Claude Code Context
 
-## Environment
-
-To activate the Python environment for this project:
-
-```bash
-source /home/mifs/cq244/miniconda3/etc/profile.d/conda.sh && conda activate prohmr
-```
-
-**Why `source ~/.bashrc` doesn't work:** `.bashrc` exits early for non-interactive shells (line 6-9 `case $-`), so conda never gets initialised. Source `conda.sh` directly instead.
-
-To run a test training experiment:
-
-```
-python scripts/train.py -E exp/exp_claude_test --gpus 0 --dev
-```
-
-To run a test merging experiment:
-
-```
-python scripts/merging.py -E exp/<exp_test> --gpus 0 -D 4d-dress -L exp/<EXP_NAME>/saved_models/last.ckpt
-```
-
-## GPU Usage
-
-This is a shared cluster. Always prioritise GPUs 0 and 1 for any runs. Set this via:
-
-```bash
-export CUDA_VISIBLE_DEVICES=0,1
-```
-
 ## Project Overview
 
 SAM 3D Body reconstructs full 3D human body meshes (pose, shape, camera) from a single RGB image. It uses a promptable architecture (optional 2D keypoint/mask inputs) and a custom parametric body representation called **MHR (Momentum Human Rig)**, which decouples skeletal structure from surface shape.
