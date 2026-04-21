@@ -6,6 +6,10 @@ sam_3d_body/configs/paths.py
 assets/
 temp/
 
+# isambard
+b2_3db_preds/
+*.out
+
 # Python bytecode
 __pycache__/
 *.py[cod]
