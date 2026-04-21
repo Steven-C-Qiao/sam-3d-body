@@ -13,13 +13,6 @@ from .bedlam import constants
 from .bedlam.constants import NUM_JOINTS_SMPLX
 from .bedlam.utils.image_utils import random_crop, read_img
 from ..configs.config import DATASET_FILES, DATASET_FOLDERS, INDICES_PATH
-from ..configs.config import (
-    SMPL_MODEL_DIR,
-    SMPLX_MODEL_DIR,
-    JOINT_REGRESSOR_H36M,
-    SMPLX2SMPL,
-)
-from smplx import SMPL, SMPLX
 
 # Mesh-vertex indices used to extract dense keypoint supervision. Loaded once
 # so datasets and the trainer share the same ordering.
@@ -183,7 +176,17 @@ class DatasetHMR(Dataset):
         center = self.center[index].copy()
         # mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
 
-        sc = 1.0
+        sc = self.scale_aug()
+
+        if self.is_train and self.options.CROP_FACTOR > 0:
+            if np.random.rand() < self.options.CROP_PROB:
+                center, scale = random_crop(
+                    center, scale,
+                    crop_scale_factor=1 - self.options.CROP_FACTOR,
+                    axis='all',
+                )
+                center = np.asarray(center, dtype=np.float32)
+                scale = np.float32(scale)
 
         imgname = os.path.join(self.img_dir, self.imgname[index])
         maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + "_env.png")

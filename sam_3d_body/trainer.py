@@ -187,6 +187,28 @@ class Trainer(BaseLightningModule):
 
         loss_dict = self.criterion(outputs, batch)
 
+        probe_every = getattr(self.cfg.TRAIN, "GRAD_NORM_PROBE", 0)
+        if probe_every > 0 and int(self.global_step) % probe_every == 0:
+            shared = [p for p in self.parameters() if p.requires_grad]
+            parts = []
+            for name, term in loss_dict.items():
+                if name == "total_loss" or not isinstance(term, torch.Tensor):
+                    continue
+                if not term.requires_grad:
+                    continue
+                grads = torch.autograd.grad(
+                    term, shared, retain_graph=True, allow_unused=True,
+                )
+                sq = term.new_zeros((), dtype=torch.float32)
+                for g in grads:
+                    if g is not None:
+                        sq = sq + g.detach().float().pow(2).sum()
+                parts.append(f"{name}={sq.sqrt().item():.4e}")
+            print(
+                f"[grad-probe step={int(self.global_step)}] " + " ".join(parts),
+                flush=True,
+            )
+
         metrics, vis_verts = self.metrics(outputs, batch)
 
         self.log_and_visualise(
@@ -481,6 +503,16 @@ class Trainer(BaseLightningModule):
             batch["visibility"] = torch.cat(
                 [batch["visibility"].bool(), dense_v], dim=1
             )
+
+        # Occluded-in-original AND in-bounds-after-crop. Bbox scale / random-crop
+        # augmentations can push GT keypoints (joint or dense) outside the crop;
+        # those must not contribute to the 2D/3D keypoint loss.
+        kp2d_norm = batch["keypoints_2d"]  # [B, K, 2] in [-0.5, 0.5] ideally
+        in_bounds = (
+            (kp2d_norm[..., 0] > -0.5) & (kp2d_norm[..., 0] < 0.5)
+            & (kp2d_norm[..., 1] > -0.5) & (kp2d_norm[..., 1] < 0.5)
+        )
+        batch["visibility"] = batch["visibility"].bool() & in_bounds
 
         # --- temp mirror for joints ---
         j2d = project(gt_joint_coords, trans_cam.unsqueeze(1), cam_int)[..., :2]
