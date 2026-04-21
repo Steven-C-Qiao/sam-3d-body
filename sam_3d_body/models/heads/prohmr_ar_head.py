@@ -19,7 +19,11 @@ from sam_3d_body.models.modules.mhr_utils import (
 
 from nflows.flows import ConditionalGlow
 
-from sam_3d_body.models.modules.coupling_layers import ConditionalGlowAffine, ConditionalGlowUnclampedAffine
+from sam_3d_body.models.modules.coupling_layers import (
+    ConditionalGlowAffine,
+    ConditionalGlowUnclampedAffine,
+    ConditionalGlowSpline,
+)
 
 
 class NFARHead(nn.Module):
@@ -66,16 +70,24 @@ class NFARHead(nn.Module):
         }
 
         flow_coupling = getattr(cfg.MODEL, "FLOW_COUPLING", "additive").lower()
+        flow_extra_kwargs = {}
         if flow_coupling == "additive":
             flow_cls = ConditionalGlow
         elif flow_coupling == "affine":
             flow_cls = ConditionalGlowUnclampedAffine
         elif flow_coupling == "clamped_affine":
             flow_cls = ConditionalGlowAffine
+        elif flow_coupling == "rq_spline":
+            flow_cls = ConditionalGlowSpline
+            flow_extra_kwargs = {
+                "num_bins": cfg.MODEL.FLOW_SPLINE_NUM_BINS,
+                "tails": cfg.MODEL.FLOW_SPLINE_TAILS,
+                "tail_bound": cfg.MODEL.FLOW_SPLINE_TAIL_BOUND,
+            }
         else:
             raise ValueError(
                 f"Unsupported MODEL.FLOW_COUPLING='{flow_coupling}'. "
-                "Expected one of: ['additive', 'affine', 'clamped_affine']."
+                "Expected one of: ['additive', 'affine', 'clamped_affine', 'rq_spline']."
             )
         self.flow_coupling = flow_coupling
 
@@ -91,6 +103,7 @@ class NFARHead(nn.Module):
             dropout_probability=flow_config_beta["dropout_probability"],
             context_features=flow_config_beta["context_features"],
             batch_norm_within_layers=False,
+            **flow_extra_kwargs,
         )
         self.flow_theta = flow_cls(
             flow_config_theta["flow_dim"],
@@ -100,6 +113,7 @@ class NFARHead(nn.Module):
             dropout_probability=flow_config_theta["dropout_probability"],
             context_features=flow_config_theta["context_features"],
             batch_norm_within_layers=False,
+            **flow_extra_kwargs,
         )
         self.num_samples = cfg.MODEL.NUM_SAMPLES
         self.shape_perturb_scale = cfg.MODEL.SHAPE_PERTURB_SCALE

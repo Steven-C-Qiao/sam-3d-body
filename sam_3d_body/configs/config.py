@@ -39,6 +39,9 @@ _C.MODEL.HEAD_TYPE = "nf_ar"
 _C.MODEL.FLOW_COUPLING = "clamped_affine"
 _C.MODEL.FLOW_NUM_LAYERS = 8
 _C.MODEL.FLOW_DROPOUT = 0.2
+_C.MODEL.FLOW_SPLINE_NUM_BINS = 10
+_C.MODEL.FLOW_SPLINE_TAIL_BOUND = 3.0
+_C.MODEL.FLOW_SPLINE_TAILS = "linear"
 _C.MODEL.SHAPE_PERTURB_SCALE = 0.0   # multiplier on per-dim GT std noise for shape (45D); 0 = disabled
 _C.MODEL.SCALE_PERTURB_SCALE = 0.0   # multiplier on per-dim GT std noise for scale (10D selected); 0 = disabled
 _C.MODEL.BETA_PERTURB_DETACH = True  # detach perturbed betas from stage-1 graph

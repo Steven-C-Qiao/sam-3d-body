@@ -5,6 +5,7 @@ DATASET:
   VAL_DS: closeup-suburbc-bmi
 MODEL:
   DENSE_KEYPOINTS: true
+  FLOW_COUPLING: rq_spline
 LOSS:
   BYPASS_VISIBILITY: false
   KP3D_WEIGHT: 0.0
