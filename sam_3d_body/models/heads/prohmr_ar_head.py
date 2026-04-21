@@ -79,6 +79,10 @@ class NFARHead(nn.Module):
             )
         self.flow_coupling = flow_coupling
 
+        # BatchNorm inside each coupling's ResidualNet makes the flow's forward
+        # bijection differ between train (batch stats) and eval (running stats),
+        # which breaks log_prob calibration at inference. Disable it — ActNorm
+        # already handles per-channel normalisation and is train/eval-consistent.
         self.flow_beta = flow_cls(
             flow_config_beta["flow_dim"],
             flow_config_beta["layer_hidden_features"],
@@ -86,6 +90,7 @@ class NFARHead(nn.Module):
             flow_config_beta["layer_depth"],
             dropout_probability=flow_config_beta["dropout_probability"],
             context_features=flow_config_beta["context_features"],
+            batch_norm_within_layers=False,
         )
         self.flow_theta = flow_cls(
             flow_config_theta["flow_dim"],
@@ -94,6 +99,7 @@ class NFARHead(nn.Module):
             flow_config_theta["layer_depth"],
             dropout_probability=flow_config_theta["dropout_probability"],
             context_features=flow_config_theta["context_features"],
+            batch_norm_within_layers=False,
         )
         self.num_samples = cfg.MODEL.NUM_SAMPLES
         self.shape_perturb_scale = cfg.MODEL.SHAPE_PERTURB_SCALE

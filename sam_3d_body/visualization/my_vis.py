@@ -2887,6 +2887,131 @@ def vis_merging_predictions(
         f"Saved multiview gallery: {save_path} (shape: {gallery_img.shape})"
     )
 
+def vis_merging_neutral_variance(
+    input_dict,
+    save_dir: str = None,
+    sc: bool = True,
+):
+    """
+    Per-image neutral-space shape+scale uncertainty visualisation.
+
+    For each image in the multi-view batch, renders the parameter-averaged
+    neutral mesh coloured by per-vertex flow-sample std along the body-frame
+    x/y/z axes, from two camera angles (front + side).
+
+    Complements `vis_directional_variance` (posed-space) by isolating
+    shape+scale uncertainty from pose uncertainty — useful for testing whether
+    the flow has learned view-conditional anisotropic uncertainty in shape
+    space.
+
+    Args:
+        sc: If True (default), scale+translation-align each sample to the
+            carrier mesh before computing per-vertex std. Matches PVE-T-SC
+            semantics: removes global-scale variation (which otherwise shows
+            up as std proportional to distance from mesh centre) so the colour
+            reflects pure shape uncertainty. If False, uses raw metre-space
+            std — global-scale uncertainty will dominate extremities.
+
+    Produces one row per image (B*V rows). Each row: 6 mesh panels
+    (3 axes × 2 camera angles). A single shared colourbar is appended on the
+    right of the full figure so colours are directly comparable across all
+    images, axes, and camera angles.
+    """
+    def _to_np(x):
+        return x.cpu().detach().numpy() if isinstance(x, torch.Tensor) else x
+
+    def _to_uint8(float_rgb):
+        return (float_rgb * 255.0).clip(0, 255).astype(np.uint8)
+
+    batch_idx = input_dict["batch_idx"]
+    renderer = input_dict["neutral_renderer"]
+
+    sample_neutral_verts = _to_np(input_dict["sample_neutral_verts"])        # [BV, S, V, 3]
+    carrier_verts_all = _to_np(input_dict["sample_param_avg_neutral_verts"])  # [BV, V, 3]
+
+    BV = sample_neutral_verts.shape[0]
+    generic_cam_t = np.array([0.0, 0.75, 2.5])
+    axis_names = ("std x (width)", "std y (height)", "std z (depth)")
+
+    background = np.zeros((512, 512, 3), dtype=np.float32)
+
+    # ---- Pass 1: compute std per image and the global max for shared colour scale ----
+    std_per_image = []
+    carriers_flipped = []
+    for i in range(BV):
+        sv = sample_neutral_verts[i]             # [S, V, 3]
+        carrier = carrier_verts_all[i].copy()     # [V, 3]
+
+        # Scale+translation-align each sample to the carrier before computing
+        # std, matching PVE-T-SC semantics. Without this, global-scale
+        # variance dominates at extremities (std proportional to radius).
+        if sc:
+            ref = np.broadcast_to(carrier[None], sv.shape)
+            sv = scale_and_translation_transform_batch(sv, ref)
+
+        std_mm = sv.std(axis=0) * 1000.0         # [V, 3]
+        std_per_image.append(std_mm)
+
+        # Display flip to match the neutral-rendering convention used in
+        # vis_merging_neutral (my_vis.py:2979).
+        carrier[:, [1, 2]] *= -1
+        carriers_flipped.append(carrier)
+
+    global_max = max((float(s.max()) for s in std_per_image if s.size), default=1.0)
+    if global_max <= 0.0:
+        global_max = 1.0
+
+    # ---- Pass 2: render all panels with the shared global max ----
+    rows = []
+    for i in range(BV):
+        std_mm = std_per_image[i]
+        carrier = carriers_flipped[i]
+
+        panels = []
+        for cam_label, is_side in (("front", False), ("side", True)):
+            for axis_idx in range(3):
+                dists = std_mm[:, axis_idx]
+                vert_colors = build_vertex_colors(
+                    dists, min_dist=0.0, max_dist=global_max,
+                )
+
+                rendered = renderer(
+                    carrier,
+                    generic_cam_t,
+                    background.copy(),
+                    scene_bg_color=(1, 1, 1),
+                    vertex_colors=vert_colors,
+                    side_view=is_side,
+                    rot_angle=90,
+                )
+                img_out = _to_uint8(rendered)
+                _draw_label_lines(
+                    img_out,
+                    [f"img {i}: {axis_names[axis_idx]} ({cam_label})"],
+                )
+                panels.append(img_out)
+
+        row = np.concatenate(panels, axis=1)
+        rows.append(row)
+
+    stacked = np.concatenate(rows, axis=0)
+    cbar = build_distance_colorbar_rgb(
+        min_dist=0.0,
+        max_dist=global_max,
+        height=stacked.shape[0],
+        width=40,
+    )
+    fig = np.concatenate([stacked, cbar], axis=1)
+
+    if save_dir is not None:
+        fname = os.path.join(save_dir, f"b{batch_idx:03d}_neutral_dir_var.png")
+        fig_bgr = cv2.cvtColor(fig, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(fname, fig_bgr)
+        logger.info(f"Saved neutral variance viz: {fname}")
+
+    return fig
+
+
 def vis_merging_neutral(
     input_dict,
     save_dir: str = None,
@@ -3262,20 +3387,26 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     Per-view gallery of the NF samples with GT overlay for a single serno
     from the multi-view eval pipeline.
 
-    For each of `num_views` input images, two rows are produced:
+    For each of `num_views` input images, three rows are produced:
 
-      Row 1 (front on-image): input image | mean pred + GT | top-N samples + GT
-      Row 2 (side):              blank     | mean side + GT | top-N sample sides + GT
+      Row 1 (front on-image):  input image | mean pred + GT | top-N samples + GT
+      Row 2 (side):               blank    | mean side + GT | top-N sample sides + GT
+      Row 3 (neutral, sc):        blank    | mean neutral+GT| top-N sample neutrals+GT
 
-    Samples are coloured per-vertex by distance to GT (inferno), with a
-    shared colour scale across all views/samples/means, matching
-    `vis_merging_predictions`. GT is overlaid in blue at 50% alpha.
+    Row 3 shows each predicted mesh in neutral (zero) pose, scale+translation-
+    aligned to the GT neutral mesh, overlaid with the GT neutral mesh in blue.
+    Colours reflect per-vertex distance to GT after alignment — i.e. shape-only
+    error, matching PVE-T-SC semantics.
+
+    All three rows share a single colour scale across views/samples/means.
+    GT is overlaid in blue at 50% alpha.
     """
     num_views = input_dict["num_views"]
     batch_idx = input_dict["batch_idx"]
     renderer = input_dict["renderer"]
     # Match vis_samples: black-background side view at focal_length=1000, cam=[0,0,4]
     side_renderer = Renderer(focal_length=1000, faces=renderer.faces)
+    neutral_renderer = input_dict["neutral_renderer"]
 
     outputs = input_dict["outputs"]
     batch = input_dict["batch"]
@@ -3295,6 +3426,11 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     affine_all = _to_np(batch["affine_trans"])                            # (V_f, 1, 2, 3)
     img_size_all = _to_np(batch["img_size"])                              # (V_f, 1, 2)
 
+    # Neutral-space tensors from get_mhr_outputs (for the scale-aligned row).
+    gt_neutral_all = _to_np(input_dict["gt_neutral_verts"])                # (V_f, V, 3)
+    mean_neutral_all = _to_np(input_dict["per_view_neutral_verts"])        # (V_f, V, 3)
+    sample_neutral_all = _to_np(input_dict["sample_neutral_verts"])        # (V_f, N, V, 3)
+
     log_prob_t = outputs.get("uncertainty_output", {}).get("log_prob")
     log_prob = _to_np(log_prob_t) if log_prob_t is not None else None     # (V_f, N) or None
 
@@ -3312,7 +3448,12 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     picked_idx = {}   # view -> array of sample indices (len <= n_vis)
     mean_dists = {}   # view -> (V,)
     sample_dists = {} # view -> (n_vis, V)
-    all_dists = []
+    mean_neutral_sc_verts = {}   # view -> (V, 3) — scale-aligned mean neutral
+    sample_neutral_sc_verts = {} # view -> (n_vis, V, 3) — scale-aligned samples
+    mean_neutral_dists = {}      # view -> (V,)
+    sample_neutral_dists = {}    # view -> (n_vis, V)
+    all_dists_posed = []
+    all_dists_neutral = []
     for view in range(num_views):
         gt_v = gt_verts_all[view]
         gt_v_rooted = gt_v - gt_root_all[view]
@@ -3331,18 +3472,46 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
         mean_v_rooted = mean_verts_all[view] - mean_root_all[view]
         mean_d = np.linalg.norm(mean_v_rooted - gt_v_rooted, axis=1) * 1000.0
         mean_dists[view] = mean_d
-        all_dists.append(mean_d)
+        all_dists_posed.append(mean_d)
 
         sample_roots = j3d_samples_all[view, order, 1, :]       # (n_vis, 3)
         sample_v_rooted = verts_samples[view, order] - sample_roots[:, None]
         s_d = np.linalg.norm(sample_v_rooted - gt_v_rooted[None], axis=-1) * 1000.0
         sample_dists[view] = s_d
-        all_dists.append(s_d.reshape(-1))
+        all_dists_posed.append(s_d.reshape(-1))
 
-    all_concat = np.concatenate(all_dists) if all_dists else np.array([0.0])
-    max_dist_mm = float(all_concat.max()) if all_concat.size else 1.0
+        # Neutral scale+translation-aligned distances (shape-only error).
+        gt_neutral_v = gt_neutral_all[view]                              # (V, 3)
+        mean_neutral_v = mean_neutral_all[view]                          # (V, 3)
+        mean_neutral_sc = scale_and_translation_transform_batch(
+            mean_neutral_v[None], gt_neutral_v[None]
+        )[0]                                                             # (V, 3)
+        mean_neutral_sc_verts[view] = mean_neutral_sc
+        mean_nd = np.linalg.norm(mean_neutral_sc - gt_neutral_v, axis=1) * 1000.0
+        mean_neutral_dists[view] = mean_nd
+        all_dists_neutral.append(mean_nd)
+
+        sample_neutral_v = sample_neutral_all[view, order]               # (n_vis, V, 3)
+        sample_neutral_sc = scale_and_translation_transform_batch(
+            sample_neutral_v,
+            np.broadcast_to(gt_neutral_v[None], sample_neutral_v.shape),
+        )
+        sample_neutral_sc_verts[view] = sample_neutral_sc
+        s_nd = np.linalg.norm(sample_neutral_sc - gt_neutral_v[None], axis=-1) * 1000.0
+        sample_neutral_dists[view] = s_nd
+        all_dists_neutral.append(s_nd.reshape(-1))
+
+    posed_concat = np.concatenate(all_dists_posed) if all_dists_posed else np.array([0.0])
+    max_dist_mm = float(posed_concat.max()) if posed_concat.size else 1.0
     if max_dist_mm <= 0.0:
         max_dist_mm = 1.0
+
+    neutral_concat = (
+        np.concatenate(all_dists_neutral) if all_dists_neutral else np.array([0.0])
+    )
+    max_dist_mm_neutral = float(neutral_concat.max()) if neutral_concat.size else 1.0
+    if max_dist_mm_neutral <= 0.0:
+        max_dist_mm_neutral = 1.0
 
     # ---- Reference panel size: cropped image size of view 0 (W, H) ----
     img_size_0 = img_size_all[0, 0]
@@ -3361,6 +3530,7 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
         return (arr01 * 255.0).clip(0, 255).astype(np.uint8)
 
     generic_cam_t = np.array([0.0, 0.0, 4.0])
+    neutral_cam_t = np.array([0.0, 0.75, 2.5])
     all_rows = []
 
     for view in range(num_views):
@@ -3413,6 +3583,29 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             blended = a * g[..., :3].astype(np.float32) + (1.0 - a) * p
             return _to_uint8(blended)
 
+        def render_neutral(pred_sc_verts, dists_mm):
+            # Apply display flip used by other neutral renderers (my_vis.py:2979).
+            pred_vis = pred_sc_verts.copy()
+            pred_vis[:, [1, 2]] *= -1
+            gt_vis = gt_neutral_all[view].copy()
+            gt_vis[:, [1, 2]] *= -1
+
+            colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm_neutral)
+            p = neutral_renderer(
+                pred_vis, neutral_cam_t, black_bg.copy(),
+                scene_bg_color=(0, 0, 0),
+                vertex_colors=colors,
+            )
+            g = neutral_renderer(
+                gt_vis, neutral_cam_t, black_bg.copy(),
+                mesh_base_color=LIGHT_BLUE,
+                scene_bg_color=(0, 0, 0),
+                return_rgba=True,
+            )
+            a = g[..., 3:4].astype(np.float32) * 0.5
+            blended = a * g[..., :3].astype(np.float32) + (1.0 - a) * p
+            return _to_uint8(blended)
+
         # --- front row ---
         img_crop = cv2.warpAffine(img.copy(), affine, img_size_v)
         row1 = [_label(_resize(img_crop), f"view {view}")]
@@ -3421,7 +3614,7 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
 
         order = picked_idx[view]
         for rank, k in enumerate(order):
-            cam_k = pred_cam_t_samples[view, k] if pred_cam_t_samples is not None else mean_cam_t_all[view]
+            cam_k = pred_cam_t_samples[view, k]
             front = render_front(verts_samples[view, k], cam_k, sample_dists[view][rank])
             label = (
                 f"s{rank} lp={float(log_prob[view, k]):.1f}"
@@ -3442,17 +3635,39 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
         while len(row2) < 2 + max_samples:
             row2.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
 
+        # --- neutral (scale-corrected) row ---
+        row3 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
+        mean_neutral = render_neutral(
+            mean_neutral_sc_verts[view], mean_neutral_dists[view]
+        )
+        row3.append(_label(_resize(mean_neutral), "mean neutral sc"))
+        for rank, k in enumerate(order):
+            neutral_panel = render_neutral(
+                sample_neutral_sc_verts[view][rank],
+                sample_neutral_dists[view][rank],
+            )
+            row3.append(_label(_resize(neutral_panel), f"s{rank} neutral"))
+        while len(row3) < 2 + max_samples:
+            row3.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
+
         all_rows.append(np.concatenate(row1, axis=1))
         all_rows.append(np.concatenate(row2, axis=1))
+        all_rows.append(np.concatenate(row3, axis=1))
 
     grid = np.concatenate(all_rows, axis=0)
-    cbar = build_distance_colorbar_rgb(
+    cbar_posed = build_distance_colorbar_rgb(
         min_dist=0.0,
         max_dist=max_dist_mm,
         height=grid.shape[0],
         width=60,
     )
-    grid = np.concatenate([grid, cbar], axis=1)
+    cbar_neutral = build_distance_colorbar_rgb(
+        min_dist=0.0,
+        max_dist=max_dist_mm_neutral,
+        height=grid.shape[0],
+        width=60,
+    )
+    grid = np.concatenate([grid, cbar_posed, cbar_neutral], axis=1)
 
     if save_dir is not None:
         out_path = os.path.join(save_dir, f"b{batch_idx:03d}_merging_samples.png")

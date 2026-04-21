@@ -4,6 +4,7 @@ checkpoints/
 tinker/data
 sam_3d_body/configs/paths.py
 assets/
+temp/
 
 # Python bytecode
 __pycache__/

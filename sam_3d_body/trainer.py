@@ -35,6 +35,7 @@ from .visualization.my_vis import (
     vis_samples,
     vis_directional_variance,
     vis_merging_neutral,
+    vis_merging_neutral_variance,
     vis_merging_predictions,
     vis_merging_samples,
 )
@@ -759,6 +760,7 @@ class Trainer(BaseLightningModule):
                 vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
                 vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False)
                 vis_merging_samples(outs, save_dir=self.vis_save_dir, max_samples=4)
+                vis_merging_neutral_variance(outs, sc=True, save_dir=self.vis_save_dir)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
             # vis_neutral(outs, sc=False, save_dir=self.vis_save_dir, plot_hist=True)
