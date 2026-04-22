@@ -83,7 +83,6 @@ class DatasetHMR(Dataset):
         if os.path.exists(v308_path):
             self.visibility = np.load(v308_path)["visibility_308"]
         else:
-            logger.info(f"[visibility] {v308_path} missing; using all-true fallback for {dataset}")
             self.visibility = np.ones((self.data["imgname"].shape[0], 308), dtype=bool)
 
         # Dense-vertex visibility at the MHR_DENSE_KP_INDICES vertices — loaded
@@ -94,7 +93,6 @@ class DatasetHMR(Dataset):
         if os.path.exists(vv_path):
             self.dense_visibility = np.load(vv_path)["vertex_visibility"].astype(bool)
         else:
-            logger.info(f"[dense-kp] {vv_path} missing; using all-true fallback for {dataset}")
             self.dense_visibility = np.ones(
                 (self.visibility.shape[0], len(MHR_DENSE_KP_INDICES)), dtype=bool
             )
@@ -290,9 +288,13 @@ class DatasetHMR(Dataset):
     def __len__(self):
         mult = 0.8
         if self.is_train and "agora" not in self.dataset and "3dpw" not in self.dataset:
-            return int(mult * self.options.CROP_PERCENT * len(self.imgname))
+            n = int(mult * self.options.CROP_PERCENT * len(self.imgname))
         else:
-            return int(mult * len(self.imgname))
+            n = int(mult * len(self.imgname))
+        cap = getattr(self.options, "MAX_SAMPLES_PER_DS", -1)
+        if cap is not None and cap > 0:
+            n = min(n, cap)
+        return n
 
 
 class MultiViewEvaluationDataset(Dataset):
@@ -331,7 +333,6 @@ class MultiViewEvaluationDataset(Dataset):
         if os.path.exists(vv_path):
             self.dense_visibility = np.load(vv_path)["vertex_visibility"].astype(bool)
         else:
-            logger.info(f"[dense-kp] {vv_path} missing; using all-true fallback for {dataset}")
             self.dense_visibility = np.ones(
                 (self.imgname.shape[0], len(MHR_DENSE_KP_INDICES)), dtype=bool
             )

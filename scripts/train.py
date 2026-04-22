@@ -75,6 +75,10 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, con
         always_visualise=args.plot,
     )
 
+    # Lightning only appends "/dataloader_idx_N" when >1 val dataloaders exist.
+    # With the 4D-DRESS loader skipped (path missing), only one remains and the
+    # logged key is plain "val_total_loss".
+    monitor_key = "val_total_loss/dataloader_idx_0" if os.path.isdir("/scratches/kyuban/share/4DDress") else "val_total_loss"
     checkpoint_kwargs = {
         "dirpath": model_save_dir,
         "filename": "val_loss_{epoch:03d}",
@@ -82,7 +86,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, con
         "every_n_epochs": 1,
         "save_last": False,
         "verbose": True,
-        "monitor": "val_total_loss/dataloader_idx_0",
+        "monitor": monitor_key,
         "mode": "min",
     }
     checkpoint_callbacks = [ModelCheckpoint(**checkpoint_kwargs)]
@@ -151,8 +155,8 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, con
         logger=tensorboard_logger,
         num_sanity_val_steps=0,
         gradient_clip_val=1.0,
-        # precision="16-mixed" if cfg.TRAIN.USE_FP16 else 32,
-        # profiler='simple',
+        precision="16-mixed" if cfg.TRAIN.USE_FP16 else "32-true",
+        profiler=(os.environ.get("PL_PROFILER") or None),
     )
     trainer.fit(model, ckpt_path=resume_path)
 

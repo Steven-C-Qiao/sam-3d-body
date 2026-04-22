@@ -416,11 +416,13 @@ class Trainer(BaseLightningModule):
         # if batch["dataset_name"][0] in ("4d-dress", "ssp3d"):
         #     batch["model_params"][:, :3] = 0
 
-        gt_mhr_output = mhr_model.mhr(
-            identity_coeffs=batch["shape_params"],
-            model_parameters=batch["model_params"],
-            face_expr_coeffs=batch["face_expr_coeffs"],
-        )
+        # MHR TorchScript requires fp32 (sparse addmm not implemented for fp16/bf16).
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            gt_mhr_output = mhr_model.mhr(
+                identity_coeffs=batch["shape_params"].float(),
+                model_parameters=batch["model_params"].float(),
+                face_expr_coeffs=batch["face_expr_coeffs"].float(),
+            )
         gt_verts, gt_skeleton_state = gt_mhr_output
         gt_joint_coords, gt_joint_quats, _ = torch.split(
             gt_skeleton_state, [3, 4, 1], dim=2
@@ -566,8 +568,11 @@ class Trainer(BaseLightningModule):
                     dataset=dataset_name,
                 )
             )
-        from sam_3d_body.data.d4dress_dataset import D4DressDataset
-        val_datasets.append(D4DressDataset(cfg=self.cfg, ids=None))
+        try:
+            from sam_3d_body.data.d4dress_dataset import D4DressDataset
+            val_datasets.append(D4DressDataset(cfg=self.cfg, ids=None))
+        except (FileNotFoundError, OSError) as e:
+            logger.warning(f"Skipping 4D-DRESS eval dataset (not available): {e}")
         return val_datasets
 
     def val_dataloader(self):

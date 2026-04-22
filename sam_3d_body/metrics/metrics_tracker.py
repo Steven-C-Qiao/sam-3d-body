@@ -238,6 +238,7 @@ class Metrics(pl.LightningModule):
         return verts
 
     @torch.no_grad()
+    @torch.amp.autocast(device_type="cuda", enabled=False)
     def forward(self, predictions, batch):
         metrics = {}
         vis_verts = {}

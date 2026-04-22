@@ -90,6 +90,7 @@ _C.DATASET.DATASETS_AND_RATIOS_FULL = 'static-hdri-bbox44-smplx_agora-body-bbox4
 _C.DATASET.DATASETS_AND_RATIOS = 'static-hdri-bbox44-smplx_agora-body-bbox44-smplx_zoom-suburbd-bbox44-smplx_closeup-suburba-bbox44-smplx_closeup-suburbb-bbox44-smplx_closeup-suburbc-bbox44-smplx_closeup-suburbd-bbox44-smplx_closeup-gym-bbox44-smplx_zoom-gym-bbox44-smplx_static-gym-bbox44-smplx_static-office-bbox44-smplx_orbit-office-bbox44-smplx_static-hdri-zoomed-bbox44-smplx_pitchup-stadium-bbox44-smplx_pitchdown-stadium-bbox44-smplx_closeup-suburbb-bmi-bbox44-smplx_closeup-suburbc-bmi-bbox44-smplx_static-suburbd-bmi-bbox44-smplx_zoom-gym-bmi-bbox44-smplx_static-office-hair-bbox44-smplx_zoom-suburbd-hair-bbox44-smplx_static-gym-hair-bbox44-smplx_orbit-archviz-19-bbox44-smplx_orbit-archviz-12-bbox44-smplx_orbit-archviz-10-bbox44-smplx'
 
 _C.DATASET.CROP_PERCENT = 0.8
+_C.DATASET.MAX_SAMPLES_PER_DS = -1  # >0: cap each sub-dataset length for fast iteration
 _C.DATASET.ALB = True
 _C.DATASET.ALB_PROB = 0.5
 _C.DATASET.proj_verts = False
