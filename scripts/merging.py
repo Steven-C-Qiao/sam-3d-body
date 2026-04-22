@@ -52,7 +52,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
 
     # In dev mode, restrict BEDLAM training datasets to a single small subset
     if dev:
-        cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
+        cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri-bbox44-smplx"
 
     
     cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH = (

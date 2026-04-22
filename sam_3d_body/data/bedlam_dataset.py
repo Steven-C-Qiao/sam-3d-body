@@ -79,7 +79,12 @@ class DatasetHMR(Dataset):
         self.data = np.load(DATASET_FILES[is_train][dataset], allow_pickle=True)
 
         visibility_path = DATASET_FILES[is_train][dataset].replace('all_npz_12_training_mhr_conditioned', 'visibility_labels')
-        self.visibility = np.load(visibility_path[:-4] + "_visibility_308.npz")["visibility_308"]
+        v308_path = visibility_path[:-4] + "_visibility_308.npz"
+        if os.path.exists(v308_path):
+            self.visibility = np.load(v308_path)["visibility_308"]
+        else:
+            logger.info(f"[visibility] {v308_path} missing; using all-true fallback for {dataset}")
+            self.visibility = np.ones((self.data["imgname"].shape[0], 308), dtype=bool)
 
         # Dense-vertex visibility at the MHR_DENSE_KP_INDICES vertices — loaded
         # from a pre-subset (N, K) file. Regenerate with

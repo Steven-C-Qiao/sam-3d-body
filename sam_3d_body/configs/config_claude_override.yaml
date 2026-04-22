@@ -1,8 +1,8 @@
 DATASET:
   BATCH_SIZE: 4
   NUM_WORKERS: 2
-  DATASETS_AND_RATIOS: closeup-suburbc-bmi
-  VAL_DS: closeup-suburbc-bmi
+  DATASETS_AND_RATIOS: closeup-suburbc-bmi-bbox44-smplx
+  VAL_DS: closeup-suburbc-bmi-bbox44-smplx
 MODEL:
   DENSE_KEYPOINTS: true
   FLOW_COUPLING: rq_spline

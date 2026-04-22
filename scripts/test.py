@@ -33,7 +33,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False):
     if dev:
         cfg.TRAIN.NUM_EPOCHS = 5
         cfg.DATASET.BATCH_SIZE = 2
-        cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri"
+        cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri-bbox44-smplx"
         exp_dir = "exp/exp_test"
         num_sanity_val_steps = 0
     else:

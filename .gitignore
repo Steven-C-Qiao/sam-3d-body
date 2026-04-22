@@ -7,8 +7,10 @@ assets/
 temp/
 
 # isambard
-b2_3db_preds/
 *.out
+isambard/
+b2_3db_preds/
+sam_3d_body/configs/config_claude_override.yaml
 
 # Python bytecode
 __pycache__/
