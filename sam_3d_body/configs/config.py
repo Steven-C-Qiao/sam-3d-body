@@ -37,7 +37,7 @@ _C.MODEL.MODEL_CAM = True
 
 ##########################################
 _C.MODEL.DECODER.USE_LORA = True
-_C.MODEL.NUM_SAMPLES = 25
+_C.MODEL.NUM_SAMPLES = 4
 _C.MODEL.HEAD_TYPE = "nf_ar"
 _C.MODEL.FLOW_COUPLING = "clamped_affine"
 _C.MODEL.FLOW_NUM_LAYERS = 8
