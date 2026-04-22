@@ -19,13 +19,6 @@ from pytorch3d.transforms import (
     matrix_to_euler_angles,
 )
 
-# path = "/scratches/juban/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/"
-path = "/scratches/columbo2/cq244/sam-3d-body/checkpoints/sam-3d-body-dinov3/"
-
-# scale_bias = np.load(os.path.join(path, "scale_mean.npy"))
-# scale_comps = np.load(os.path.join(path, "scale_comps.npy"))
-
-
 def aa_to_euler(aa, euler_convention="XYZ"):
     rotmat = axis_angle_to_matrix(aa)
     euler = matrix_to_euler_angles(rotmat, euler_convention)

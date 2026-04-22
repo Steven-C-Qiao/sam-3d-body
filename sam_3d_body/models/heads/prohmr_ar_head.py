@@ -410,6 +410,9 @@ class NFARHead(nn.Module):
             "context_theta": context_theta,
         }
 
+    # nflows (rq_spline especially) has indexing ops that break under autocast
+    # fp16 — keep the whole NF head in fp32 regardless of outer AMP context.
+    @torch.amp.autocast(device_type="cuda", enabled=False)
     def forward(
         self,
         flow_context: torch.Tensor,
@@ -421,6 +424,11 @@ class NFARHead(nn.Module):
         Given context and mean predictions, compute residual uncertainty by NF
         sampling needs to be handled here, instead of in model forward
         """
+        flow_context = flow_context.float()
+        mean_pred = {
+            k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+            for k, v in mean_pred.items()
+        }
         if num_samples <= 0:
             num_samples = self.num_samples
 

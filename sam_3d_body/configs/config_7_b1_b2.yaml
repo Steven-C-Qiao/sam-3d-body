@@ -1,0 +1,105 @@
+MODEL:
+  FLOW_COUPLING: "rq_spline"
+  FLOW_NUM_LAYERS: 8
+  FLOW_DROPOUT: 0.5
+LOSS:
+  KP2D_WEIGHT: 5000.0
+  PARAM_NLL_WEIGHT: 0.5
+
+DATASET:
+  # Disabled until the relevant BEDLAM2 .tar archives are extracted and labels
+  # generated. Re-insert the token into DATASETS_AND_RATIOS below once ready.
+  # Missing label npz (24):
+  #   city-dolly-moyo2-smplx-notest
+  #   hdri-moyo2-smplx-notest
+  #   city-orbit-moyo3-smplx-notest
+  #   city-dollyz-moyo-smplx-notest
+  #   hdri-b2v30-smplx-notest
+  #   hdri-b2v40-smplx-notest
+  #   rome-dollyz-zoom-b2v40-smplx-notest
+  #   rome-orbit-zoom-b2v40-smplx-notest
+  #   rome-dolly-zoom-b2v40-smplx-notest
+  #   rome-tracking-b2v40-smplx-notest
+  #   rome-vcam-portrait-b2v40-smplx-notest
+  #   chemicalplant-dollyz-zoom-b2v30-smplx-notest
+  #   rome-vcam-portrait-b2v30-smplx-notest
+  #   chemicalplant-vcam-portrait-b2v30-smplx-notest
+  #   rome-vcam-b2v31-smplx-notest
+  #   chemicalplant-dolly-zoom-b2v30-smplx-notest
+  #   chemicalplant-vcamego-b2v30-smplx-notest
+  #   ai1102-vcamego-b2v30-smplx-notest
+  #   yakohama-vcamego-b2v30-smplx-notest
+  #   ai1105-upperbody-b2v30-smplx-notest
+  #   yakohama-upperbody-b2v30-smplx-notest
+  #   chemicalplant-upperbody-b2v30-smplx-notest
+  #   middleeasy-upperbody-b2v30-smplx-notest
+  #   middleeast-vacam-b2v40-smplx-notest
+  # Missing image dir (1):
+  #   bus-orbit-zoom-b2v21-smplx-notest
+  DATASETS_AND_RATIOS: "\
+    static-hdri-bbox44-smplx_\
+    agora-body-bbox44-smplx_\
+    zoom-suburbd-bbox44-smplx_\
+    closeup-suburba-bbox44-smplx_\
+    closeup-suburbb-bbox44-smplx_\
+    closeup-suburbc-bbox44-smplx_\
+    closeup-suburbd-bbox44-smplx_\
+    closeup-gym-bbox44-smplx_\
+    zoom-gym-bbox44-smplx_\
+    static-gym-bbox44-smplx_\
+    static-office-bbox44-smplx_\
+    orbit-office-bbox44-smplx_\
+    static-hdri-zoomed-bbox44-smplx_\
+    pitchup-stadium-bbox44-smplx_\
+    pitchdown-stadium-bbox44-smplx_\
+    closeup-suburbb-bmi-bbox44-smplx_\
+    closeup-suburbc-bmi-bbox44-smplx_\
+    static-suburbd-bmi-bbox44-smplx_\
+    zoom-gym-bmi-bbox44-smplx_\
+    static-office-hair-bbox44-smplx_\
+    zoom-suburbd-hair-bbox44-smplx_\
+    static-gym-hair-bbox44-smplx_\
+    orbit-archviz-19-bbox44-smplx_\
+    orbit-archviz-12-bbox44-smplx_\
+    orbit-archviz-10-bbox44-smplx_\
+    city-dolly-moyo1-smplx-notest_\
+    yoga-orbit-moyo-smplx-notest_\
+    yoga-static-moyo-smplx-notest_\
+    city-orbit-moyo1-smplx-notest_\
+    hdri-moyo-smplx-notest_\
+    city-orbit-moyo2-smplx-notest_\
+    stadium-moyo-smplx-notest_\
+    city-tracking-b2v01-smplx-notest_\
+    city-tracking-b2v02-smplx-notest_\
+    bus-tracking-b2v01-smplx-notest_\
+    bus-orbit-b2v01-smplx-notest_\
+    stadium-b2v01-smplx-notest_\
+    archmodel-dolly-b2v01-smplx-notest_\
+    hdri-b2v01-smplx-notest_\
+    citynight-tracking-b2v01-smplx-notest_\
+    hdri-b2v02-smplx-notest_\
+    hdri-b2v03-smplx-notest_\
+    ai0805-orbit-b2v01-smplx-notest_\
+    ai1004-orbit-b2v01-smplx-notest_\
+    ai1004-tracking-b2v01-smplx-notest_\
+    archmodel-dollyz-b2v01-smplx-notest_\
+    hdri-b2v11-smplx-notest_\
+    ai1004-tracking-b2v11-smplx-notest_\
+    bus-tracking-b2v11-smplx-notest_\
+    ai0901-lookat-b2v11-smplx-notest_\
+    ai0901-orbit-portrait-b2v11-smplx-notest_\
+    ai0901-static-portrait-b2v11-smplx-notest_\
+    archmodel-zoom-b2v11-smplx-notest_\
+    ai0805-orbit-portrait-b2v11-smplx-notest_\
+    bus-orbit-zoom-b2v11-smplx-notest_\
+    ai0805-vcam-b2v11-smplx-notest_\
+    ai0805-vcam-b2v12-smplx-notest_\
+    ai1004-vcam-portrait-b2v11-smplx-notest_\
+    ai1101-vcam-portrait-b2v11-smplx-notest_\
+    hdri-b2v21-smplx-notest_\
+    ai1101-vcam-portrait-b2v21-smplx-notest_\
+    ai1105-vcam-b2v21-smplx-notest_\
+    ai1102-vcam-portrait-b2v21-smplx-notest_\
+    ai1004-tracking-b2v21-smplx-notest_\
+    bus-orbit-zoom-b2v22-smplx-notest_\
+    archmodel-tracking-b2v02-smplx-notest"

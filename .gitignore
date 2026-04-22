@@ -6,6 +6,12 @@ sam_3d_body/configs/paths.py
 assets/
 temp/
 
+# isambard
+*.out
+isambard/
+b2_3db_preds/
+sam_3d_body/configs/config_claude_override.yaml
+
 # Python bytecode
 __pycache__/
 *.py[cod]

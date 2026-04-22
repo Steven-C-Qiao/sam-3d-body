@@ -224,9 +224,10 @@ class MHRHead(nn.Module):
             # Zero out non-hand parameters
             model_params[:, self.nonhand_param_idxs] = 0
 
-        curr_skinned_verts, curr_skel_state = self.mhr(
-            shape_params, model_params, expr_params
-        )
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            curr_skinned_verts, curr_skel_state = self.mhr(
+                shape_params.float(), model_params.float(), expr_params.float()
+            )
         curr_joint_coords, curr_joint_quats, _ = torch.split(
             curr_skel_state, [3, 4, 1], dim=2
         )
