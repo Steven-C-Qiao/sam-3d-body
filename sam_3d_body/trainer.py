@@ -307,6 +307,7 @@ class Trainer(BaseLightningModule):
                 overlay_gt=True,
                 plot_side=True,
                 plot_neutral=True,
+                max_sample=4,
             )
             rend_img = vis_prediction(
                 image,

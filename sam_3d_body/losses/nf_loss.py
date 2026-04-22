@@ -67,10 +67,14 @@ class Loss(pl.LightningModule):
                 self.nf_head.num_shape_comps :,
             ]
 
-            shape_sample_true = mean_pred["shape"] + shape_residual_true
-            scale_sample_selected_true = (
-                mean_pred["scale_68D"][..., scale_indices] + scale_residual_true
-            )
+            shape_sample_true = mean_pred["shape"]
+            if self.nf_head.num_shape_comps > 0:
+                shape_sample_true = shape_sample_true + shape_residual_true
+            scale_sample_selected_true = mean_pred["scale_68D"][..., scale_indices]
+            if self.nf_head.num_scale_comps > 0:
+                scale_sample_selected_true = (
+                    scale_sample_selected_true + scale_residual_true
+                )
 
             context_theta_parts = [
                 flow_context_raw,

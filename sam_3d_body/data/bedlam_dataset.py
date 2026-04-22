@@ -178,11 +178,14 @@ class DatasetHMR(Dataset):
 
         sc = self.scale_aug()
 
-        if self.is_train and self.options.CROP_FACTOR > 0:
+        if self.is_train and self.options.CROP_FACTOR[1] > 0:
             if np.random.rand() < self.options.CROP_PROB:
+                cf = np.random.uniform(
+                    self.options.CROP_FACTOR[0], self.options.CROP_FACTOR[1]
+                )
                 center, scale = random_crop(
                     center, scale,
-                    crop_scale_factor=1 - self.options.CROP_FACTOR,
+                    crop_scale_factor=1 - cf,
                     axis='all',
                 )
                 center = np.asarray(center, dtype=np.float32)
@@ -464,6 +467,18 @@ class MultiViewEvaluationDataset(Dataset):
         selected_indices = np.array([indices[i] for i in selected])
         return selected_indices
 
+    def scale_aug(self):
+        sc = 1
+        if self.options.SCALE_FACTOR > 0:
+            sc = min(
+                1 + self.options.SCALE_FACTOR,
+                max(
+                    1 - self.options.SCALE_FACTOR,
+                    np.random.randn() * self.options.SCALE_FACTOR + 1,
+                ),
+            )
+        return sc
+
     def _load_single_view(self, index):
         """Load a single view (similar to DatasetHMR.__getitem__ but returns dict)."""
         item = {}
@@ -473,7 +488,20 @@ class MultiViewEvaluationDataset(Dataset):
         # mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
         # mhr_keypoints_2d_orig = self.mhr_keypoints_2d[index].copy()
 
-        sc = 1.0  # No augmentation for evaluation
+        sc = self.scale_aug()
+
+        if self.options.CROP_FACTOR[1] > 0:
+            if np.random.rand() < self.options.CROP_PROB:
+                cf = np.random.uniform(
+                    self.options.CROP_FACTOR[0], self.options.CROP_FACTOR[1]
+                )
+                center, scale = random_crop(
+                    center, scale,
+                    crop_scale_factor=1 - cf,
+                    axis='all',
+                )
+                center = np.asarray(center, dtype=np.float32)
+                scale = np.float32(scale)
 
         imgname = os.path.join(self.img_dir, self.imgname[index])
         maskname = os.path.join(self.mask_dir, self.imgname[index][:-4] + "_env.png")

@@ -21,11 +21,34 @@ import trimesh
 from sam_3d_body.metrics.metrics_tracker import scale_and_translation_transform_batch
 from sam_3d_body.visualization.renderer import Renderer
 
-LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
+# Base named colours
+LIGHT_BLUE   = (0.65098039, 0.74117647, 0.85882353)
 LIGHT_ORANGE = (1.0, 0.8, 0.5)
-BLUE   = (0.12156863, 0.46666667, 0.70588235)   
-ORANGE = (1.0,        0.49803922, 0.05490196)   
-GREEN = (0.2, 1.0, 0.2)
+BLUE         = (0.12156863, 0.46666667, 0.70588235)
+ORANGE       = (1.0,        0.49803922, 0.05490196)
+GREEN        = (0.2, 1.0, 0.2)
+LIGHT_GREY   = (0.80, 0.80, 0.80)
+DARK_GREY    = (0.35, 0.35, 0.35)
+SALMON       = (0.98, 0.50, 0.45)
+TEAL         = (0.20, 0.63, 0.63)
+
+# Candidate (gt, pred-tint) combinations for vis_samples overlays.
+# Pred is usually coloured by a viridis vertex heatmap, so pred_tint
+# only kicks in for flat-shaded pred renders; the dominant look is
+# driven by the GT colour that sits underneath the heatmap.
+PALETTE_CANDIDATES = {
+    "blue_gt":        {"gt": BLUE,        "pred_tint": LIGHT_ORANGE},
+    "light_grey_gt":  {"gt": LIGHT_GREY,  "pred_tint": BLUE},
+    "light_blue_gt":  {"gt": LIGHT_BLUE,  "pred_tint": ORANGE},
+    "salmon_gt":      {"gt": SALMON,      "pred_tint": TEAL},
+    "teal_gt":        {"gt": TEAL,        "pred_tint": LIGHT_ORANGE},
+    "dark_grey_gt":   {"gt": DARK_GREY,   "pred_tint": LIGHT_ORANGE},
+}
+
+# Switch this to try a different scheme in vis_samples.
+ACTIVE_PALETTE = "light_grey_gt"
+GT_COLOR   = PALETTE_CANDIDATES[ACTIVE_PALETTE]["gt"]
+PRED_COLOR = PALETTE_CANDIDATES[ACTIVE_PALETTE]["pred_tint"]
 
 
 def vis_histogram(
@@ -477,32 +500,49 @@ def vis_samples(
     def _to_uint8(float_rgb):
         return (float_rgb * 255.0).clip(0, 255).astype(np.uint8)
 
+    def _overlay_rgba(fg_rgba, bg_rgb, alpha_scale=0.75):
+        # Alpha-blend an RGBA foreground on top of an RGB background.
+        # Used to place the prediction (heatmap, carries information) on top
+        # of the GT mesh so the heatmap isn't occluded.
+        a = fg_rgba[..., 3:4].astype(np.float32) * alpha_scale
+        return a * fg_rgba[..., :3].astype(np.float32) + (1.0 - a) * bg_rgb
+
     for i in range(n_vis):
         orig_i = int(order[i])
         # ----------------------- front view -----------------------
         sample_cam_t = pred_cam_t_samples[b, orig_i] if pred_cam_t_samples is not None else outputs["pred_cam_t"][b]
-        pred_rgb = renderer(
-            mhr_samples[b, orig_i],
-            sample_cam_t,
-            img_cv2.copy(),
-            scene_bg_color=(1, 1, 1),
-            vertex_colors=vertex_colors_samples[i],
-            camera_center=camera_center,
-        )
-
         if overlay_gt:
-            gt_rgba = renderer(
+            # GT mesh drawn opaque onto the input image (keeps image visible
+            # wherever the GT mesh is absent).
+            gt_on_img = renderer(
                 gt_verts[b], gt_cam_t[b],
-                white_bg_full,
-                mesh_base_color=BLUE,
+                img_cv2.copy(),
+                mesh_base_color=GT_COLOR,
                 scene_bg_color=(1, 1, 1),
-                return_rgba=True,
                 camera_center=camera_center,
             )
-            alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
-            pred_rgb = alpha * gt_rgba[..., :3].astype(np.float32) + (1.0 - alpha) * pred_rgb
+            # Pred rendered with alpha onto a blank canvas, then overlaid on top.
+            pred_rgba = renderer(
+                mhr_samples[b, orig_i],
+                sample_cam_t,
+                white_bg_full,
+                scene_bg_color=(1, 1, 1),
+                vertex_colors=vertex_colors_samples[i],
+                camera_center=camera_center,
+                return_rgba=True,
+            )
+            out_rgb = _overlay_rgba(pred_rgba, gt_on_img)
+        else:
+            out_rgb = renderer(
+                mhr_samples[b, orig_i],
+                sample_cam_t,
+                img_cv2.copy(),
+                scene_bg_color=(1, 1, 1),
+                vertex_colors=vertex_colors_samples[i],
+                camera_center=camera_center,
+            )
 
-        img_mesh = _to_uint8(pred_rgb)
+        img_mesh = _to_uint8(out_rgb)
 
         if affine is not None:
             img_mesh = cv2.warpAffine(img_mesh, affine, img_size)
@@ -520,7 +560,16 @@ def vis_samples(
 
         # ----------------------- side view -----------------------
         if plot_side:
-            pred_side = renderer_side(
+            gt_side = renderer_side(
+                gt_verts[b] - gt_root_joint[b],
+                generic_camera,
+                black_bg,
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+            )
+            pred_side_rgba = renderer_side(
                 mhr_samples[b, orig_i] - mhr_root_joint_samples[b, orig_i],
                 generic_camera,
                 black_bg,
@@ -528,20 +577,9 @@ def vis_samples(
                 scene_bg_color=(0, 0, 0),
                 side_view=True,
                 rot_angle=90,
-            )
-            gt_side = renderer_side(
-                gt_verts[b] - gt_root_joint[b],
-                generic_camera,
-                black_bg,
-                mesh_base_color=BLUE,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=90,
                 return_rgba=True,
             )
-            alpha = gt_side[..., 3:4].astype(np.float32) * 0.5
-            blended = alpha * gt_side[..., :3].astype(np.float32) + (1.0 - alpha) * pred_side
-            img_side = _to_uint8(blended)
+            img_side = _to_uint8(_overlay_rgba(pred_side_rgba, gt_side))
 
             side_lines = []
             if log_prob is not None:
@@ -552,7 +590,16 @@ def vis_samples(
             img_side_list.append(img_side)
 
             # ----------------------- PA-aligned side view -----------------------
-            pa_pred_side = renderer_side(
+            gt_pa = renderer_side(
+                gt_verts_b - gt_root,
+                generic_camera,
+                black_bg,
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+            )
+            pa_pred_rgba = renderer_side(
                 aligned_samples[i] - gt_root,
                 generic_camera,
                 black_bg,
@@ -560,20 +607,9 @@ def vis_samples(
                 scene_bg_color=(0, 0, 0),
                 side_view=True,
                 rot_angle=90,
-            )
-            gt_pa_rgba = renderer_side(
-                gt_verts_b - gt_root,
-                generic_camera,
-                black_bg,
-                mesh_base_color=BLUE,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=90,
                 return_rgba=True,
             )
-            alpha_pa = gt_pa_rgba[..., 3:4].astype(np.float32) * 0.5
-            blended_pa = alpha_pa * gt_pa_rgba[..., :3].astype(np.float32) + (1.0 - alpha_pa) * pa_pred_side
-            img_pa = _to_uint8(blended_pa)
+            img_pa = _to_uint8(_overlay_rgba(pa_pred_rgba, gt_pa))
 
             pa_lines = []
             if pampjpe_samples is not None:
@@ -583,7 +619,16 @@ def vis_samples(
 
             # ----------------------- neutral raw -----------------------
             if neutral_available:
-                pred_n_side = renderer_side(
+                gt_n = renderer_side(
+                    gt_neutral - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    mesh_base_color=GT_COLOR,
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                )
+                pred_n_rgba = renderer_side(
                     sample_neutral[i] - neutral_center,
                     generic_camera,
                     black_bg,
@@ -591,25 +636,23 @@ def vis_samples(
                     scene_bg_color=(0, 0, 0),
                     side_view=True,
                     rot_angle=0,
-                )
-                gt_n_rgba = renderer_side(
-                    gt_neutral - neutral_center,
-                    generic_camera,
-                    black_bg,
-                    mesh_base_color=BLUE,
-                    scene_bg_color=(0, 0, 0),
-                    side_view=True,
-                    rot_angle=0,
                     return_rgba=True,
                 )
-                alpha_n = gt_n_rgba[..., 3:4].astype(np.float32) * 0.5
-                blended_n = alpha_n * gt_n_rgba[..., :3].astype(np.float32) + (1.0 - alpha_n) * pred_n_side
-                img_n = _to_uint8(blended_n)
+                img_n = _to_uint8(_overlay_rgba(pred_n_rgba, gt_n))
                 _draw_label_lines(img_n, [f"PVE: {float(pve_samples[i]):.1f} mm"])
                 img_neutral_list.append(img_n)
 
                 # ----------------------- neutral scale+trans aligned -----------------------
-                pred_nsc_side = renderer_side(
+                gt_nsc = renderer_side(
+                    gt_neutral - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    mesh_base_color=GT_COLOR,
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                )
+                pred_nsc_rgba = renderer_side(
                     sample_neutral_sc[i] - neutral_center,
                     generic_camera,
                     black_bg,
@@ -617,20 +660,9 @@ def vis_samples(
                     scene_bg_color=(0, 0, 0),
                     side_view=True,
                     rot_angle=0,
-                )
-                gt_nsc_rgba = renderer_side(
-                    gt_neutral - neutral_center,
-                    generic_camera,
-                    black_bg,
-                    mesh_base_color=BLUE,
-                    scene_bg_color=(0, 0, 0),
-                    side_view=True,
-                    rot_angle=0,
                     return_rgba=True,
                 )
-                alpha_nsc = gt_nsc_rgba[..., 3:4].astype(np.float32) * 0.5
-                blended_nsc = alpha_nsc * gt_nsc_rgba[..., :3].astype(np.float32) + (1.0 - alpha_nsc) * pred_nsc_side
-                img_nsc = _to_uint8(blended_nsc)
+                img_nsc = _to_uint8(_overlay_rgba(pred_nsc_rgba, gt_nsc))
                 _draw_label_lines(img_nsc, [f"PVE-T-SC: {float(pvetsc_samples[i]):.1f} mm"])
                 img_neutral_sc_list.append(img_nsc)
 
@@ -650,34 +682,40 @@ def vis_samples(
 
     # ----------------------- Top-left -----------------------
     if overlay_gt:
-        gt_base_rgba = renderer(
-            gt_verts[b],
-            gt_cam_t[b],
-            img_cv2.copy(),
-            mesh_base_color=BLUE,
-            scene_bg_color=(1, 1, 1),
-            return_rgba=True,
-            camera_center=camera_center,
-        )
-
         mean_pred_verts = outputs["pred_vertices"][b]
         mean_pred_cam_t = outputs["pred_cam_t"][b]
         mean_pred_root_joint = outputs["pred_joint_coords"][b][..., [1], :]
 
-        mean_pred_rgb_full = renderer(
+        gt_on_img_mean = renderer(
+            gt_verts[b],
+            gt_cam_t[b],
+            img_cv2.copy(),
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(1, 1, 1),
+            camera_center=camera_center,
+        )
+        mean_pred_rgba_full = renderer(
             mean_pred_verts,
             mean_pred_cam_t,
-            img_cv2.copy(),
+            white_bg_full,
             scene_bg_color=(1, 1, 1),
             vertex_colors=vertex_colors_mean,
             camera_center=camera_center,
+            return_rgba=True,
         )
-        alpha = gt_base_rgba[..., 3:4].astype(np.float32) * 0.5
-        blended_front = alpha * gt_base_rgba[..., :3].astype(np.float32) + (1.0 - alpha) * mean_pred_rgb_full
-        gt_base_img = _to_uint8(blended_front)
+        gt_base_img = _to_uint8(_overlay_rgba(mean_pred_rgba_full, gt_on_img_mean))
 
         # ----------------------- Bottom-left -----------------------
-        mean_pred_unc = renderer_side(
+        gt_side_mean = renderer_side(
+            gt_verts[b] - gt_root_joint[b],
+            generic_camera,
+            black_bg,
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(0, 0, 0),
+            side_view=True,
+            rot_angle=90,
+        )
+        mean_pred_unc_rgba = renderer_side(
             mean_pred_verts - mean_pred_root_joint,
             generic_camera,
             black_bg,
@@ -685,20 +723,9 @@ def vis_samples(
             vertex_colors=vertex_colors_mean,
             side_view=True,
             rot_angle=90,
-        )
-        gt_rgba_unc = renderer_side(
-            gt_verts[b] - gt_root_joint[b],
-            generic_camera,
-            black_bg,
-            mesh_base_color=BLUE,
-            scene_bg_color=(0, 0, 0),
-            side_view=True,
-            rot_angle=90,
             return_rgba=True,
         )
-        alpha_unc = gt_rgba_unc[..., 3:4].astype(np.float32) * 0.5
-        blended_unc = alpha_unc * gt_rgba_unc[..., :3].astype(np.float32) + (1.0 - alpha_unc) * mean_pred_unc
-        mean_unc_panel = _to_uint8(blended_unc)
+        mean_unc_panel = _to_uint8(_overlay_rgba(mean_pred_unc_rgba, gt_side_mean))
 
 
         mean_side_lines = []
@@ -711,7 +738,16 @@ def vis_samples(
         _draw_label_lines(mean_unc_panel, mean_side_lines)
 
         # ----------------------- Bottom-left (PA-aligned) -----------------------
-        mean_pa_pred = renderer_side(
+        gt_pa_mean = renderer_side(
+            gt_verts_b - gt_root,
+            generic_camera,
+            black_bg,
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(0, 0, 0),
+            side_view=True,
+            rot_angle=90,
+        )
+        mean_pa_pred_rgba = renderer_side(
             aligned_mean - gt_root,
             generic_camera,
             black_bg,
@@ -719,20 +755,9 @@ def vis_samples(
             scene_bg_color=(0, 0, 0),
             side_view=True,
             rot_angle=90,
-        )
-        gt_pa_rgba_mean = renderer_side(
-            gt_verts_b - gt_root,
-            generic_camera,
-            black_bg,
-            mesh_base_color=BLUE,
-            scene_bg_color=(0, 0, 0),
-            side_view=True,
-            rot_angle=90,
             return_rgba=True,
         )
-        alpha_mpa = gt_pa_rgba_mean[..., 3:4].astype(np.float32) * 0.5
-        blended_mpa = alpha_mpa * gt_pa_rgba_mean[..., :3].astype(np.float32) + (1.0 - alpha_mpa) * mean_pa_pred
-        mean_pa_panel = _to_uint8(blended_mpa)
+        mean_pa_panel = _to_uint8(_overlay_rgba(mean_pa_pred_rgba, gt_pa_mean))
 
         mean_pa_lines = []
         if pampjpe_mean is not None:
@@ -743,7 +768,16 @@ def vis_samples(
         mean_neutral_panel = None
         mean_neutral_sc_panel = None
         if neutral_available:
-            pred_n_mean = renderer_side(
+            gt_n_mean = renderer_side(
+                gt_neutral - neutral_center,
+                generic_camera,
+                black_bg,
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=0,
+            )
+            pred_n_mean_rgba = renderer_side(
                 pred_neutral - neutral_center,
                 generic_camera,
                 black_bg,
@@ -751,23 +785,12 @@ def vis_samples(
                 scene_bg_color=(0, 0, 0),
                 side_view=True,
                 rot_angle=0,
-            )
-            gt_n_rgba_mean = renderer_side(
-                gt_neutral - neutral_center,
-                generic_camera,
-                black_bg,
-                mesh_base_color=BLUE,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=0,
                 return_rgba=True,
             )
-            alpha_nm = gt_n_rgba_mean[..., 3:4].astype(np.float32) * 0.5
-            blended_nm = alpha_nm * gt_n_rgba_mean[..., :3].astype(np.float32) + (1.0 - alpha_nm) * pred_n_mean
-            mean_neutral_panel = _to_uint8(blended_nm)
+            mean_neutral_panel = _to_uint8(_overlay_rgba(pred_n_mean_rgba, gt_n_mean))
             _draw_label_lines(mean_neutral_panel, [f"PVE (mean): {pve_mean:.1f} mm"])
 
-            pred_nsc_mean = renderer_side(
+            pred_nsc_mean_rgba = renderer_side(
                 pred_neutral_sc - neutral_center,
                 generic_camera,
                 black_bg,
@@ -775,10 +798,9 @@ def vis_samples(
                 scene_bg_color=(0, 0, 0),
                 side_view=True,
                 rot_angle=0,
+                return_rgba=True,
             )
-            alpha_nscm = gt_n_rgba_mean[..., 3:4].astype(np.float32) * 0.5
-            blended_nscm = alpha_nscm * gt_n_rgba_mean[..., :3].astype(np.float32) + (1.0 - alpha_nscm) * pred_nsc_mean
-            mean_neutral_sc_panel = _to_uint8(blended_nscm)
+            mean_neutral_sc_panel = _to_uint8(_overlay_rgba(pred_nsc_mean_rgba, gt_n_mean))
             _draw_label_lines(mean_neutral_sc_panel, [f"PVE-T-SC (mean): {pvetsc_mean:.1f} mm"])
 
         if affine is not None:
@@ -900,29 +922,30 @@ def vis_directional_variance(img_cv2, outputs, faces, batch):
     mean_pred_verts = mhr_outputs["pred_vertices"][b]
     mean_pred_cam_t = mhr_outputs["pred_cam_t"][b]
 
-    mean_pred_rgb = renderer(
-        mean_pred_verts,
-        mean_pred_cam_t,
-        img_cv2.copy(),
-        mesh_base_color=LIGHT_ORANGE,
-        scene_bg_color=(1, 1, 1),
-        camera_center=camera_center,
-    )
-    gt_rgba = renderer(
+    gt_on_img = renderer(
         gt_verts,
         gt_cam_t,
         img_cv2.copy(),
-        mesh_base_color=BLUE,
+        mesh_base_color=GT_COLOR,
+        scene_bg_color=(1, 1, 1),
+        camera_center=camera_center,
+    )
+    white_bg_full = np.full_like(img_cv2, 255, dtype=np.uint8)
+    mean_pred_rgba = renderer(
+        mean_pred_verts,
+        mean_pred_cam_t,
+        white_bg_full,
+        mesh_base_color=PRED_COLOR,
         scene_bg_color=(1, 1, 1),
         return_rgba=True,
         camera_center=camera_center,
     )
-    alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
-    blended = alpha * gt_rgba[..., :3].astype(np.float32) + (1.0 - alpha) * mean_pred_rgb
+    a = mean_pred_rgba[..., 3:4].astype(np.float32) * 0.75
+    blended = a * mean_pred_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_on_img
     gt_mean_img = _to_uint8(blended)
     if affine is not None:
         gt_mean_img = cv2.warpAffine(gt_mean_img, affine, img_size)
-    _draw_label_lines(gt_mean_img, ["gt (blue) + mean pred (orange)"])
+    _draw_label_lines(gt_mean_img, ["gt + mean pred (on top)"])
 
     axis_names = ["std x (horizontal)", "std y (vertical)", "std z (depth)"]
     panels = [base_img, gt_mean_img]
@@ -2456,13 +2479,13 @@ def vis_merging_predictions(
         else:
             assert False
 
-        # GT: keep fixed LIGHT_BLUE color
+        # GT column (no overlay): GT rendered on the input image.
         gt_rendered_img = (
             renderer(
                 gt_verts,
                 gt_cam_t,
                 img_for_render.copy(),
-                mesh_base_color=LIGHT_BLUE,
+                mesh_base_color=GT_COLOR,
                 scene_bg_color=(1, 1, 1),
                 camera_center=(
                     batch["cam_int"][flat_idx][0, 2],
@@ -2472,46 +2495,41 @@ def vis_merging_predictions(
             * 255
         ).astype(np.uint8)
 
-        # Predicted mesh: per-vertex viridis colors from distance to GT
+        # GT rendered opaque on the input image; prediction (heatmap) is
+        # then alpha-blended on top so the heatmap stays readable.
         pred_colors = build_vertex_colors(
             pred_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
         )
-        rendered_img = (
+        gt_on_img = (
             renderer(
-                verts,
-                cam_t,
+                gt_verts,
+                gt_cam_t,
                 img_for_render.copy(),
-                mesh_base_color=(1.0, 0.8, 0.5),
+                mesh_base_color=GT_COLOR,
                 scene_bg_color=(1, 1, 1),
                 camera_center=(
                     batch["cam_int"][flat_idx][0, 2],
                     batch["cam_int"][flat_idx][1, 2],
                 ),
-                vertex_colors=pred_colors,
             )
-            * 255
-        ).astype(np.uint8)
-
-        # Overlay semi-transparent GT mesh on top of predicted mesh (light orange)
-        gt_rgba = renderer(
-            gt_verts,
-            gt_cam_t,
+        ).astype(np.float32)  # in [0,1]
+        pred_rgba = renderer(
+            verts,
+            cam_t,
             np.ones_like(img_for_render) * 255,
-            mesh_base_color=(1.0, 0.8, 0.5),
             scene_bg_color=(1, 1, 1),
             camera_center=(
                 batch["cam_int"][flat_idx][0, 2],
                 batch["cam_int"][flat_idx][1, 2],
             ),
+            vertex_colors=pred_colors,
             return_rgba=True,
         )
-        alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
-        pred_rgb = rendered_img.astype(np.float32) / 255.0
-        gt_rgb = gt_rgba[..., :3].astype(np.float32)
-        blended_pred = alpha * gt_rgb + (1.0 - alpha) * pred_rgb
+        alpha = pred_rgba[..., 3:4].astype(np.float32) * 0.75
+        blended_pred = alpha * pred_rgba[..., :3].astype(np.float32) + (1.0 - alpha) * gt_on_img
         rendered_img = (blended_pred * 255.0).clip(0, 255).astype(np.uint8)
 
-        # Merged mesh: per-vertex viridis colors from distance to GT
+        # Merged mesh on top of GT (same flipped stacking as the pred panel).
         merged_colors = build_vertex_colors(
             merged_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
         )
@@ -2520,39 +2538,20 @@ def vis_merging_predictions(
             if merged_pred_cam_t is not None
             else cam_t
         )
-        rendered_merged_img = (
-            renderer(
-                merged_verts_view,
-                merged_cam_t_view,
-                img_for_render.copy(),
-                mesh_base_color=(0.5, 1.0, 0.5),
-                scene_bg_color=(1, 1, 1),
-                camera_center=(
-                    batch["cam_int"][flat_idx][0, 2],
-                    batch["cam_int"][flat_idx][1, 2],
-                ),
-                vertex_colors=merged_colors,
-            )
-            * 255
-        ).astype(np.uint8)
-
-        # Overlay semi-transparent GT mesh on top of merged mesh (light orange)
-        gt_rgba_merged = renderer(
-            gt_verts,
-            gt_cam_t,
+        merged_rgba = renderer(
+            merged_verts_view,
+            merged_cam_t_view,
             np.ones_like(img_for_render) * 255,
-            mesh_base_color=(1.0, 0.8, 0.5),
             scene_bg_color=(1, 1, 1),
             camera_center=(
                 batch["cam_int"][flat_idx][0, 2],
                 batch["cam_int"][flat_idx][1, 2],
             ),
+            vertex_colors=merged_colors,
             return_rgba=True,
         )
-        alpha_m = gt_rgba_merged[..., 3:4].astype(np.float32) * 0.3
-        merged_rgb = rendered_merged_img.astype(np.float32) / 255.0
-        gt_m_rgb = gt_rgba_merged[..., :3].astype(np.float32)
-        blended_merged = alpha_m * gt_m_rgb + (1.0 - alpha_m) * merged_rgb
+        alpha_m = merged_rgba[..., 3:4].astype(np.float32) * 0.75
+        blended_merged = alpha_m * merged_rgba[..., :3].astype(np.float32) + (1.0 - alpha_m) * gt_on_img
         rendered_merged_img = (blended_merged * 255.0).clip(0, 255).astype(np.uint8)
 
         affine = batch["affine_trans"][flat_idx, 0].cpu().detach().numpy()
@@ -2756,71 +2755,53 @@ def vis_merging_predictions(
             verts_centered = verts_centered_for_side[view]
             merged_centered = merged_centered_for_side[view]
 
-            # GT side view (for the GT column)
-            gt_side = (
-                side_renderer(
-                    gt_centered,
-                    generic_cam_t,
-                    white_bg.copy(),
-                    mesh_base_color=LIGHT_BLUE,
-                    scene_bg_color=(1, 1, 1),
-                    side_view=True,
-                    rot_angle=90,
-                )
-                * 255
-            ).astype(np.uint8)
-
-            # Pred side view with GT overlay
-            pred_side_base = (
-                side_renderer(
-                    verts_centered,
-                    generic_cam_t,
-                    white_bg.copy(),
-                    mesh_base_color=(1.0, 0.8, 0.5),
-                    scene_bg_color=(1, 1, 1),
-                    vertex_colors=pred_colors,
-                    side_view=True,
-                    rot_angle=90,
-                )
-                * 255
-            ).astype(np.uint8)
-            gt_side_rgba = side_renderer(
+            # GT side view (for the GT column, no overlay).
+            gt_side_base = side_renderer(
                 gt_centered,
                 generic_cam_t,
                 white_bg.copy(),
-                mesh_base_color=(1.0, 0.8, 0.5),
+                mesh_base_color=GT_COLOR,
                 scene_bg_color=(1, 1, 1),
+                side_view=True,
+                rot_angle=90,
+            ).astype(np.float32)  # [0,1]
+            gt_side = (gt_side_base * 255.0).clip(0, 255).astype(np.uint8)
+
+            # Pred side view: GT underneath, pred heatmap on top.
+            pred_side_rgba = side_renderer(
+                verts_centered,
+                generic_cam_t,
+                white_bg.copy(),
+                scene_bg_color=(1, 1, 1),
+                vertex_colors=pred_colors,
                 side_view=True,
                 rot_angle=90,
                 return_rgba=True,
             )
-            alpha_side = gt_side_rgba[..., 3:4].astype(np.float32) * 0.5
-            pred_side_rgb = pred_side_base.astype(np.float32) / 255.0
-            gt_side_rgb = gt_side_rgba[..., :3].astype(np.float32)
+            alpha_p = pred_side_rgba[..., 3:4].astype(np.float32) * 0.75
             blended_pred_side = (
-                alpha_side * gt_side_rgb + (1.0 - alpha_side) * pred_side_rgb
+                alpha_p * pred_side_rgba[..., :3].astype(np.float32)
+                + (1.0 - alpha_p) * gt_side_base
             )
             pred_side = (
                 (blended_pred_side * 255.0).clip(0, 255).astype(np.uint8)
             )
 
-            # Merged side view with GT overlay
-            merged_side_base = (
-                side_renderer(
-                    merged_centered,
-                    generic_cam_t,
-                    white_bg.copy(),
-                    mesh_base_color=(0.5, 1.0, 0.5),
-                    scene_bg_color=(1, 1, 1),
-                    vertex_colors=merged_colors,
-                    side_view=True,
-                    rot_angle=90,
-                )
-                * 255
-            ).astype(np.uint8)
-            merged_side_rgb = merged_side_base.astype(np.float32) / 255.0
+            # Merged side view: GT underneath, merged heatmap on top.
+            merged_side_rgba = side_renderer(
+                merged_centered,
+                generic_cam_t,
+                white_bg.copy(),
+                scene_bg_color=(1, 1, 1),
+                vertex_colors=merged_colors,
+                side_view=True,
+                rot_angle=90,
+                return_rgba=True,
+            )
+            alpha_mx = merged_side_rgba[..., 3:4].astype(np.float32) * 0.75
             blended_merged_side = (
-                alpha_side * gt_side_rgb + (1.0 - alpha_side) * merged_side_rgb
+                alpha_mx * merged_side_rgba[..., :3].astype(np.float32)
+                + (1.0 - alpha_mx) * gt_side_base
             )
             merged_side = (
                 (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
@@ -3103,17 +3084,17 @@ def vis_merging_neutral(
     gt_verts_vis = gt_verts.copy()
     gt_verts_vis[..., [1, 2]] *= -1
     
-    gt_rgba = renderer(
+    # GT rendered opaque (used both as the standalone GT panel and as the
+    # underlay for per-view / merged panels, where the prediction is placed
+    # on top at 50% alpha).
+    gt_front_rgb = renderer(
         gt_verts_vis[-1],
         generic_cam_t,
         background.copy(),
-        mesh_base_color=LIGHT_BLUE,
+        mesh_base_color=GT_COLOR,
         scene_bg_color=(1, 1, 1),
-        return_rgba=True,
-    )
-    gt_alpha = gt_rgba[..., 3:4].astype(np.float32) * 0.5
-    gt_rgb = gt_rgba[..., :3].astype(np.float32)
-    gt_front = (gt_rgb * 255.0).clip(0, 255).astype(np.uint8)
+    ).astype(np.float32)  # [0,1]
+    gt_front = (gt_front_rgb * 255.0).clip(0, 255).astype(np.uint8)
 
     (text_width, text_height), baseline = cv2.getTextSize(
         "GT", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2
@@ -3133,18 +3114,15 @@ def vis_merging_neutral(
     )
 
 
-    gt_side_rgba = renderer(
+    gt_side_rgb = renderer(
         gt_verts_vis[-1],
         generic_cam_t,
         background.copy(),
-        mesh_base_color=LIGHT_BLUE,
+        mesh_base_color=GT_COLOR,
         scene_bg_color=(1, 1, 1),
         side_view=True,
         rot_angle=90,
-        return_rgba=True,
-    )
-    gt_side_alpha = gt_side_rgba[..., 3:4].astype(np.float32) * 0.5
-    gt_side_rgb = gt_side_rgba[..., :3].astype(np.float32)
+    ).astype(np.float32)  # [0,1]
     gt_side = (gt_side_rgb * 255.0).clip(0, 255).astype(np.uint8)
 
     # ----------------- Per-view -----------------
@@ -3157,16 +3135,16 @@ def vis_merging_neutral(
         vertex_colors = build_vertex_colors(
             per_view_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
         )
-        front_render = renderer(
+        pv_rgba = renderer(
             per_view_verts_vis[view],
             generic_cam_t,
             background.copy(),
-            mesh_base_color=(1.0, 0.8, 0.5), 
             scene_bg_color=(1, 1, 1),
             vertex_colors=vertex_colors,
+            return_rgba=True,
         )
-        pv_rgb = front_render.astype(np.float32)
-        blended_pv = gt_alpha * gt_rgb + (1.0 - gt_alpha) * pv_rgb
+        a_pv = pv_rgba[..., 3:4].astype(np.float32) * 0.75
+        blended_pv = a_pv * pv_rgba[..., :3].astype(np.float32) + (1.0 - a_pv) * gt_front_rgb
         front_render = (blended_pv * 255.0).clip(0, 255).astype(np.uint8)
         per_view_front.append(front_render)
 
@@ -3176,18 +3154,18 @@ def vis_merging_neutral(
             **text_config,
         )
 
-        side_render = renderer(
+        pv_side_rgba = renderer(
             per_view_verts_vis[view],
             generic_cam_t,
             background.copy(),
-            mesh_base_color=(1.0, 0.8, 0.5),
             scene_bg_color=(1, 1, 1),
             vertex_colors=vertex_colors,
             side_view=True,
             rot_angle=90,
+            return_rgba=True,
         )
-        pv_side_rgb = side_render.astype(np.float32)
-        blended_side = gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * pv_side_rgb
+        a_pvs = pv_side_rgba[..., 3:4].astype(np.float32) * 0.75
+        blended_side = a_pvs * pv_side_rgba[..., :3].astype(np.float32) + (1.0 - a_pvs) * gt_side_rgb
         side_render = (blended_side * 255.0).clip(0, 255).astype(np.uint8)
 
         if per_view_pvetsc_render is not None:
@@ -3213,16 +3191,16 @@ def vis_merging_neutral(
             merged_vertex_dists, min_dist=min_dist, max_dist=max_dist
         )
 
-        merged_front_render = renderer(
+        merged_rgba = renderer(
             merged_verts_vis,
             generic_cam_t,
             background.copy(),
-            mesh_base_color=(0.5, 1.0, 0.5), 
             scene_bg_color=(1, 1, 1),
             vertex_colors=merged_vertex_colors,
+            return_rgba=True,
         )
-        merged_rgb = merged_front_render.astype(np.float32)
-        blended_merged = gt_alpha * gt_rgb + (1.0 - gt_alpha) * merged_rgb
+        a_m = merged_rgba[..., 3:4].astype(np.float32) * 0.75
+        blended_merged = a_m * merged_rgba[..., :3].astype(np.float32) + (1.0 - a_m) * gt_front_rgb
         merged_front_render = (blended_merged * 255.0).clip(0, 255).astype(np.uint8)
 
         cv2.putText(
@@ -3231,18 +3209,18 @@ def vis_merging_neutral(
             **text_config,
         )
 
-        merged_side = renderer(
+        merged_side_rgba = renderer(
             merged_verts_vis,
             generic_cam_t,
             background.copy(),
-            mesh_base_color=(0.5, 1.0, 0.5),
             scene_bg_color=(1, 1, 1),
             vertex_colors=merged_vertex_colors,
             side_view=True,
             rot_angle=90,
+            return_rgba=True,
         )
-        merged_side_rgb = merged_side.astype(np.float32)
-        blended_merged_side = gt_side_alpha * gt_side_rgb + (1.0 - gt_side_alpha) * merged_side_rgb
+        a_ms = merged_side_rgba[..., 3:4].astype(np.float32) * 0.75
+        blended_merged_side = a_ms * merged_side_rgba[..., :3].astype(np.float32) + (1.0 - a_ms) * gt_side_rgb
         merged_side = (blended_merged_side * 255.0).clip(0, 255).astype(np.uint8)
 
         if merged_pvetsc is not None:
@@ -3544,43 +3522,44 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
         black_bg = np.zeros((H_ref, W_ref, 3), dtype=np.uint8)
 
         def render_front(verts_pred, cam_t_pred, dists_mm):
+            # GT rendered opaque on the input image; pred (heatmap) on top.
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
-            pred_rgb = renderer(
-                verts_pred, cam_t_pred, img.copy(),
+            gt_on_img = renderer(
+                gt_v, gt_t, img.copy(),
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(1, 1, 1),
+                camera_center=cc,
+            )
+            pred_rgba = renderer(
+                verts_pred, cam_t_pred, np.ones_like(img) * 255,
                 scene_bg_color=(1, 1, 1),
                 camera_center=cc,
                 vertex_colors=colors,
-            )
-            gt_rgba = renderer(
-                gt_v, gt_t, np.ones_like(img) * 255,
-                mesh_base_color=LIGHT_BLUE,
-                scene_bg_color=(1, 1, 1),
-                camera_center=cc,
                 return_rgba=True,
             )
-            a = gt_rgba[..., 3:4].astype(np.float32) * 0.5
-            blended = a * gt_rgba[..., :3].astype(np.float32) + (1.0 - a) * pred_rgb
+            a = pred_rgba[..., 3:4].astype(np.float32) * 0.75
+            blended = a * pred_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_on_img
             img_out = _to_uint8(blended)
             img_out = cv2.warpAffine(img_out, affine, img_size_v)
             return img_out
 
         def render_side(verts_pred, root_joint, dists_mm):
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
-            p = side_renderer(
+            gt_base = side_renderer(
+                gt_v - gt_root, generic_cam_t, black_bg.copy(),
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+                side_view=True, rot_angle=90,
+            )
+            p_rgba = side_renderer(
                 verts_pred - root_joint, generic_cam_t, black_bg.copy(),
                 scene_bg_color=(0, 0, 0),
                 vertex_colors=colors,
                 side_view=True, rot_angle=90,
-            )
-            g = side_renderer(
-                gt_v - gt_root, generic_cam_t, black_bg.copy(),
-                mesh_base_color=LIGHT_BLUE,
-                scene_bg_color=(0, 0, 0),
-                side_view=True, rot_angle=90,
                 return_rgba=True,
             )
-            a = g[..., 3:4].astype(np.float32) * 0.5
-            blended = a * g[..., :3].astype(np.float32) + (1.0 - a) * p
+            a = p_rgba[..., 3:4].astype(np.float32) * 0.75
+            blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_base
             return _to_uint8(blended)
 
         def render_neutral(pred_sc_verts, dists_mm):
@@ -3591,19 +3570,19 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             gt_vis[:, [1, 2]] *= -1
 
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm_neutral)
-            p = neutral_renderer(
+            gt_base = neutral_renderer(
+                gt_vis, neutral_cam_t, black_bg.copy(),
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+            )
+            p_rgba = neutral_renderer(
                 pred_vis, neutral_cam_t, black_bg.copy(),
                 scene_bg_color=(0, 0, 0),
                 vertex_colors=colors,
-            )
-            g = neutral_renderer(
-                gt_vis, neutral_cam_t, black_bg.copy(),
-                mesh_base_color=LIGHT_BLUE,
-                scene_bg_color=(0, 0, 0),
                 return_rgba=True,
             )
-            a = g[..., 3:4].astype(np.float32) * 0.5
-            blended = a * g[..., :3].astype(np.float32) + (1.0 - a) * p
+            a = p_rgba[..., 3:4].astype(np.float32) * 0.75
+            blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_base
             return _to_uint8(blended)
 
         # --- front row ---

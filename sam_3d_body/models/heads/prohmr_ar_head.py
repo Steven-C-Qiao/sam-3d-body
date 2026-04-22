@@ -93,8 +93,10 @@ class NFARHead(nn.Module):
 
         # BatchNorm inside each coupling's ResidualNet makes the flow's forward
         # bijection differ between train (batch stats) and eval (running stats),
-        # which breaks log_prob calibration at inference. Disable it — ActNorm
-        # already handles per-channel normalisation and is train/eval-consistent.
+        # which breaks log_prob calibration at inference. Defaults to off via
+        # cfg.MODEL.FLOW_BATCH_NORM — ActNorm already handles per-channel
+        # normalisation and is train/eval-consistent.
+        flow_batch_norm = cfg.MODEL.FLOW_BATCH_NORM
         self.flow_beta = flow_cls(
             flow_config_beta["flow_dim"],
             flow_config_beta["layer_hidden_features"],
@@ -102,7 +104,7 @@ class NFARHead(nn.Module):
             flow_config_beta["layer_depth"],
             dropout_probability=flow_config_beta["dropout_probability"],
             context_features=flow_config_beta["context_features"],
-            batch_norm_within_layers=False,
+            batch_norm_within_layers=flow_batch_norm,
             **flow_extra_kwargs,
         )
         self.flow_theta = flow_cls(
@@ -112,7 +114,7 @@ class NFARHead(nn.Module):
             flow_config_theta["layer_depth"],
             dropout_probability=flow_config_theta["dropout_probability"],
             context_features=flow_config_theta["context_features"],
-            batch_norm_within_layers=False,
+            batch_norm_within_layers=flow_batch_norm,
             **flow_extra_kwargs,
         )
         self.num_samples = cfg.MODEL.NUM_SAMPLES
@@ -217,8 +219,12 @@ class NFARHead(nn.Module):
         # Pose context uses GT shape (teacher forcing), mirroring nf_loss.py.
         shape_residual_true = beta_residual[..., : self.num_shape_comps]
         scale_residual_true = beta_residual[..., self.num_shape_comps :]
-        shape_sample_true = shape_mean + shape_residual_true
-        scale_sample_selected_true = scale_mean[..., scale_indices] + scale_residual_true
+        shape_sample_true = shape_mean
+        if self.num_shape_comps > 0:
+            shape_sample_true = shape_sample_true + shape_residual_true
+        scale_sample_selected_true = scale_mean[..., scale_indices]
+        if self.num_scale_comps > 0:
+            scale_sample_selected_true = scale_sample_selected_true + scale_residual_true
 
         context_theta_parts = [
             flow_context,
