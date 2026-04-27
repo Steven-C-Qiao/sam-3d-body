@@ -51,12 +51,14 @@ class NFARHead(nn.Module):
         self.flow_dim = self.theta_dim + self.beta_dim
         flow_num_layers = cfg.MODEL.FLOW_NUM_LAYERS
         flow_dropout = cfg.MODEL.FLOW_DROPOUT
+        flow_hidden_features = cfg.MODEL.FLOW_HIDDEN_FEATURES
+        flow_base_std = cfg.MODEL.FLOW_BASE_STD
 
         flow_config_beta = {
             "flow_dim": self.beta_dim,
             "num_layers": flow_num_layers,
             "context_features": 2048,
-            "layer_hidden_features": 1024,
+            "layer_hidden_features": flow_hidden_features,
             "layer_depth": 2,
             "dropout_probability": flow_dropout,
         }
@@ -64,7 +66,7 @@ class NFARHead(nn.Module):
             "flow_dim": self.theta_dim,
             "num_layers": flow_num_layers,
             "context_features": 2048,
-            "layer_hidden_features": 1024,
+            "layer_hidden_features": flow_hidden_features,
             "layer_depth": 2,
             "dropout_probability": flow_dropout,
         }
@@ -73,16 +75,26 @@ class NFARHead(nn.Module):
         flow_extra_kwargs = {}
         if flow_coupling == "additive":
             flow_cls = ConditionalGlow
+            if flow_base_std != 1.0:
+                raise ValueError(
+                    "MODEL.FLOW_BASE_STD != 1.0 is only supported for "
+                    "FLOW_COUPLING in {'affine', 'clamped_affine', 'rq_spline'}; "
+                    "the upstream nflows ConditionalGlow used for 'additive' "
+                    "hardcodes a StandardNormal base distribution."
+                )
         elif flow_coupling == "affine":
             flow_cls = ConditionalGlowUnclampedAffine
+            flow_extra_kwargs = {"base_std": flow_base_std}
         elif flow_coupling == "clamped_affine":
             flow_cls = ConditionalGlowAffine
+            flow_extra_kwargs = {"base_std": flow_base_std}
         elif flow_coupling == "rq_spline":
             flow_cls = ConditionalGlowSpline
             flow_extra_kwargs = {
                 "num_bins": cfg.MODEL.FLOW_SPLINE_NUM_BINS,
                 "tails": cfg.MODEL.FLOW_SPLINE_TAILS,
                 "tail_bound": cfg.MODEL.FLOW_SPLINE_TAIL_BOUND,
+                "base_std": flow_base_std,
             }
         else:
             raise ValueError(

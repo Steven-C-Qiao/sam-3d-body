@@ -210,7 +210,7 @@ def pvetsc(pred, gt):
 class Metrics(pl.LightningModule):
     def __init__(self, mhr_head=None):
         super().__init__()
-        self.mhr_head = mhr_head
+        object.__setattr__(self, "mhr_head", mhr_head)
 
     def _neutral_forward(self, shape_params, scale_offsets, templates):
         """Run mhr_forward with zero global_rot/pose/hand/face; returns Y/Z-flipped verts."""

@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,6 +27,42 @@ class ClampedAffineCouplingTransform(AffineCouplingTransform):
         return scale, shift
 
 
+class ScaledStandardNormal(StandardNormal):
+    """N(0, std² · I) — base distribution with isotropic non-unit variance.
+
+    The full distribution-space behaviour stays a centered isotropic Gaussian;
+    only the radius is scaled. log_prob and sampling are derived from the
+    standard normal via the change-of-variables y = z / std.
+    """
+
+    def __init__(self, shape, std=1.0):
+        super().__init__(shape)
+        self.register_buffer(
+            "_base_std", torch.tensor(float(std), dtype=torch.float64), persistent=False,
+        )
+        d = float(int(torch.tensor(shape).prod().item()))
+        self.register_buffer(
+            "_base_std_log_det",
+            torch.tensor(d * math.log(float(std)), dtype=torch.float64),
+            persistent=False,
+        )
+
+    def _log_prob(self, inputs, context):
+        std = self._base_std.to(inputs.dtype)
+        scaled = inputs / std
+        return super()._log_prob(scaled, context) - self._base_std_log_det.to(inputs.dtype)
+
+    def _sample(self, num_samples, context):
+        z = super()._sample(num_samples, context)
+        return z * self._base_std.to(z.dtype)
+
+
+def _make_base_distribution(features, base_std):
+    if base_std == 1.0:
+        return StandardNormal([features])
+    return ScaledStandardNormal([features], std=base_std)
+
+
 class ConditionalGlowUnclampedAffine(Flow):
     """Conditional Glow variant with unclamped affine coupling layers."""
 
@@ -38,6 +76,7 @@ class ConditionalGlowUnclampedAffine(Flow):
         dropout_probability=0.5,
         context_features=None,
         batch_norm_within_layers=True,
+        base_std=1.0,
     ):
         coupling_constructor = AffineCouplingTransform
 
@@ -68,7 +107,7 @@ class ConditionalGlowUnclampedAffine(Flow):
 
         super().__init__(
             transform=CompositeTransform(layers),
-            distribution=StandardNormal([features]),
+            distribution=_make_base_distribution(features, base_std),
         )
 
 
@@ -85,6 +124,7 @@ class ConditionalGlowAffine(Flow):
         dropout_probability=0.5,
         context_features=None,
         batch_norm_within_layers=True,
+        base_std=1.0,
     ):
         coupling_constructor = ClampedAffineCouplingTransform
 
@@ -115,7 +155,7 @@ class ConditionalGlowAffine(Flow):
 
         super().__init__(
             transform=CompositeTransform(layers),
-            distribution=StandardNormal([features]),
+            distribution=_make_base_distribution(features, base_std),
         )
 
 
@@ -135,6 +175,7 @@ class ConditionalGlowSpline(Flow):
         num_bins=10,
         tails="linear",
         tail_bound=3.0,
+        base_std=1.0,
     ):
         mask = torch.ones(features)
         mask[::2] = -1
@@ -167,5 +208,5 @@ class ConditionalGlowSpline(Flow):
 
         super().__init__(
             transform=CompositeTransform(layers),
-            distribution=StandardNormal([features]),
+            distribution=_make_base_distribution(features, base_std),
         )
