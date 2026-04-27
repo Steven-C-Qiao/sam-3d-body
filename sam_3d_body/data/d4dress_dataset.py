@@ -17,6 +17,7 @@ from sam_3d_body.data.transforms import (
     TopdownAffine,
     VisionTransformWrapper,
 )
+from sam_3d_body.data.bedlam.utils.image_utils import extreme_crop_bbox
 
 
 def load_pickle(pkl_dir):
@@ -430,6 +431,15 @@ class MultiD4DressDataset(Dataset):
             ), f"D4Dress images expected portrait mode (H>=W), got H={img_h}, W={img_w}"
 
             bbox_center, bbox_scale = bbox_from_mask(mask)
+
+            extreme_crop_prob = float(
+                getattr(self.cfg.DATASET, "EXTREME_CROP_PROB", 0.0)
+            )
+            if extreme_crop_prob > 0 and np.random.rand() < extreme_crop_prob:
+                bbox_center, bbox_scale = extreme_crop_bbox(
+                    bbox_center, bbox_scale,
+                    level=int(getattr(self.cfg.DATASET, "EXTREME_CROP_LEVEL", 0)),
+                )
 
             data_info = dict(
                 img=img,

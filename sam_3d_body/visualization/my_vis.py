@@ -32,10 +32,6 @@ DARK_GREY    = (0.35, 0.35, 0.35)
 SALMON       = (0.98, 0.50, 0.45)
 TEAL         = (0.20, 0.63, 0.63)
 
-# Candidate (gt, pred-tint) combinations for vis_samples overlays.
-# Pred is usually coloured by a viridis vertex heatmap, so pred_tint
-# only kicks in for flat-shaded pred renders; the dominant look is
-# driven by the GT colour that sits underneath the heatmap.
 PALETTE_CANDIDATES = {
     "blue_gt":        {"gt": BLUE,        "pred_tint": LIGHT_ORANGE},
     "light_grey_gt":  {"gt": LIGHT_GREY,  "pred_tint": BLUE},
@@ -44,11 +40,11 @@ PALETTE_CANDIDATES = {
     "teal_gt":        {"gt": TEAL,        "pred_tint": LIGHT_ORANGE},
     "dark_grey_gt":   {"gt": DARK_GREY,   "pred_tint": LIGHT_ORANGE},
 }
-
-# Switch this to try a different scheme in vis_samples.
 ACTIVE_PALETTE = "light_grey_gt"
 GT_COLOR   = PALETTE_CANDIDATES[ACTIVE_PALETTE]["gt"]
 PRED_COLOR = PALETTE_CANDIDATES[ACTIVE_PALETTE]["pred_tint"]
+
+FIXED_CLBR_MAX_M = 0.20
 
 
 def vis_histogram(
@@ -332,6 +328,8 @@ def vis_samples(
     overlay_gt=True,
     plot_side=True,
     plot_neutral=True,
+    plot_sc=False,
+    fixed_clbr: bool = True,
     max_sample: Optional[int] = 10,
 ):
     def _to_np(x):
@@ -388,17 +386,28 @@ def vis_samples(
     kp2d_visible_mean_px = m.get("kp2d_pixel_error_visible")
     spread_invisible_samples = m.get("spread_invisible_kp3d_samples")
 
-    # ---- per-vertex spread colours, shared inferno scale ----
+    # ---- per-vertex error colours vs GT, shared inferno scale ----
+    gt_verts_b_for_color = gt_verts[b]
     per_sample_dists = np.linalg.norm(
-        mhr_samples[b, order] - mean_pred_vertices_np[None], axis=-1
+        mhr_samples[b, order] - gt_verts_b_for_color[None], axis=-1
     )  # (n_vis, V)
-    shared_max = float(per_sample_dists.max()) if per_sample_dists.size else 1.0
+    mean_dists = np.linalg.norm(
+        mean_pred_vertices_np - gt_verts_b_for_color, axis=-1
+    )  # (V,)
+    shared_max = float(max(
+        per_sample_dists.max() if per_sample_dists.size else 0.0,
+        mean_dists.max(),
+    ))
+    if shared_max == 0.0:
+        shared_max = 1.0
+    if fixed_clbr:
+        shared_max = FIXED_CLBR_MAX_M
     vertex_colors_samples = [
         build_vertex_colors(per_sample_dists[i], min_dist=0.0, max_dist=shared_max)
         for i in range(n_vis)
     ]
     vertex_colors_mean = build_vertex_colors(
-        per_sample_dists.mean(axis=0), min_dist=0.0, max_dist=shared_max
+        mean_dists, min_dist=0.0, max_dist=shared_max
     )
 
     # ---- renderers ----
@@ -425,7 +434,7 @@ def vis_samples(
     vertex_colors_pa_samples = None
     vertex_colors_pa_mean = None
     pa_max = 1.0
-    if aligned_samples is not None and aligned_mean is not None:
+    if plot_sc and aligned_samples is not None and aligned_mean is not None:
         pa_sample_dists = np.linalg.norm(aligned_samples - gt_verts_b[None], axis=-1)  # (n_vis, V)
         pa_mean_dists = np.linalg.norm(aligned_mean - gt_verts_b, axis=-1)  # (V,)
         pa_max = float(max(
@@ -434,6 +443,8 @@ def vis_samples(
         ))
         if pa_max == 0.0:
             pa_max = 1.0
+        if fixed_clbr:
+            pa_max = FIXED_CLBR_MAX_M
         vertex_colors_pa_samples = [
             build_vertex_colors(pa_sample_dists[i], min_dist=0.0, max_dist=pa_max)
             for i in range(n_vis)
@@ -467,30 +478,53 @@ def vis_samples(
         pvetsc_mean = float(_to_np(pvetsc_mean)[b]) if pvetsc_mean is not None else \
             float(np.linalg.norm(pred_neutral_sc - gt_neutral, axis=-1).mean()) * 1000.0
 
-        # ---- neutral per-vertex spread colours (shared inferno scale per row) ----
+        # ---- neutral per-vertex error colours vs GT (shared inferno scale per row) ----
         neutral_dists = np.linalg.norm(
-            sample_neutral - pred_neutral[None], axis=-1
+            sample_neutral - gt_neutral[None], axis=-1
         )  # (n_vis, V)
-        neutral_max = float(neutral_dists.max()) if neutral_dists.size else 1.0
+        neutral_mean_dists = np.linalg.norm(
+            pred_neutral - gt_neutral, axis=-1
+        )  # (V,)
+        neutral_max = float(max(
+            neutral_dists.max() if neutral_dists.size else 0.0,
+            neutral_mean_dists.max(),
+        ))
+        if neutral_max == 0.0:
+            neutral_max = 1.0
+        if fixed_clbr:
+            neutral_max = FIXED_CLBR_MAX_M
         vertex_colors_neutral_samples = [
             build_vertex_colors(neutral_dists[i], min_dist=0.0, max_dist=neutral_max)
             for i in range(n_vis)
         ]
         vertex_colors_neutral_mean = build_vertex_colors(
-            neutral_dists.mean(axis=0), min_dist=0.0, max_dist=neutral_max
+            neutral_mean_dists, min_dist=0.0, max_dist=neutral_max
         )
 
-        neutral_sc_dists = np.linalg.norm(
-            sample_neutral_sc - pred_neutral_sc[None], axis=-1
-        )
-        neutral_sc_max = float(neutral_sc_dists.max()) if neutral_sc_dists.size else 1.0
-        vertex_colors_neutral_sc_samples = [
-            build_vertex_colors(neutral_sc_dists[i], min_dist=0.0, max_dist=neutral_sc_max)
-            for i in range(n_vis)
-        ]
-        vertex_colors_neutral_sc_mean = build_vertex_colors(
-            neutral_sc_dists.mean(axis=0), min_dist=0.0, max_dist=neutral_sc_max
-        )
+        if plot_sc:
+            neutral_sc_dists = np.linalg.norm(
+                sample_neutral_sc - gt_neutral[None], axis=-1
+            )
+            neutral_sc_mean_dists = np.linalg.norm(
+                pred_neutral_sc - gt_neutral, axis=-1
+            )
+            neutral_sc_max = float(max(
+                neutral_sc_dists.max() if neutral_sc_dists.size else 0.0,
+                neutral_sc_mean_dists.max(),
+            ))
+            if neutral_sc_max == 0.0:
+                neutral_sc_max = 1.0
+            if fixed_clbr:
+                neutral_sc_max = FIXED_CLBR_MAX_M
+            vertex_colors_neutral_sc_samples = [
+                build_vertex_colors(neutral_sc_dists[i], min_dist=0.0, max_dist=neutral_sc_max)
+                for i in range(n_vis)
+            ]
+            vertex_colors_neutral_sc_mean = build_vertex_colors(
+                neutral_sc_mean_dists, min_dist=0.0, max_dist=neutral_sc_max
+            )
+        else:
+            neutral_sc_max = 1.0
     white_bg_full = np.full_like(img_cv2, 255, dtype=np.uint8)
     if img_size is not None:
         black_bg = np.zeros((int(img_size[1]), int(img_size[0]), 3), dtype=np.uint8)
@@ -590,32 +624,33 @@ def vis_samples(
             img_side_list.append(img_side)
 
             # ----------------------- PA-aligned side view -----------------------
-            gt_pa = renderer_side(
-                gt_verts_b - gt_root,
-                generic_camera,
-                black_bg,
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=90,
-            )
-            pa_pred_rgba = renderer_side(
-                aligned_samples[i] - gt_root,
-                generic_camera,
-                black_bg,
-                vertex_colors=vertex_colors_pa_samples[i],
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=90,
-                return_rgba=True,
-            )
-            img_pa = _to_uint8(_overlay_rgba(pa_pred_rgba, gt_pa))
+            if plot_sc and vertex_colors_pa_samples is not None:
+                gt_pa = renderer_side(
+                    gt_verts_b - gt_root,
+                    generic_camera,
+                    black_bg,
+                    mesh_base_color=GT_COLOR,
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=90,
+                )
+                pa_pred_rgba = renderer_side(
+                    aligned_samples[i] - gt_root,
+                    generic_camera,
+                    black_bg,
+                    vertex_colors=vertex_colors_pa_samples[i],
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=90,
+                    return_rgba=True,
+                )
+                img_pa = _to_uint8(_overlay_rgba(pa_pred_rgba, gt_pa))
 
-            pa_lines = []
-            if pampjpe_samples is not None:
-                pa_lines.append(f"PA-MPJPE: {float(pampjpe_samples[b, orig_i]):.1f} mm")
-            _draw_label_lines(img_pa, pa_lines)
-            img_pa_list.append(img_pa)
+                pa_lines = []
+                if pampjpe_samples is not None:
+                    pa_lines.append(f"PA-MPJPE: {float(pampjpe_samples[b, orig_i]):.1f} mm")
+                _draw_label_lines(img_pa, pa_lines)
+                img_pa_list.append(img_pa)
 
             # ----------------------- neutral raw -----------------------
             if neutral_available:
@@ -643,28 +678,29 @@ def vis_samples(
                 img_neutral_list.append(img_n)
 
                 # ----------------------- neutral scale+trans aligned -----------------------
-                gt_nsc = renderer_side(
-                    gt_neutral - neutral_center,
-                    generic_camera,
-                    black_bg,
-                    mesh_base_color=GT_COLOR,
-                    scene_bg_color=(0, 0, 0),
-                    side_view=True,
-                    rot_angle=0,
-                )
-                pred_nsc_rgba = renderer_side(
-                    sample_neutral_sc[i] - neutral_center,
-                    generic_camera,
-                    black_bg,
-                    vertex_colors=vertex_colors_neutral_sc_samples[i],
-                    scene_bg_color=(0, 0, 0),
-                    side_view=True,
-                    rot_angle=0,
-                    return_rgba=True,
-                )
-                img_nsc = _to_uint8(_overlay_rgba(pred_nsc_rgba, gt_nsc))
-                _draw_label_lines(img_nsc, [f"PVE-T-SC: {float(pvetsc_samples[i]):.1f} mm"])
-                img_neutral_sc_list.append(img_nsc)
+                if plot_sc:
+                    gt_nsc = renderer_side(
+                        gt_neutral - neutral_center,
+                        generic_camera,
+                        black_bg,
+                        mesh_base_color=GT_COLOR,
+                        scene_bg_color=(0, 0, 0),
+                        side_view=True,
+                        rot_angle=0,
+                    )
+                    pred_nsc_rgba = renderer_side(
+                        sample_neutral_sc[i] - neutral_center,
+                        generic_camera,
+                        black_bg,
+                        vertex_colors=vertex_colors_neutral_sc_samples[i],
+                        scene_bg_color=(0, 0, 0),
+                        side_view=True,
+                        rot_angle=0,
+                        return_rgba=True,
+                    )
+                    img_nsc = _to_uint8(_overlay_rgba(pred_nsc_rgba, gt_nsc))
+                    _draw_label_lines(img_nsc, [f"PVE-T-SC: {float(pvetsc_samples[i]):.1f} mm"])
+                    img_neutral_sc_list.append(img_nsc)
 
     axis = 0 if stack_vertically else 1
     img_mesh_list = np.concatenate(img_mesh_list, axis=axis)
@@ -675,9 +711,11 @@ def vis_samples(
         img_pa_list = None
     if img_neutral_list:
         img_neutral_list = np.concatenate(img_neutral_list, axis=axis)
-        img_neutral_sc_list = np.concatenate(img_neutral_sc_list, axis=axis)
     else:
         img_neutral_list = None
+    if img_neutral_sc_list:
+        img_neutral_sc_list = np.concatenate(img_neutral_sc_list, axis=axis)
+    else:
         img_neutral_sc_list = None
 
     # ----------------------- Top-left -----------------------
@@ -738,31 +776,33 @@ def vis_samples(
         _draw_label_lines(mean_unc_panel, mean_side_lines)
 
         # ----------------------- Bottom-left (PA-aligned) -----------------------
-        gt_pa_mean = renderer_side(
-            gt_verts_b - gt_root,
-            generic_camera,
-            black_bg,
-            mesh_base_color=GT_COLOR,
-            scene_bg_color=(0, 0, 0),
-            side_view=True,
-            rot_angle=90,
-        )
-        mean_pa_pred_rgba = renderer_side(
-            aligned_mean - gt_root,
-            generic_camera,
-            black_bg,
-            vertex_colors=vertex_colors_pa_mean,
-            scene_bg_color=(0, 0, 0),
-            side_view=True,
-            rot_angle=90,
-            return_rgba=True,
-        )
-        mean_pa_panel = _to_uint8(_overlay_rgba(mean_pa_pred_rgba, gt_pa_mean))
+        mean_pa_panel = None
+        if plot_sc and vertex_colors_pa_mean is not None:
+            gt_pa_mean = renderer_side(
+                gt_verts_b - gt_root,
+                generic_camera,
+                black_bg,
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+            )
+            mean_pa_pred_rgba = renderer_side(
+                aligned_mean - gt_root,
+                generic_camera,
+                black_bg,
+                vertex_colors=vertex_colors_pa_mean,
+                scene_bg_color=(0, 0, 0),
+                side_view=True,
+                rot_angle=90,
+                return_rgba=True,
+            )
+            mean_pa_panel = _to_uint8(_overlay_rgba(mean_pa_pred_rgba, gt_pa_mean))
 
-        mean_pa_lines = []
-        if pampjpe_mean is not None:
-            mean_pa_lines.append(f"PA-MPJPE (mean): {float(pampjpe_mean[b]):.1f} mm")
-        _draw_label_lines(mean_pa_panel, mean_pa_lines)
+            mean_pa_lines = []
+            if pampjpe_mean is not None:
+                mean_pa_lines.append(f"PA-MPJPE (mean): {float(pampjpe_mean[b]):.1f} mm")
+            _draw_label_lines(mean_pa_panel, mean_pa_lines)
 
         # ----------------------- mean neutral panels -----------------------
         mean_neutral_panel = None
@@ -790,18 +830,19 @@ def vis_samples(
             mean_neutral_panel = _to_uint8(_overlay_rgba(pred_n_mean_rgba, gt_n_mean))
             _draw_label_lines(mean_neutral_panel, [f"PVE (mean): {pve_mean:.1f} mm"])
 
-            pred_nsc_mean_rgba = renderer_side(
-                pred_neutral_sc - neutral_center,
-                generic_camera,
-                black_bg,
-                vertex_colors=vertex_colors_neutral_sc_mean,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=0,
-                return_rgba=True,
-            )
-            mean_neutral_sc_panel = _to_uint8(_overlay_rgba(pred_nsc_mean_rgba, gt_n_mean))
-            _draw_label_lines(mean_neutral_sc_panel, [f"PVE-T-SC (mean): {pvetsc_mean:.1f} mm"])
+            if plot_sc:
+                pred_nsc_mean_rgba = renderer_side(
+                    pred_neutral_sc - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    vertex_colors=vertex_colors_neutral_sc_mean,
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                    return_rgba=True,
+                )
+                mean_neutral_sc_panel = _to_uint8(_overlay_rgba(pred_nsc_mean_rgba, gt_n_mean))
+                _draw_label_lines(mean_neutral_sc_panel, [f"PVE-T-SC (mean): {pvetsc_mean:.1f} mm"])
 
         if affine is not None:
             gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)

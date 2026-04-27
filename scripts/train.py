@@ -35,6 +35,16 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, con
         cfg.TRAIN.LR = lr
         logger.info(f"Overriding TRAIN.LR with CLI value: {lr}")
 
+    if args.plot:
+        cfg.TRAIN.LR = 0.0
+        cfg.DATASET.NOISE_FACTOR = 0.0
+        cfg.DATASET.SCALE_FACTOR = 0.0
+        cfg.DATASET.CROP_PROB = 0.0
+        cfg.DATASET.ALB_PROB = 0.0
+        cfg.MODEL.SHAPE_PERTURB_SCALE = 0.0
+        cfg.MODEL.SCALE_PERTURB_SCALE = 0.0
+        logger.info("--plot set: LR=0, augmentation/perturbation disabled")
+
     # if load_path is not None or resume_path is not None:
     if resume_path is not None:
         config_yaml_path = Path(exp_dir) / "config.yaml"
@@ -132,6 +142,25 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, con
                 model_state_dict[key] = value
 
         if model_state_dict:
+            # Drop entries whose shape doesn't match the current model — e.g.
+            # when the checkpoint was trained with a different head config
+            # (different flow width, different number of MHR params, etc.).
+            # Without this filter, load_state_dict raises on the first mismatch.
+            current_state = model.model.state_dict()
+            shape_mismatched = []
+            for k in list(model_state_dict.keys()):
+                if k in current_state and current_state[k].shape != model_state_dict[k].shape:
+                    shape_mismatched.append(
+                        (k, tuple(model_state_dict[k].shape), tuple(current_state[k].shape))
+                    )
+                    del model_state_dict[k]
+            if shape_mismatched:
+                logger.warning(
+                    f"Skipping {len(shape_mismatched)} shape-mismatched keys:"
+                )
+                for k, ck_shape, m_shape in shape_mismatched:
+                    logger.warning(f"  {k}: ckpt {ck_shape} vs model {m_shape}")
+
             missing_keys, unexpected_keys = model.model.load_state_dict(
                 model_state_dict, strict=False
             )

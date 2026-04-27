@@ -11,7 +11,7 @@ from torch.utils.data import default_collate
 
 from .bedlam import constants
 from .bedlam.constants import NUM_JOINTS_SMPLX
-from .bedlam.utils.image_utils import random_crop, read_img
+from .bedlam.utils.image_utils import extreme_crop_bbox, random_crop, read_img
 from ..configs.config import DATASET_FILES, DATASET_FOLDERS, INDICES_PATH
 
 # Mesh-vertex indices used to extract dense keypoint supervision. Loaded once
@@ -181,7 +181,19 @@ class DatasetHMR(Dataset):
 
         sc = self.scale_aug()
 
-        if self.is_train and self.options.CROP_FACTOR[1] > 0:
+        did_extreme_crop = False
+        if self.is_train and getattr(self.options, "EXTREME_CROP_PROB", 0.0) > 0:
+            if np.random.rand() < self.options.EXTREME_CROP_PROB:
+                center, scale = extreme_crop_bbox(
+                    center, scale, level=self.options.EXTREME_CROP_LEVEL,
+                )
+                did_extreme_crop = True
+
+        if (
+            not did_extreme_crop
+            and self.is_train
+            and self.options.CROP_FACTOR[1] > 0
+        ):
             if np.random.rand() < self.options.CROP_PROB:
                 cf = np.random.uniform(
                     self.options.CROP_FACTOR[0], self.options.CROP_FACTOR[1]
@@ -496,7 +508,15 @@ class MultiViewEvaluationDataset(Dataset):
 
         sc = self.scale_aug()
 
-        if self.options.CROP_FACTOR[1] > 0:
+        did_extreme_crop = False
+        if getattr(self.options, "EXTREME_CROP_PROB", 0.0) > 0:
+            if np.random.rand() < self.options.EXTREME_CROP_PROB:
+                center, scale = extreme_crop_bbox(
+                    center, scale, level=self.options.EXTREME_CROP_LEVEL,
+                )
+                did_extreme_crop = True
+
+        if not did_extreme_crop and self.options.CROP_FACTOR[1] > 0:
             if np.random.rand() < self.options.CROP_PROB:
                 cf = np.random.uniform(
                     self.options.CROP_FACTOR[0], self.options.CROP_FACTOR[1]

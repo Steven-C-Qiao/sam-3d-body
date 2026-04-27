@@ -16,12 +16,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.strategies import DDPStrategy
 
 import sys
-
 sys.path.append(".")
 
-import sys
-
-sys.path.append(".")
 from sam_3d_body.trainer import Trainer
 from sam_3d_body.configs.config import get_config_defaults
 
@@ -30,30 +26,20 @@ CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 CONFIG_PATH = "checkpoints/sam-3d-body-dinov3/model_config.yaml"
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered", noplot=False, langevin_kwargs=None, num_samples=100):
+def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered", noplot=False, langevin_kwargs=None, num_samples=100, config_path=None):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
 
-    if load_path is not None or resume_path is not None:
+    if config_path is not None:
+        logger.info(f"Loading config overrides from CLI: {config_path}")
+        cfg.merge_from_file(config_path)
+
+    if resume_path is not None:
         config_yaml_path = Path(exp_dir) / "config.yaml"
         if config_yaml_path.exists():
             logger.info(f"Loading config overrides from {config_yaml_path}")
             cfg.merge_from_file(str(config_yaml_path))
-
-
-    if dev:
-        cfg.TRAIN.NUM_EPOCHS = 1
-        cfg.DATASET.BATCH_SIZE = 2
-        exp_dir = "exp/exp_test"
-        num_sanity_val_steps = 0
-    else:
-        num_sanity_val_steps = 2
-
-    # In dev mode, restrict BEDLAM training datasets to a single small subset
-    if dev:
-        cfg.DATASET.DATASETS_AND_RATIOS = "static-hdri-bbox44-smplx"
-
     
     cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH = (
         "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
@@ -151,6 +137,13 @@ if __name__ == "__main__":
         default=None,
         help="Options: None, 4d-dress, ssp3d",
     )
+    parser.add_argument(
+        "--config",
+        "-C",
+        type=str,
+        default=None,
+        help="YAML config override file (merged on top of defaults).",
+    )
     parser.add_argument("--dev", action="store_true")
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--noplot", action="store_true", help="Skip visualisation.")
@@ -224,4 +217,5 @@ if __name__ == "__main__":
         noplot=args.noplot,
         langevin_kwargs=langevin_kwargs,
         num_samples=args.num_samples,
+        config_path=args.config,
     )

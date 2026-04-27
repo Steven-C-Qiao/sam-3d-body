@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import torch
 from loguru import logger
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from yacs.config import CfgNode
 
 from .data.bedlam_dataset import MHR_DENSE_KP_INDICES
@@ -81,6 +81,10 @@ class Trainer(BaseLightningModule):
     Trainer class that extends SAM3DBody with PyTorch Lightning training logic.
     Inherits all model functionality from SAM3DBody.
     """
+
+    # Fixed RNG seed used to pick the --plot sub-dataset indices, so different
+    # plotting runs compare the same underlying images.
+    PLOT_SUBSET_SEED = 20260423
 
     def __init__(
         self,
@@ -306,8 +310,9 @@ class Trainer(BaseLightningModule):
                 stack_vertically=False,
                 overlay_gt=True,
                 plot_side=True,
-                plot_neutral=True,
-                max_sample=4,
+                plot_neutral=False,
+                plot_sc=False,
+                max_sample=25,
             )
             rend_img = vis_prediction(
                 image,
@@ -541,18 +546,34 @@ class Trainer(BaseLightningModule):
         options = self.cfg.DATASET
         dataset_names = options.DATASETS_AND_RATIOS.split("_")
         dataset_list = [BEDLAMDataset(options, ds) for ds in dataset_names]
+        if self.always_visualise:
+            # --plot mode: deterministic one-batch-per-sub-dataset pass.
+            # Pick `batch_size` indices per sub-dataset via a fixed-seed RNG so
+            # that different plotting runs (different configs / checkpoints)
+            # visualise the same underlying images.
+            bs = self.cfg.DATASET.BATCH_SIZE
+            rng = np.random.default_rng(self.PLOT_SUBSET_SEED)
+            picked = []
+            for ds in dataset_list:
+                n = len(ds)
+                k = min(bs, n)
+                idx = rng.choice(n, size=k, replace=False)
+                idx = np.sort(idx).tolist()
+                picked.append(Subset(ds, idx))
+            dataset_list = picked
         train_ds = ConcatDataset(dataset_list)
 
         return train_ds
 
     def train_dataloader(self):
         self.train_ds = self.train_dataset()
+        shuffle = not self.always_visualise
         return DataLoader(
             dataset=self.train_ds,
             batch_size=self.cfg.DATASET.BATCH_SIZE,
             num_workers=self.cfg.DATASET.NUM_WORKERS,
             pin_memory=self.cfg.DATASET.PIN_MEMORY,
-            shuffle=True,
+            shuffle=shuffle,
             drop_last=True,
             collate_fn=bedlam_collate,
         )

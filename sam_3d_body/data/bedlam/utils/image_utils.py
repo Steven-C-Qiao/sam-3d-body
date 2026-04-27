@@ -249,6 +249,63 @@ def random_crop(center, scale, crop_scale_factor, axis='all'):
     return center, scale
 
 
+# Body-part anchors for extreme cropping. Each entry is
+# (cy_frac, cx_offset_frac, size_frac), expressed relative to the original
+# square bbox of side `scale * 200` and assuming the bbox brackets a roughly
+# upright body (head at top, feet at bottom):
+#   cy_frac: vertical centre of the new bbox, as fraction of orig bbox top→bottom
+#   cx_offset_frac: horizontal centre offset, as fraction of orig bbox side
+#   size_frac: side length of the new (square) bbox, as fraction of orig side
+# Adapted from CameraHMR's keypoint-based extreme cropping
+# (github.com/pixelite1201/CameraHMR), but operates on bbox geometry only —
+# we don't need 2D keypoints because the trainer projects GT keypoints through
+# the (modified) affine and masks out-of-frame ones via the visibility check.
+_EXTREME_CROP_PARTS = {
+    'hips':      (0.32, 0.00, 0.70),  # head down through hips
+    'shoulders': (0.22, 0.00, 0.50),  # head + shoulders + chest
+    'head':      (0.10, 0.00, 0.25),  # head only
+    'torso':     (0.35, 0.00, 0.35),  # chest / mid-torso
+    'rightarm':  (0.30, -0.20, 0.45),
+    'leftarm':   (0.30,  0.20, 0.45),
+    'legs':      (0.78, 0.00, 0.55),  # hips down through feet
+    'rightleg':  (0.78, -0.10, 0.50),
+    'leftleg':   (0.78,  0.10, 0.50),
+}
+
+_EXTREME_CROP_LEVEL_0 = (
+    ['hips', 'shoulders', 'head'],
+    [0.7, 0.2, 0.1],
+)
+_EXTREME_CROP_LEVEL_1 = (
+    list(_EXTREME_CROP_PARTS.keys()),
+    [1.0 / len(_EXTREME_CROP_PARTS)] * len(_EXTREME_CROP_PARTS),
+)
+
+
+def extreme_crop_bbox(center, scale, level=0):
+    '''
+    Replace the bbox with a tighter sub-bbox focused on a body part.
+
+    center: bbox center [x,y] in image-pixel space (numpy array, shape (2,))
+    scale: scalar, bbox side length / 200 (BEDLAM uses square bboxes)
+    level: 0 = mild (hips/shoulders/head only), 1 = aggressive (also arms/legs/torso)
+
+    Returns (new_center, new_scale) in the same units. Does not clip to image bounds.
+    '''
+    choices, probs = _EXTREME_CROP_LEVEL_0 if level == 0 else _EXTREME_CROP_LEVEL_1
+    part = np.random.choice(choices, p=probs)
+    cy_frac, cx_offset_frac, size_frac = _EXTREME_CROP_PARTS[part]
+
+    orig_size = float(scale) * 200.0
+    new_size = size_frac * orig_size
+    new_cy = (center[1] - 0.5 * orig_size) + cy_frac * orig_size
+    new_cx = center[0] + cx_offset_frac * orig_size
+
+    new_center = np.array([new_cx, new_cy], dtype=np.float32)
+    new_scale = np.float32(new_size / 200.0)
+    return new_center, new_scale
+
+
 def uncrop(img, center, scale, orig_shape, rot=0, is_rgb=True):
     """'Undo' the image cropping/resizing.
     This function is used when evaluating mask/part segmentation.
