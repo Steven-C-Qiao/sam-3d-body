@@ -155,6 +155,55 @@ def scale_and_translation_transform_batch_torch(P, T):
     return P_transformed
 
 
+def scale_and_translation_transform_batch_masked(P, T, mask):
+    """Like ``scale_and_translation_transform_batch`` but the centroid + RMS scale
+    are computed only over the masked subset of vertices. The resulting (translation,
+    scale) transform is then applied to **all** vertices so the full mesh remains
+    available for rendering / downstream use.
+
+    :param P: (..., N, 3) numpy array.
+    :param T: (..., N, 3) numpy array (broadcasted to P).
+    :param mask: (N,) boolean numpy array selecting vertices used for alignment.
+    """
+    Pb = P[..., mask, :]
+    Tb = T[..., mask, :]
+    P_mean = Pb.mean(axis=-2, keepdims=True)
+    P_scale = np.sqrt(((Pb - P_mean) ** 2).sum(axis=(-2, -1), keepdims=True) / Pb.shape[-2])
+    T_mean = Tb.mean(axis=-2, keepdims=True)
+    T_scale = np.sqrt(((Tb - T_mean) ** 2).sum(axis=(-2, -1), keepdims=True) / Tb.shape[-2])
+    return (P - P_mean) / P_scale * T_scale + T_mean
+
+
+def scale_and_translation_transform_batch_torch_masked(P, T, mask):
+    """Torch version of ``scale_and_translation_transform_batch_masked``.
+
+    :param P: (B, N, 3) torch tensor.
+    :param T: (B, N, 3) torch tensor.
+    :param mask: (N,) boolean torch tensor.
+    """
+    Pb = P[:, mask, :]
+    Tb = T[:, mask, :]
+    P_mean = Pb.mean(dim=1, keepdim=True)
+    P_scale = torch.sqrt(((Pb - P_mean) ** 2).sum(dim=(1, 2), keepdim=True) / Pb.shape[1])
+    T_mean = Tb.mean(dim=1, keepdim=True)
+    T_scale = torch.sqrt(((Tb - T_mean) ** 2).sum(dim=(1, 2), keepdim=True) / Tb.shape[1])
+    return (P - P_mean) / P_scale * T_scale + T_mean
+
+
+_BODY_MASK_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "assets",
+    "head_hand_mask.npz",
+)
+
+
+def load_body_vertex_mask_np(path: str = _BODY_MASK_PATH) -> np.ndarray:
+    """Load the body-only vertex mask (head + hands excluded) as a bool array of
+    shape (18439,)."""
+    data = np.load(path)
+    return data["body_mask"] > 0.5
+
+
 
 
 def mpjpe(pred, gt, reduction="mean"):
@@ -211,6 +260,10 @@ class Metrics(pl.LightningModule):
     def __init__(self, mhr_head=None):
         super().__init__()
         object.__setattr__(self, "mhr_head", mhr_head)
+        body_mask_np = load_body_vertex_mask_np()
+        self.register_buffer(
+            "body_vertex_mask", torch.from_numpy(body_mask_np), persistent=False
+        )
 
     def _neutral_forward(self, shape_params, scale_offsets, templates):
         """Run mhr_forward with zero global_rot/pose/hand/face; returns Y/Z-flipped verts."""
@@ -414,6 +467,15 @@ class Metrics(pl.LightningModule):
                 ((pred_neutral_sc - gt_neutral) ** 2).sum(dim=-1)
             ).mean(dim=-1) * 1000.0
 
+            body_mask = self.body_vertex_mask.to(pred_neutral.device)
+            pred_neutral_sc_body = scale_and_translation_transform_batch_torch_masked(
+                pred_neutral, gt_neutral, body_mask
+            )
+            vis_verts["pred_neutral_verts_sc_body"] = pred_neutral_sc_body
+            metrics["pvetsc_body"] = torch.sqrt(
+                ((pred_neutral_sc_body - gt_neutral) ** 2).sum(dim=-1)[:, body_mask]
+            ).mean(dim=-1) * 1000.0
+
             if "shape_samples" in predictions.get("uncertainty_output", {}):
                 unc = predictions["uncertainty_output"]
                 shape_s = unc["shape_samples"]
@@ -431,11 +493,21 @@ class Metrics(pl.LightningModule):
                 ).reshape(B, S, *sample_neutral.shape[2:])
                 vis_verts["sample_neutral_verts_sc"] = sample_neutral_sc
 
+                sample_neutral_sc_body = scale_and_translation_transform_batch_torch_masked(
+                    sample_neutral.reshape(B * S, *sample_neutral.shape[2:]),
+                    gt_neutral_exp.reshape(B * S, *sample_neutral.shape[2:]),
+                    body_mask,
+                ).reshape(B, S, *sample_neutral.shape[2:])
+                vis_verts["sample_neutral_verts_sc_body"] = sample_neutral_sc_body
+
                 metrics["pve_samples"] = torch.sqrt(
                     ((sample_neutral - gt_neutral[:, None]) ** 2).sum(dim=-1)
                 ).mean(dim=-1) * 1000.0
                 metrics["pvetsc_samples"] = torch.sqrt(
                     ((sample_neutral_sc - gt_neutral[:, None]) ** 2).sum(dim=-1)
+                ).mean(dim=-1) * 1000.0
+                metrics["pvetsc_body_samples"] = torch.sqrt(
+                    ((sample_neutral_sc_body - gt_neutral[:, None]) ** 2).sum(dim=-1)[..., body_mask]
                 ).mean(dim=-1) * 1000.0
 
         return metrics, vis_verts
@@ -452,6 +524,12 @@ def _pvetsc_torch(pred, gt):
     """Scale+translation-aligned PVE per item (mean over vertices). Returns (B,)."""
     pred_sc = scale_and_translation_transform_batch_torch(pred, gt)
     return torch.sqrt(((pred_sc - gt) ** 2).sum(dim=-1)).mean(dim=-1)
+
+
+def _pvetsc_body_torch(pred, gt, body_mask):
+    """Body-only PVE-T-SC. Alignment uses only body verts; error is meaned over them."""
+    pred_sc_body = scale_and_translation_transform_batch_torch_masked(pred, gt, body_mask)
+    return torch.sqrt(((pred_sc_body - gt) ** 2).sum(dim=-1)[:, body_mask]).mean(dim=-1)
 
 
 def multiframe_metrics(
@@ -490,8 +568,33 @@ def multiframe_metrics(
     merged_pvetsc = _pvetsc_torch(merged_neutral_verts, gt_neutral_verts)
     avg_pvetsc = _pvetsc_torch(avg_neutral_verts, gt_neutral_verts)
 
+    # ---------------- pvetsc_body (alignment + error over body verts only) ----------
+    # Compute body-aligned verts once and stash on ``mhr_dict`` so that
+    # downstream visualisation (``vis_merging_neutral``) can reuse them rather
+    # than redoing the masked Procrustes.
+    body_mask = torch.from_numpy(load_body_vertex_mask_np()).to(per_view_neutral_verts.device)
+
+    def _align_body(verts):
+        return scale_and_translation_transform_batch_torch_masked(
+            verts, gt_neutral_verts, body_mask
+        )
+
+    def _pvetsc_from_aligned(aligned):
+        return torch.sqrt(((aligned - gt_neutral_verts) ** 2).sum(-1)[:, body_mask]).mean(-1)
+
+    per_view_neutral_verts_sc_body = _align_body(per_view_neutral_verts)
+    merged_neutral_verts_sc_body = _align_body(merged_neutral_verts)
+    avg_neutral_verts_sc_body = _align_body(avg_neutral_verts)
+    mhr_dict["per_view_neutral_verts_sc_body"] = per_view_neutral_verts_sc_body
+    mhr_dict["merged_neutral_verts_sc_body"] = merged_neutral_verts_sc_body
+    mhr_dict["avg_neutral_verts_sc_body"] = avg_neutral_verts_sc_body
+
+    per_view_pvetsc_body = _pvetsc_from_aligned(per_view_neutral_verts_sc_body)
+    merged_pvetsc_body = _pvetsc_from_aligned(merged_neutral_verts_sc_body)
+    avg_pvetsc_body = _pvetsc_from_aligned(avg_neutral_verts_sc_body)
+
     # ---------------- best NF sample by log-prob (per-view argmax of stage-1 log-prob) ----------------
-    best_logprob_sample_mpjpe = best_logprob_sample_pve = best_logprob_sample_pampjpe = best_logprob_sample_pvetsc = None
+    best_logprob_sample_mpjpe = best_logprob_sample_pve = best_logprob_sample_pampjpe = best_logprob_sample_pvetsc = best_logprob_sample_pvetsc_body = None
     if "best_logprob_sample_neutral_verts" in mhr_dict:
         best_logprob_neutral_verts = mhr_dict["best_logprob_sample_neutral_verts"]
         best_logprob_neutral_jcoords = mhr_dict["best_logprob_sample_neutral_jcoords"]
@@ -501,10 +604,13 @@ def multiframe_metrics(
 
         best_logprob_sample_pampjpe = _pampjpe_torch(best_logprob_neutral_jcoords, gt_neutral_jcoords)
         best_logprob_sample_pvetsc = _pvetsc_torch(best_logprob_neutral_verts, gt_neutral_verts)
+        best_logprob_neutral_verts_sc_body = _align_body(best_logprob_neutral_verts)
+        mhr_dict["best_logprob_sample_neutral_verts_sc_body"] = best_logprob_neutral_verts_sc_body
+        best_logprob_sample_pvetsc_body = _pvetsc_from_aligned(best_logprob_neutral_verts_sc_body)
 
     # ---------------- avg / oracle-best over all NF samples ----------------
-    avg_sample_mpjpe = avg_sample_pve = avg_sample_pampjpe = avg_sample_pvetsc = None
-    best_metric_sample_mpjpe = best_metric_sample_pve = best_metric_sample_pampjpe = best_metric_sample_pvetsc = None
+    avg_sample_mpjpe = avg_sample_pve = avg_sample_pampjpe = avg_sample_pvetsc = avg_sample_pvetsc_body = None
+    best_metric_sample_mpjpe = best_metric_sample_pve = best_metric_sample_pampjpe = best_metric_sample_pvetsc = best_metric_sample_pvetsc_body = None
     if "sample_neutral_verts" in mhr_dict:
         sample_verts = mhr_dict["sample_neutral_verts"]    # [B*V, S, n_verts, 3]
         sample_jcoords = mhr_dict["sample_neutral_jcoords"] # [B*V, S, n_joints, 3]
@@ -534,19 +640,27 @@ def multiframe_metrics(
         avg_sample_pvetsc = sample_pvetsc_per_s.mean(dim=1)
         best_metric_sample_pvetsc = sample_pvetsc_per_s.min(dim=1).values
 
+        sample_pvetsc_body_per_s = _pvetsc_body_torch(sample_verts_flat, gt_verts_tiled, body_mask).reshape(BV, S)
+        avg_sample_pvetsc_body = sample_pvetsc_body_per_s.mean(dim=1)
+        best_metric_sample_pvetsc_body = sample_pvetsc_body_per_s.min(dim=1).values
+
     # ---------------- sample-param-average (mean of residual samples → MHR once) ----------------
-    sample_param_avg_pampjpe = sample_param_avg_pvetsc = None
+    sample_param_avg_pampjpe = sample_param_avg_pvetsc = sample_param_avg_pvetsc_body = None
     if "sample_param_avg_neutral_verts" in mhr_dict:
         sp_avg_verts = mhr_dict["sample_param_avg_neutral_verts"]
         sp_avg_jcoords = mhr_dict["sample_param_avg_neutral_jcoords"]
 
         sample_param_avg_pampjpe = _pampjpe_torch(sp_avg_jcoords, gt_neutral_jcoords)
         sample_param_avg_pvetsc = _pvetsc_torch(sp_avg_verts, gt_neutral_verts)
+        sample_param_avg_neutral_verts_sc_body = _align_body(sp_avg_verts)
+        mhr_dict["sample_param_avg_neutral_verts_sc_body"] = sample_param_avg_neutral_verts_sc_body
+        sample_param_avg_pvetsc_body = _pvetsc_from_aligned(sample_param_avg_neutral_verts_sc_body)
 
     # print(f"mpjpe: view avg: {per_view_mpjpe.mean():.4f}, view min: {per_view_mpjpe.min():.4f}, mean: {avg_mpjpe.mean():.4f} merged: {merged_mpjpe.mean():.4f}")
     # print(f"pve: view avg: {per_view_pve.mean():.4f}, view min: {per_view_pve.min():.4f}, mean: {avg_pve.mean():.4f}, merged: {merged_pve.mean():.4f}")
-    print(f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {avg_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}")
+    # print(f"pampjpe: view avg: {per_view_pampjpe.mean():.4f}, view min: {per_view_pampjpe.min():.4f}, mean: {avg_pampjpe.mean():.4f}, merged: {merged_pampjpe.mean():.4f}")
     print(f"pvetsc: view avg: {per_view_pvetsc.mean():.4f}, view min: {per_view_pvetsc.min():.4f}, mean: {avg_pvetsc.mean():.4f}, merged: {merged_pvetsc.mean():.4f}")
+    print(f"pvetsc_body: view avg: {per_view_pvetsc_body.mean():.4f}, view min: {per_view_pvetsc_body.min():.4f}, mean: {avg_pvetsc_body.mean():.4f}, merged: {merged_pvetsc_body.mean():.4f}")
 
     all_metrics["per_view_mpjpe"].append(per_view_mpjpe)
     all_metrics["best_per_view_mpjpe"].append(per_view_mpjpe.min().item())
@@ -568,29 +682,45 @@ def multiframe_metrics(
     all_metrics["avg_pvetsc"].append(avg_pvetsc)
     all_metrics["merged_pvetsc"].append(merged_pvetsc)
 
+    all_metrics["per_view_pvetsc_body"].append(per_view_pvetsc_body)
+    all_metrics["best_per_view_pvetsc_body"].append(per_view_pvetsc_body.min().item())
+    all_metrics["avg_pvetsc_body"].append(avg_pvetsc_body)
+    all_metrics["merged_pvetsc_body"].append(merged_pvetsc_body)
+
     if best_logprob_sample_mpjpe is not None:
         all_metrics["best_logprob_sample_mpjpe"].append(best_logprob_sample_mpjpe)
         all_metrics["best_logprob_sample_pve"].append(best_logprob_sample_pve)
         all_metrics["best_logprob_sample_pampjpe"].append(best_logprob_sample_pampjpe)
         all_metrics["best_logprob_sample_pvetsc"].append(best_logprob_sample_pvetsc)
+        all_metrics["best_logprob_sample_pvetsc_body"].append(best_logprob_sample_pvetsc_body)
 
     if avg_sample_mpjpe is not None:
         all_metrics["avg_sample_mpjpe"].append(avg_sample_mpjpe)
         all_metrics["avg_sample_pve"].append(avg_sample_pve)
         all_metrics["avg_sample_pampjpe"].append(avg_sample_pampjpe)
         all_metrics["avg_sample_pvetsc"].append(avg_sample_pvetsc)
+        all_metrics["avg_sample_pvetsc_body"].append(avg_sample_pvetsc_body)
         all_metrics["best_pve_sample_pve"].append(best_metric_sample_pve)
         all_metrics["best_mpjpe_sample_mpjpe"].append(best_metric_sample_mpjpe)
         all_metrics["best_pampjpe_sample_pampjpe"].append(best_metric_sample_pampjpe)
         all_metrics["best_pvetsc_sample_pvetsc"].append(best_metric_sample_pvetsc)
+        all_metrics["best_pvetsc_body_sample_pvetsc_body"].append(best_metric_sample_pvetsc_body)
 
     if sample_param_avg_pampjpe is not None:
         all_metrics["sample_param_avg_pampjpe"].append(sample_param_avg_pampjpe)
         all_metrics["sample_param_avg_pvetsc"].append(sample_param_avg_pvetsc)
+        all_metrics["sample_param_avg_pvetsc_body"].append(sample_param_avg_pvetsc_body)
         all_metrics["best_sample_param_avg_pampjpe"].append(sample_param_avg_pampjpe.min().item())
         all_metrics["best_sample_param_avg_pvetsc"].append(sample_param_avg_pvetsc.min().item())
-        print(sample_param_avg_pampjpe, sample_param_avg_pvetsc)
-        print(f"best_sample_param_avg_pampjpe: {sample_param_avg_pampjpe.min().item():.4f}, best_sample_param_avg_pvetsc: {sample_param_avg_pvetsc.min().item():.4f}")
+        all_metrics["best_sample_param_avg_pvetsc_body"].append(sample_param_avg_pvetsc_body.min().item())
+        # print(f"sample_param_avg_pampjpe: {sample_param_avg_pampjpe}, sample_param_avg_pvetsc: {sample_param_avg_pvetsc}")
+        # print(f"sample_param_avg_pvetsc_body: {sample_param_avg_pvetsc_body}")
+        # print(f"best_sample_param_avg_pampjpe: {sample_param_avg_pampjpe.min().item():.4f}, best_sample_param_avg_pvetsc: {sample_param_avg_pvetsc.min().item():.4f}")
+        # print(f"best_sample_param_avg_pvetsc_body: {sample_param_avg_pvetsc_body.min().item():.4f}")
+        print(f"sample_param_avg_pvetsc: {sample_param_avg_pvetsc}")
+        print(f"sample_param_avg_pvetsc_body: {sample_param_avg_pvetsc_body}")
+        print(f"best_sample_param_avg_pvetsc: {sample_param_avg_pvetsc.min().item():.4f}")
+        print(f"best_sample_param_avg_pvetsc_body: {sample_param_avg_pvetsc_body.min().item():.4f}")
         print('')
 
 

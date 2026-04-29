@@ -18,8 +18,22 @@ if "PYOPENGL_PLATFORM" not in os.environ:
 import pyrender
 import trimesh
 
-from sam_3d_body.metrics.metrics_tracker import scale_and_translation_transform_batch
+from sam_3d_body.metrics.metrics_tracker import (
+    load_body_vertex_mask_np,
+    scale_and_translation_transform_batch,
+    scale_and_translation_transform_batch_masked,
+)
 from sam_3d_body.visualization.renderer import Renderer
+
+_BODY_VERTEX_MASK = None
+
+
+def _get_body_vertex_mask():
+    """Cached bool (18439,) — True for body verts (head + hands excluded)."""
+    global _BODY_VERTEX_MASK
+    if _BODY_VERTEX_MASK is None:
+        _BODY_VERTEX_MASK = load_body_vertex_mask_np()
+    return _BODY_VERTEX_MASK
 
 # Base named colours
 LIGHT_BLUE   = (0.65098039, 0.74117647, 0.85882353)
@@ -422,6 +436,7 @@ def vis_samples(
     img_pa_list = []
     img_neutral_list = []
     img_neutral_sc_list = []
+    img_neutral_sc_body_list = []
 
     # ---- precomputed aligned/neutral vertices (supplied by metrics tracker) ----
     gt_verts_b = gt_verts[b]
@@ -463,6 +478,8 @@ def vis_samples(
         sample_neutral = _to_np(vv["sample_neutral_verts"])[b, order]
         pred_neutral_sc = _to_np(vv["pred_neutral_verts_sc"])[b]
         sample_neutral_sc = _to_np(vv["sample_neutral_verts_sc"])[b, order]
+        pred_neutral_sc_body = _to_np(vv["pred_neutral_verts_sc_body"])[b]
+        sample_neutral_sc_body = _to_np(vv["sample_neutral_verts_sc_body"])[b, order]
         neutral_center = gt_neutral.mean(axis=0, keepdims=True) + np.array([[0.0, 0.1, 0.0]])
 
         pve_samples = m.get("pve_samples")
@@ -477,6 +494,13 @@ def vis_samples(
         pvetsc_mean = m.get("pvetsc")
         pvetsc_mean = float(_to_np(pvetsc_mean)[b]) if pvetsc_mean is not None else \
             float(np.linalg.norm(pred_neutral_sc - gt_neutral, axis=-1).mean()) * 1000.0
+        body_mask_np = _get_body_vertex_mask()
+        pvetsc_body_samples = m.get("pvetsc_body_samples")
+        pvetsc_body_samples = _to_np(pvetsc_body_samples)[b, order] if pvetsc_body_samples is not None else \
+            np.linalg.norm(sample_neutral_sc_body - gt_neutral[None], axis=-1)[:, body_mask_np].mean(axis=-1) * 1000.0
+        pvetsc_body_mean = m.get("pvetsc_body")
+        pvetsc_body_mean = float(_to_np(pvetsc_body_mean)[b]) if pvetsc_body_mean is not None else \
+            float(np.linalg.norm(pred_neutral_sc_body - gt_neutral, axis=-1)[body_mask_np].mean()) * 1000.0
 
         # ---- neutral per-vertex error colours vs GT (shared inferno scale per row) ----
         neutral_dists = np.linalg.norm(
@@ -502,6 +526,30 @@ def vis_samples(
         )
 
         if plot_sc:
+            # ---- body-only aligned per-vertex error for the new pvetsc_body row ----
+            nsc_body_dists = np.linalg.norm(
+                sample_neutral_sc_body - gt_neutral[None], axis=-1
+            )
+            nsc_body_mean_dists = np.linalg.norm(
+                pred_neutral_sc_body - gt_neutral, axis=-1
+            )
+            # Range derived from body verts only — face/hand saturate informatively.
+            nsc_body_max = float(max(
+                nsc_body_dists[:, body_mask_np].max() if nsc_body_dists.size else 0.0,
+                nsc_body_mean_dists[body_mask_np].max(),
+            ))
+            if nsc_body_max == 0.0:
+                nsc_body_max = 1.0
+            if fixed_clbr:
+                nsc_body_max = FIXED_CLBR_MAX_M
+            vertex_colors_neutral_sc_body_samples = [
+                build_vertex_colors(nsc_body_dists[i], min_dist=0.0, max_dist=nsc_body_max)
+                for i in range(n_vis)
+            ]
+            vertex_colors_neutral_sc_body_mean = build_vertex_colors(
+                nsc_body_mean_dists, min_dist=0.0, max_dist=nsc_body_max
+            )
+
             neutral_sc_dists = np.linalg.norm(
                 sample_neutral_sc - gt_neutral[None], axis=-1
             )
@@ -702,6 +750,24 @@ def vis_samples(
                     _draw_label_lines(img_nsc, [f"PVE-T-SC: {float(pvetsc_samples[i]):.1f} mm"])
                     img_neutral_sc_list.append(img_nsc)
 
+                    # ----------------------- neutral body-only aligned -----------------------
+                    pred_nsc_body_rgba = renderer_side(
+                        sample_neutral_sc_body[i] - neutral_center,
+                        generic_camera,
+                        black_bg,
+                        vertex_colors=vertex_colors_neutral_sc_body_samples[i],
+                        scene_bg_color=(0, 0, 0),
+                        side_view=True,
+                        rot_angle=0,
+                        return_rgba=True,
+                    )
+                    img_nsc_body = _to_uint8(_overlay_rgba(pred_nsc_body_rgba, gt_nsc))
+                    _draw_label_lines(
+                        img_nsc_body,
+                        [f"PVE-T-SC body: {float(pvetsc_body_samples[i]):.1f} mm"],
+                    )
+                    img_neutral_sc_body_list.append(img_nsc_body)
+
     axis = 0 if stack_vertically else 1
     img_mesh_list = np.concatenate(img_mesh_list, axis=axis)
     img_side_list = np.concatenate(img_side_list, axis=axis)
@@ -717,6 +783,10 @@ def vis_samples(
         img_neutral_sc_list = np.concatenate(img_neutral_sc_list, axis=axis)
     else:
         img_neutral_sc_list = None
+    if img_neutral_sc_body_list:
+        img_neutral_sc_body_list = np.concatenate(img_neutral_sc_body_list, axis=axis)
+    else:
+        img_neutral_sc_body_list = None
 
     # ----------------------- Top-left -----------------------
     if overlay_gt:
@@ -807,6 +877,7 @@ def vis_samples(
         # ----------------------- mean neutral panels -----------------------
         mean_neutral_panel = None
         mean_neutral_sc_panel = None
+        mean_neutral_sc_body_panel = None
         if neutral_available:
             gt_n_mean = renderer_side(
                 gt_neutral - neutral_center,
@@ -844,6 +915,22 @@ def vis_samples(
                 mean_neutral_sc_panel = _to_uint8(_overlay_rgba(pred_nsc_mean_rgba, gt_n_mean))
                 _draw_label_lines(mean_neutral_sc_panel, [f"PVE-T-SC (mean): {pvetsc_mean:.1f} mm"])
 
+                pred_nsc_body_mean_rgba = renderer_side(
+                    pred_neutral_sc_body - neutral_center,
+                    generic_camera,
+                    black_bg,
+                    vertex_colors=vertex_colors_neutral_sc_body_mean,
+                    scene_bg_color=(0, 0, 0),
+                    side_view=True,
+                    rot_angle=0,
+                    return_rgba=True,
+                )
+                mean_neutral_sc_body_panel = _to_uint8(_overlay_rgba(pred_nsc_body_mean_rgba, gt_n_mean))
+                _draw_label_lines(
+                    mean_neutral_sc_body_panel,
+                    [f"PVE-T-SC body (mean): {pvetsc_body_mean:.1f} mm"],
+                )
+
         if affine is not None:
             gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)
 
@@ -859,6 +946,7 @@ def vis_samples(
         mean_pa_panel = np.zeros_like(base_img)
         mean_neutral_panel = None
         mean_neutral_sc_panel = None
+        mean_neutral_sc_body_panel = None
 
     # Build each row and (when rows are horizontal) attach a per-row colorbar.
     # dists are in metres; colorbars are labelled in mm.
@@ -896,6 +984,11 @@ def vis_samples(
         rows.append(_with_cbar(
             np.concatenate([mean_neutral_sc_panel, img_neutral_sc_list], axis=axis),
             neutral_sc_max,
+        ))
+    if img_neutral_sc_body_list is not None and mean_neutral_sc_body_panel is not None:
+        rows.append(_with_cbar(
+            np.concatenate([mean_neutral_sc_body_panel, img_neutral_sc_body_list], axis=axis),
+            nsc_body_max,
         ))
 
     cur_img = np.concatenate(rows, axis=1 - axis)
@@ -3041,7 +3134,13 @@ def vis_merging_neutral(
     plot_hist: bool = True,
     use_best_by_log_prob: bool = True,
     use_oracle: bool = False,
+    use_body_pvetsc: bool = False,
 ):
+    """When ``use_body_pvetsc=True`` the meshes are aligned via Procrustes over
+    body verts only (head + hands excluded), per-vertex colours saturate at
+    the body-vert distance range, and side-view labels report PVE-T-SC body.
+    Filename gets a ``_body_pvetsc`` suffix to disambiguate from the standard
+    full-mesh PVE-T-SC variant."""
     assert use_oracle or use_best_by_log_prob, (
         "vis_merging_neutral: must set at least one of use_oracle / use_best_by_log_prob"
     )
@@ -3073,6 +3172,8 @@ def vis_merging_neutral(
     metrics = input_dict.get("metrics", {})
     per_view_pvetsc = None
     merged_pvetsc = None
+    per_view_pvetsc_body = None
+    merged_pvetsc_body = None
     if (
         isinstance(metrics, dict)
         and "per_view_pvetsc" in metrics
@@ -3085,10 +3186,38 @@ def vis_merging_neutral(
         and len(metrics["merged_pvetsc"]) > 0
     ):
         merged_pvetsc = metrics["merged_pvetsc"][-1]
+    if (
+        isinstance(metrics, dict)
+        and "per_view_pvetsc_body" in metrics
+        and len(metrics["per_view_pvetsc_body"]) > 0
+    ):
+        per_view_pvetsc_body = metrics["per_view_pvetsc_body"][-1]
+    if (
+        isinstance(metrics, dict)
+        and "merged_pvetsc_body" in metrics
+        and len(metrics["merged_pvetsc_body"]) > 0
+    ):
+        merged_pvetsc_body = metrics["merged_pvetsc_body"][-1]
 
     per_view_pvetsc_render = per_view_pvetsc
 
-    if sc:
+    if use_body_pvetsc:
+        # Use the body-aligned verts cached by ``multiframe_metrics`` (keys
+        # mirror the per-view source). The body alignment subsumes any sc
+        # rescaling, so we ignore the ``sc`` flag in this mode.
+        body_mask_np = _get_body_vertex_mask()
+        per_view_verts = (
+            input_dict[f"{per_view_verts_key}_sc_body"].cpu().detach().numpy()
+        )
+        merged_verts_body_t = input_dict.get("merged_neutral_verts_sc_body")
+        merged_verts = (
+            merged_verts_body_t.cpu().detach().numpy()
+            if merged_verts_body_t is not None
+            else None
+        )
+        per_view_pvetsc_render = per_view_pvetsc_body
+        merged_pvetsc = merged_pvetsc_body
+    elif sc:
         per_view_verts = scale_and_translation_transform_batch(
             per_view_verts, gt_verts
         )
@@ -3112,10 +3241,17 @@ def vis_merging_neutral(
 
     if (using_oracle or using_best_per_view) and per_view_pvetsc_render is not None:
         # PVETSC is mean L2 distance over vertices (meters). Our distances are in mm.
-        per_view_pvetsc_render = np.array(
-            [per_view_vertex_dists[v].mean() / 1000.0 for v in range(num_views)],
-            dtype=np.float32,
-        )
+        if use_body_pvetsc:
+            body_mask_np_local = _get_body_vertex_mask()
+            per_view_pvetsc_render = np.array(
+                [per_view_vertex_dists[v][body_mask_np_local].mean() / 1000.0 for v in range(num_views)],
+                dtype=np.float32,
+            )
+        else:
+            per_view_pvetsc_render = np.array(
+                [per_view_vertex_dists[v].mean() / 1000.0 for v in range(num_views)],
+                dtype=np.float32,
+            )
 
     if merged_verts is not None:
         merged_verts_ref = merged_verts[0]
@@ -3125,8 +3261,22 @@ def vis_merging_neutral(
         all_distances.append(merged_vertex_dists)
 
     all_distances = np.concatenate(all_distances)
-    min_dist = float(all_distances.min()) if all_distances.size > 0 else 0.0
-    max_dist = float(all_distances.max()) if all_distances.size > 0 else 1.0
+    if use_body_pvetsc:
+        # Range derived from body verts only — face/hand saturate informatively
+        # under the body-anchored frame.
+        body_only_dists = []
+        for view in range(num_views):
+            body_only_dists.append(per_view_vertex_dists[view][body_mask_np])
+        if merged_verts is not None:
+            body_only_dists.append(merged_vertex_dists[body_mask_np])
+        body_concat = np.concatenate(body_only_dists) if body_only_dists else np.array([0.0])
+        min_dist = 0.0
+        max_dist = float(body_concat.max()) if body_concat.size > 0 else 1.0
+        if max_dist <= 0.0:
+            max_dist = 1.0
+    else:
+        min_dist = float(all_distances.min()) if all_distances.size > 0 else 0.0
+        max_dist = float(all_distances.max()) if all_distances.size > 0 else 1.0
 
     # ----------------- GT -----------------
     background = np.zeros((512, 512, 3)) * 255
@@ -3226,9 +3376,10 @@ def vis_merging_neutral(
                 "color": (255, 255, 255),
                 "thickness": 2,
             }
+            label_name = "PVE-T-SC body" if use_body_pvetsc else "PVE-T-SC"
             cv2.putText(
                 side_render,
-                f"PVE-T-SC: {float(per_view_pvetsc_render[view]) * 1000.0:.1f} mm",
+                f"{label_name}: {float(per_view_pvetsc_render[view]) * 1000.0:.1f} mm",
                 **metric_config_side_view,
             )
         per_view_side.append(side_render)
@@ -3281,9 +3432,10 @@ def vis_merging_neutral(
                 "color": (255, 255, 255),
                 "thickness": 2,
             }
+            label_name = "PVE-T-SC body" if use_body_pvetsc else "PVE-T-SC"
             cv2.putText(
                 merged_side,
-                f"PVE-T-SC: {float(merged_pvetsc[0]) * 1000.0:.1f} mm",
+                f"{label_name}: {float(merged_pvetsc[0]) * 1000.0:.1f} mm",
                 **metric_config_merged_side,
             )
 
@@ -3365,10 +3517,11 @@ def vis_merging_neutral(
     colorbar_bgr = cv2.cvtColor(colorbar_rgb, cv2.COLOR_RGB2BGR)
     gallery_img_bgr = np.concatenate([gallery_img_bgr, colorbar_bgr], axis=1)
 
-    suffix = "_sc" if sc else ""
+    sc_suffix = "_sc" if sc else ""
+    mode_suffix = "_body_pvetsc" if use_body_pvetsc else "_pvetsc"
     save_path = os.path.join(
         save_dir,
-        f"b{batch_idx:03d}_neutral{suffix}.png",
+        f"b{batch_idx:03d}_neutral{sc_suffix}{mode_suffix}.png",
     )
     cv2.imwrite(save_path, gallery_img_bgr)
     logger.info(f"Saved neutral meshes gallery: {save_path}")
@@ -3410,23 +3563,34 @@ def vis_merging_neutral(
 #     logger.info("=" * 60)
 
 
-def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
+def vis_merging_samples(
+    input_dict,
+    save_dir=None,
+    max_samples=6,
+    plot_neutral=False,
+    plot_neutral_pvetsc_body=False,
+):
     """
     Per-view gallery of the NF samples with GT overlay for a single serno
     from the multi-view eval pipeline.
 
-    For each of `num_views` input images, three rows are produced:
+    For each of `num_views` input images, up to four rows are produced:
 
-      Row 1 (front on-image):  input image | mean pred + GT | top-N samples + GT
-      Row 2 (side):               blank    | mean side + GT | top-N sample sides + GT
-      Row 3 (neutral, sc):        blank    | mean neutral+GT| top-N sample neutrals+GT
+      Row 1 (front on-image):    input image | mean pred + GT | top-N samples + GT
+      Row 2 (side):                  blank   | mean side + GT | top-N sample sides + GT
+      Row 3 (neutral, sc):           blank   | mean neutral+GT| top-N sample neutrals+GT  [if plot_neutral]
+      Row 4 (neutral, sc body):      blank   | mean body+GT   | top-N sample body neutrals+GT  [if plot_neutral_pvetsc_body]
 
     Row 3 shows each predicted mesh in neutral (zero) pose, scale+translation-
-    aligned to the GT neutral mesh, overlaid with the GT neutral mesh in blue.
-    Colours reflect per-vertex distance to GT after alignment — i.e. shape-only
-    error, matching PVE-T-SC semantics.
+    aligned to the GT neutral mesh (alignment over **all** verts), overlaid
+    with the GT neutral mesh in blue. Row 4 is the body-only counterpart:
+    alignment computed over body verts (head + hands excluded) and PVE-T-SC
+    annotated as ``pve-t-sc body``. Colours saturate at the body-only error
+    range so face/hand verts will appear hot under the body-anchored frame.
 
-    All three rows share a single colour scale across views/samples/means.
+    Both neutral rows are off by default to keep the gallery compact; toggle
+    via ``plot_neutral`` and ``plot_neutral_pvetsc_body``.
+
     GT is overlaid in blue at 50% alpha.
     """
     num_views = input_dict["num_views"]
@@ -3448,7 +3612,10 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     mean_cam_t_all = _to_np(outputs["mhr"]["pred_cam_t"])                 # (V_f, 3)
     mean_root_all = _to_np(outputs["mhr"]["pred_joint_coords"])[..., 1, :]  # (V_f, 3)
     gt_verts_all = _to_np(batch["vertices"])                              # (V_f, V, 3)
-    gt_cam_t_all = _to_np(batch["cam_ext"][..., :3, -1])                  # (V_f, 3)
+    if "cam_ext" in batch:
+        gt_cam_t_all = _to_np(batch["cam_ext"][..., :3, -1])
+    else:
+        gt_cam_t_all = _to_np(batch["trans_cam"])
     gt_root_all = _to_np(batch["joint_coords"])[..., 1, :]                # (V_f, 3)
     cam_int_all = _to_np(batch["cam_int"])                                # (V_f, 3, 3)
     affine_all = _to_np(batch["affine_trans"])                            # (V_f, 1, 2, 3)
@@ -3488,6 +3655,7 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     # its own root joint before subtracting GT). This removes per-sample
     # translation from the error heatmap so colours reflect only pose/shape
     # differences — same colours are then used for front and side views.
+    body_mask_np = _get_body_vertex_mask()
     picked_idx = {}   # view -> array of sample indices (len <= n_vis)
     mean_dists = {}   # view -> (V,)
     sample_dists = {} # view -> (n_vis, V)
@@ -3497,6 +3665,12 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     sample_neutral_dists = {}    # view -> (n_vis, V)
     sample_pampjpe_picked = {}   # view -> (n_vis,) in mm
     sample_pvetsc_picked = {}    # view -> (n_vis,) in mm
+    # Body-only aligned counterparts (alignment + PVE-T-SC over body verts only).
+    mean_neutral_sc_body_verts = {}
+    sample_neutral_sc_body_verts = {}
+    mean_neutral_body_dists = {}
+    sample_neutral_body_dists = {}
+    sample_pvetsc_body_picked = {}
     # IS-best sample (largest importance weight) per view, used as an extra column.
     isbest_idx = {}                  # view -> int sample index k_w
     isbest_rank = {}                 # view -> int rank of k_w in lp-sorted order
@@ -3505,8 +3679,12 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     isbest_neutral_dists = {}        # view -> (V,) — neutral per-vertex dist (mm)
     isbest_pampjpe = {}              # view -> scalar (mm)
     isbest_pvetsc = {}               # view -> scalar (mm)
+    isbest_neutral_sc_body_verts = {}
+    isbest_neutral_body_dists = {}
+    isbest_pvetsc_body = {}
     all_dists_posed = []
     all_dists_neutral = []
+    all_dists_neutral_body = []  # body-vert errors only — used for the body colorbar range
     for view in range(num_views):
         gt_v = gt_verts_all[view]
         gt_v_rooted = gt_v - gt_root_all[view]
@@ -3536,27 +3714,51 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
         # Neutral scale+translation-aligned distances (shape-only error).
         gt_neutral_v = gt_neutral_all[view]                              # (V, 3)
         mean_neutral_v = mean_neutral_all[view]                          # (V, 3)
-        mean_neutral_sc = scale_and_translation_transform_batch(
-            mean_neutral_v[None], gt_neutral_v[None]
-        )[0]                                                             # (V, 3)
-        mean_neutral_sc_verts[view] = mean_neutral_sc
-        mean_nd = np.linalg.norm(mean_neutral_sc - gt_neutral_v, axis=1) * 1000.0
-        mean_neutral_dists[view] = mean_nd
-        all_dists_neutral.append(mean_nd)
-
         sample_neutral_v = sample_neutral_all[view, order]               # (n_vis, V, 3)
-        sample_neutral_sc = scale_and_translation_transform_batch(
-            sample_neutral_v,
-            np.broadcast_to(gt_neutral_v[None], sample_neutral_v.shape),
-        )
-        sample_neutral_sc_verts[view] = sample_neutral_sc
-        s_nd = np.linalg.norm(sample_neutral_sc - gt_neutral_v[None], axis=-1) * 1000.0
-        sample_neutral_dists[view] = s_nd
-        all_dists_neutral.append(s_nd.reshape(-1))
 
-        # Per-sample neutral metrics (mm) for the picked samples.
-        # PVE-T-SC = mean per-vertex distance after scale+translation alignment.
-        sample_pvetsc_picked[view] = s_nd.mean(axis=-1)
+        if plot_neutral:
+            mean_neutral_sc = scale_and_translation_transform_batch(
+                mean_neutral_v[None], gt_neutral_v[None]
+            )[0]                                                             # (V, 3)
+            mean_neutral_sc_verts[view] = mean_neutral_sc
+            mean_nd = np.linalg.norm(mean_neutral_sc - gt_neutral_v, axis=1) * 1000.0
+            mean_neutral_dists[view] = mean_nd
+            all_dists_neutral.append(mean_nd)
+
+            sample_neutral_sc = scale_and_translation_transform_batch(
+                sample_neutral_v,
+                np.broadcast_to(gt_neutral_v[None], sample_neutral_v.shape),
+            )
+            sample_neutral_sc_verts[view] = sample_neutral_sc
+            s_nd = np.linalg.norm(sample_neutral_sc - gt_neutral_v[None], axis=-1) * 1000.0
+            sample_neutral_dists[view] = s_nd
+            all_dists_neutral.append(s_nd.reshape(-1))
+
+            # PVE-T-SC = mean per-vertex distance after scale+translation alignment.
+            sample_pvetsc_picked[view] = s_nd.mean(axis=-1)
+
+        if plot_neutral_pvetsc_body:
+            # Body-only aligned variants — Procrustes (centroid + RMS) computed over
+            # body verts only, applied to the full mesh.
+            mean_neutral_sc_body = scale_and_translation_transform_batch_masked(
+                mean_neutral_v[None], gt_neutral_v[None], body_mask_np
+            )[0]
+            mean_neutral_sc_body_verts[view] = mean_neutral_sc_body
+            mean_nd_body = np.linalg.norm(mean_neutral_sc_body - gt_neutral_v, axis=1) * 1000.0
+            mean_neutral_body_dists[view] = mean_nd_body
+            all_dists_neutral_body.append(mean_nd_body[body_mask_np])
+
+            sample_neutral_sc_body = scale_and_translation_transform_batch_masked(
+                sample_neutral_v,
+                np.broadcast_to(gt_neutral_v[None], sample_neutral_v.shape),
+                body_mask_np,
+            )
+            sample_neutral_sc_body_verts[view] = sample_neutral_sc_body
+            s_nd_body = np.linalg.norm(sample_neutral_sc_body - gt_neutral_v[None], axis=-1) * 1000.0
+            sample_neutral_body_dists[view] = s_nd_body
+            all_dists_neutral_body.append(s_nd_body[:, body_mask_np].reshape(-1))
+            sample_pvetsc_body_picked[view] = s_nd_body[:, body_mask_np].mean(axis=-1)
+
         # PA-MPJPE = Procrustes-aligned MPJPE on neutral joint coords.
         if sample_neutral_jcoords_t is not None and gt_neutral_jcoords_t is not None:
             from sam_3d_body.metrics.metrics_tracker import _pampjpe_torch
@@ -3586,18 +3788,32 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             isbest_dists[view] = d_posed_w
             all_dists_posed.append(d_posed_w)
 
-            # Neutral sc-aligned per-vertex distance — same convention as sample_neutral_dists.
             sample_neutral_v_w = sample_neutral_all[view, k_w]              # (V, 3)
-            sample_neutral_sc_w = scale_and_translation_transform_batch(
-                sample_neutral_v_w[None],
-                gt_neutral_v[None],
-            )[0]
-            isbest_neutral_sc_verts[view] = sample_neutral_sc_w
-            d_neutral_w = np.linalg.norm(sample_neutral_sc_w - gt_neutral_v, axis=-1) * 1000.0
-            isbest_neutral_dists[view] = d_neutral_w
-            all_dists_neutral.append(d_neutral_w)
 
-            isbest_pvetsc[view] = float(d_neutral_w.mean())
+            if plot_neutral:
+                # Neutral sc-aligned per-vertex distance — same convention as sample_neutral_dists.
+                sample_neutral_sc_w = scale_and_translation_transform_batch(
+                    sample_neutral_v_w[None],
+                    gt_neutral_v[None],
+                )[0]
+                isbest_neutral_sc_verts[view] = sample_neutral_sc_w
+                d_neutral_w = np.linalg.norm(sample_neutral_sc_w - gt_neutral_v, axis=-1) * 1000.0
+                isbest_neutral_dists[view] = d_neutral_w
+                all_dists_neutral.append(d_neutral_w)
+                isbest_pvetsc[view] = float(d_neutral_w.mean())
+
+            if plot_neutral_pvetsc_body:
+                # Body-only aligned IS-best variant.
+                sample_neutral_sc_body_w = scale_and_translation_transform_batch_masked(
+                    sample_neutral_v_w[None], gt_neutral_v[None], body_mask_np
+                )[0]
+                isbest_neutral_sc_body_verts[view] = sample_neutral_sc_body_w
+                d_neutral_body_w = np.linalg.norm(
+                    sample_neutral_sc_body_w - gt_neutral_v, axis=-1
+                ) * 1000.0
+                isbest_neutral_body_dists[view] = d_neutral_body_w
+                all_dists_neutral_body.append(d_neutral_body_w[body_mask_np])
+                isbest_pvetsc_body[view] = float(d_neutral_body_w[body_mask_np].mean())
             if sample_neutral_jcoords_t is not None and gt_neutral_jcoords_t is not None:
                 from sam_3d_body.metrics.metrics_tracker import _pampjpe_torch
                 pred_j_w = sample_neutral_jcoords_t[view, k_w].unsqueeze(0)
@@ -3617,6 +3833,13 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     max_dist_mm_neutral = float(neutral_concat.max()) if neutral_concat.size else 1.0
     if max_dist_mm_neutral <= 0.0:
         max_dist_mm_neutral = 1.0
+
+    neutral_body_concat = (
+        np.concatenate(all_dists_neutral_body) if all_dists_neutral_body else np.array([0.0])
+    )
+    max_dist_mm_neutral_body = float(neutral_body_concat.max()) if neutral_body_concat.size else 1.0
+    if max_dist_mm_neutral_body <= 0.0:
+        max_dist_mm_neutral_body = 1.0
 
     # ---- Reference panel size: cropped image size of view 0 (W, H) ----
     img_size_0 = img_size_all[0, 0]
@@ -3700,14 +3923,14 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_base
             return _to_uint8(blended)
 
-        def render_neutral(pred_sc_verts, dists_mm):
+        def render_neutral(pred_sc_verts, dists_mm, max_dist_mm=max_dist_mm_neutral):
             # Apply display flip used by other neutral renderers (my_vis.py:2979).
             pred_vis = pred_sc_verts.copy()
             pred_vis[:, [1, 2]] *= -1
             gt_vis = gt_neutral_all[view].copy()
             gt_vis[:, [1, 2]] *= -1
 
-            colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm_neutral)
+            colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
             gt_base = neutral_renderer(
                 gt_vis, neutral_cam_t, black_bg.copy(),
                 mesh_base_color=GT_COLOR,
@@ -3773,79 +3996,146 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             row2.append(_label(_resize(isbest_side), f"is-best s{rank_w} side"))
 
         # --- neutral (scale-corrected) row ---
-        row3 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
-        mean_neutral = render_neutral(
-            mean_neutral_sc_verts[view], mean_neutral_dists[view]
-        )
-        row3.append(_label(_resize(mean_neutral), "mean neutral sc"))
-        for rank, k in enumerate(order):
-            neutral_panel = render_neutral(
-                sample_neutral_sc_verts[view][rank],
-                sample_neutral_dists[view][rank],
+        row3 = None
+        if plot_neutral:
+            row3 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
+            mean_neutral = render_neutral(
+                mean_neutral_sc_verts[view], mean_neutral_dists[view]
             )
-            panel = _resize(neutral_panel)
-            top_lines = [f"s{rank} neutral"]
-            if is_weight is not None:
-                top_lines.append(f"w={float(is_weight[0, view, k]):.3f}")
-            _draw_label_lines(panel, top_lines)
-            bottom_lines = []
-            if view in sample_pampjpe_picked:
-                bottom_lines.append(f"pa-mpjpe={float(sample_pampjpe_picked[view][rank]):.1f}")
-            if view in sample_pvetsc_picked:
-                bottom_lines.append(f"pve-t-sc={float(sample_pvetsc_picked[view][rank]):.1f}")
-            if cross_view_logp is not None:
-                # log p(view's k-th sample | view j) for all j (incl. self).
-                bottom_lines.extend(
-                    f"logp({view}|{j})={float(cross_view_logp[0, view, j, k]):.1f}"
-                    for j in range(num_views)
+            row3.append(_label(_resize(mean_neutral), "mean neutral sc"))
+            for rank, k in enumerate(order):
+                neutral_panel = render_neutral(
+                    sample_neutral_sc_verts[view][rank],
+                    sample_neutral_dists[view][rank],
                 )
-            if bottom_lines:
+                panel = _resize(neutral_panel)
+                top_lines = [f"s{rank} neutral"]
+                if is_weight is not None:
+                    top_lines.append(f"w={float(is_weight[0, view, k]):.3f}")
+                _draw_label_lines(panel, top_lines)
+                bottom_lines = []
+                if view in sample_pampjpe_picked:
+                    bottom_lines.append(f"pa-mpjpe={float(sample_pampjpe_picked[view][rank]):.1f}")
+                if view in sample_pvetsc_picked:
+                    bottom_lines.append(f"pve-t-sc={float(sample_pvetsc_picked[view][rank]):.1f}")
+                if cross_view_logp is not None:
+                    # log p(view's k-th sample | view j) for all j (incl. self).
+                    bottom_lines.extend(
+                        f"logp({view}|{j})={float(cross_view_logp[0, view, j, k]):.1f}"
+                        for j in range(num_views)
+                    )
+                if bottom_lines:
+                    _label_bottom(panel, bottom_lines)
+                row3.append(panel)
+            while len(row3) < 2 + max_samples:
+                row3.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
+            if view in isbest_idx:
+                k_w = isbest_idx[view]
+                rank_w = isbest_rank[view]
+                isbest_neutral = render_neutral(
+                    isbest_neutral_sc_verts[view], isbest_neutral_dists[view]
+                )
+                panel_w = _resize(isbest_neutral)
+                top_lines_w = [f"is-best s{rank_w} neutral"]
+                top_lines_w.append(f"w={float(is_weight[0, view, k_w]):.3f}")
+                _draw_label_lines(panel_w, top_lines_w)
+                bottom_lines_w = []
+                if view in isbest_pampjpe:
+                    bottom_lines_w.append(f"pa-mpjpe={isbest_pampjpe[view]:.1f}")
+                if view in isbest_pvetsc:
+                    bottom_lines_w.append(f"pve-t-sc={isbest_pvetsc[view]:.1f}")
+                if cross_view_logp is not None:
+                    bottom_lines_w.extend(
+                        f"logp({view}|{j})={float(cross_view_logp[0, view, j, k_w]):.1f}"
+                        for j in range(num_views)
+                    )
+                if bottom_lines_w:
+                    _label_bottom(panel_w, bottom_lines_w)
+                row3.append(panel_w)
+
+        # --- neutral body-only aligned row (alignment + colours over body verts only) ---
+        row4 = None
+        if plot_neutral_pvetsc_body:
+            row4 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
+            mean_neutral_body = render_neutral(
+                mean_neutral_sc_body_verts[view],
+                mean_neutral_body_dists[view],
+                max_dist_mm=max_dist_mm_neutral_body,
+            )
+            mean_pvetsc_body = float(mean_neutral_body_dists[view][body_mask_np].mean())
+            mean_neutral_body_panel = _resize(mean_neutral_body)
+            _draw_label_lines(mean_neutral_body_panel, ["mean neutral body"])
+            _label_bottom(
+                mean_neutral_body_panel, [f"pve-t-sc body={mean_pvetsc_body:.1f}"]
+            )
+            row4.append(mean_neutral_body_panel)
+            for rank, k in enumerate(order):
+                neutral_body_panel = render_neutral(
+                    sample_neutral_sc_body_verts[view][rank],
+                    sample_neutral_body_dists[view][rank],
+                    max_dist_mm=max_dist_mm_neutral_body,
+                )
+                panel = _resize(neutral_body_panel)
+                top_lines = [f"s{rank} body"]
+                if is_weight is not None:
+                    top_lines.append(f"w={float(is_weight[0, view, k]):.3f}")
+                _draw_label_lines(panel, top_lines)
+                bottom_lines = [f"pve-t-sc body={float(sample_pvetsc_body_picked[view][rank]):.1f}"]
                 _label_bottom(panel, bottom_lines)
-            row3.append(panel)
-        while len(row3) < 2 + max_samples:
-            row3.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
-        if view in isbest_idx:
-            k_w = isbest_idx[view]
-            rank_w = isbest_rank[view]
-            isbest_neutral = render_neutral(
-                isbest_neutral_sc_verts[view], isbest_neutral_dists[view]
-            )
-            panel_w = _resize(isbest_neutral)
-            top_lines_w = [f"is-best s{rank_w} neutral"]
-            top_lines_w.append(f"w={float(is_weight[0, view, k_w]):.3f}")
-            _draw_label_lines(panel_w, top_lines_w)
-            bottom_lines_w = []
-            if view in isbest_pampjpe:
-                bottom_lines_w.append(f"pa-mpjpe={isbest_pampjpe[view]:.1f}")
-            if view in isbest_pvetsc:
-                bottom_lines_w.append(f"pve-t-sc={isbest_pvetsc[view]:.1f}")
-            if cross_view_logp is not None:
-                bottom_lines_w.extend(
-                    f"logp({view}|{j})={float(cross_view_logp[0, view, j, k_w]):.1f}"
-                    for j in range(num_views)
+                row4.append(panel)
+            while len(row4) < 2 + max_samples:
+                row4.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
+            if view in isbest_idx:
+                k_w = isbest_idx[view]
+                rank_w = isbest_rank[view]
+                isbest_neutral_body = render_neutral(
+                    isbest_neutral_sc_body_verts[view],
+                    isbest_neutral_body_dists[view],
+                    max_dist_mm=max_dist_mm_neutral_body,
                 )
-            if bottom_lines_w:
-                _label_bottom(panel_w, bottom_lines_w)
-            row3.append(panel_w)
+                panel_w = _resize(isbest_neutral_body)
+                top_lines_w = [f"is-best s{rank_w} body"]
+                top_lines_w.append(f"w={float(is_weight[0, view, k_w]):.3f}")
+                _draw_label_lines(panel_w, top_lines_w)
+                _label_bottom(panel_w, [f"pve-t-sc body={isbest_pvetsc_body[view]:.1f}"])
+                row4.append(panel_w)
 
         all_rows.append(np.concatenate(row1, axis=1))
         all_rows.append(np.concatenate(row2, axis=1))
-        all_rows.append(np.concatenate(row3, axis=1))
+        if row3 is not None:
+            all_rows.append(np.concatenate(row3, axis=1))
+        if row4 is not None:
+            all_rows.append(np.concatenate(row4, axis=1))
 
     grid = np.concatenate(all_rows, axis=0)
-    cbar_posed = build_distance_colorbar_rgb(
-        min_dist=0.0,
-        max_dist=max_dist_mm,
-        height=grid.shape[0],
-        width=60,
+    cbar_parts = [grid]
+    cbar_parts.append(
+        build_distance_colorbar_rgb(
+            min_dist=0.0,
+            max_dist=max_dist_mm,
+            height=grid.shape[0],
+            width=60,
+        )
     )
-    cbar_neutral = build_distance_colorbar_rgb(
-        min_dist=0.0,
-        max_dist=max_dist_mm_neutral,
-        height=grid.shape[0],
-        width=60,
-    )
-    grid = np.concatenate([grid, cbar_posed, cbar_neutral], axis=1)
+    if plot_neutral:
+        cbar_parts.append(
+            build_distance_colorbar_rgb(
+                min_dist=0.0,
+                max_dist=max_dist_mm_neutral,
+                height=grid.shape[0],
+                width=60,
+            )
+        )
+    if plot_neutral_pvetsc_body:
+        cbar_parts.append(
+            build_distance_colorbar_rgb(
+                min_dist=0.0,
+                max_dist=max_dist_mm_neutral_body,
+                height=grid.shape[0],
+                width=60,
+            )
+        )
+    grid = np.concatenate(cbar_parts, axis=1)
 
     if save_dir is not None:
         out_path = os.path.join(save_dir, f"b{batch_idx:03d}_merging_samples.png")
