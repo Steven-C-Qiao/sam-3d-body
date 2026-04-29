@@ -7,7 +7,6 @@ from sam_3d_body.models.modules.mhr_utils import (
     convert_mhr_params_to_flow_params,
     convert_pose_cont_to_flow_context,
     so3_residual_aa,
-    scale_indices,
 )
 
 
@@ -46,7 +45,7 @@ class Loss(pl.LightningModule):
                     [
                         flow_context_raw,
                         mean_pred["shape"],
-                        mean_pred["scale_68D"][..., scale_indices],
+                        mean_pred["scale_68D"][..., self.nf_head.scale_indices],
                     ],
                     dim=-1,
                 )
@@ -70,7 +69,7 @@ class Loss(pl.LightningModule):
             shape_sample_true = mean_pred["shape"]
             if self.nf_head.num_shape_comps > 0:
                 shape_sample_true = shape_sample_true + shape_residual_true
-            scale_sample_selected_true = mean_pred["scale_68D"][..., scale_indices]
+            scale_sample_selected_true = mean_pred["scale_68D"][..., self.nf_head.scale_indices]
             if self.nf_head.num_scale_comps > 0:
                 scale_sample_selected_true = (
                     scale_sample_selected_true + scale_residual_true
@@ -170,6 +169,7 @@ class Loss(pl.LightningModule):
                 include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
                 flip_global_rot=True,
                 return_rotmats=True,
+                scale_indices=self.nf_head.scale_indices,
             )
 
             mean_pred = predictions["mhr"]
@@ -182,7 +182,7 @@ class Loss(pl.LightningModule):
             if getattr(self.cfg.MODEL, "MODEL_SHAPE", True):
                 beta_parts.append(mean_pred["shape"])
             if getattr(self.cfg.MODEL, "MODEL_SCALE", True):
-                beta_parts.append(mean_pred["scale_68D"][..., scale_indices])
+                beta_parts.append(mean_pred["scale_68D"][..., self.nf_head.scale_indices])
             mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None
 
             # Piecewise residual: SO(3) for 3DOF + glob_rot, additive for beta + 1DOF.

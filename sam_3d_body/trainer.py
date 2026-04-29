@@ -753,6 +753,7 @@ class Trainer(BaseLightningModule):
                 num_samples,
                 method=merge_method,
                 langevin_kwargs=langevin_kwargs,
+                batch=batch,
             )
 
             outs = get_mhr_outputs(

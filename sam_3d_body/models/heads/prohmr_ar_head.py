@@ -14,7 +14,6 @@ from sam_3d_body.models.modules.mhr_utils import (
     convert_pose_cont_to_flow_context,
     so3_compose_aa,
     so3_residual_aa,
-    scale_indices,
 )
 
 from nflows.flows import ConditionalGlow
@@ -38,7 +37,8 @@ class NFARHead(nn.Module):
         self.num_3dof_comps = 39
         self.num_1dof_comps = 34
         self.num_shape_comps = 45 if self.model_shape else 0
-        self.num_scale_comps = 10 if self.model_scale else 0
+        self.scale_indices = list(cfg.MODEL.SCALE_INDICES)
+        self.num_scale_comps = len(self.scale_indices) if self.model_scale else 0
         self.num_glob_rot_comps = 3 if self.model_glob_rot else 0
         self.num_cam_comps = 3 if self.model_cam else 0
 
@@ -145,11 +145,11 @@ class NFARHead(nn.Module):
             self._scale_perturb_std = None
 
         # Stage 1 context: [flow_context, shape_mean, scale_mean_selected]
-        context_beta_dim = 1024 + 45 + 10
+        context_beta_dim = 1024 + 45 + len(self.scale_indices)
         self.beta_context_proj = nn.Linear(context_beta_dim, 2048)
 
         # Stage 2 context: [flow_context, shape_sample, scale_sample_selected, aa_3dofs, params_1dofs, (pred_cam?)]
-        context_theta_dim = 1024 + 45 + 10 + 39 + 34 + (3 if self.model_cam else 0)
+        context_theta_dim = 1024 + 45 + len(self.scale_indices) + 39 + 34 + (3 if self.model_cam else 0)
         self.theta_context_proj = nn.Linear(context_theta_dim, 2048)
 
         self.register_buffer("initialized_beta", torch.tensor(False))
@@ -168,6 +168,7 @@ class NFARHead(nn.Module):
             include_scale=self.model_scale,
             flip_global_rot=True,
             return_rotmats=True,
+            scale_indices=self.scale_indices,
         )
 
         # Mean prediction via direct 6D→AA path (no euler roundtrip bias).
@@ -178,7 +179,7 @@ class NFARHead(nn.Module):
         if self.model_shape:
             beta_parts.append(mean_pred["shape"])
         if self.model_scale:
-            beta_parts.append(mean_pred["scale_68D"][..., scale_indices])
+            beta_parts.append(mean_pred["scale_68D"][..., self.scale_indices])
         mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None
 
         # Piecewise residual: SO(3) for 3DOF + glob_rot, additive for beta + 1DOF.
@@ -225,7 +226,7 @@ class NFARHead(nn.Module):
                 [
                     flow_context,
                     shape_mean,
-                    scale_mean[..., scale_indices],
+                    scale_mean[..., self.scale_indices],
                 ],
                 dim=-1,
             )
@@ -237,7 +238,7 @@ class NFARHead(nn.Module):
         shape_sample_true = shape_mean
         if self.num_shape_comps > 0:
             shape_sample_true = shape_sample_true + shape_residual_true
-        scale_sample_selected_true = scale_mean[..., scale_indices]
+        scale_sample_selected_true = scale_mean[..., self.scale_indices]
         if self.num_scale_comps > 0:
             scale_sample_selected_true = scale_sample_selected_true + scale_residual_true
 
@@ -357,7 +358,7 @@ class NFARHead(nn.Module):
         context_theta_parts = [
             flow_context_expanded,
             shape_samples,
-            scale_samples_68D[..., scale_indices],
+            scale_samples_68D[..., self.scale_indices],
             aa_3dofs_expanded,
             params_1dofs_expanded,
         ]
@@ -461,7 +462,7 @@ class NFARHead(nn.Module):
                 [
                     flow_context,
                     shape_mean,
-                    scale_mean[..., scale_indices],
+                    scale_mean[..., self.scale_indices],
                 ],
                 dim=-1,
             )
@@ -503,8 +504,8 @@ class NFARHead(nn.Module):
 
         scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
         if self.model_scale and self.num_scale_comps > 0:
-            scale_samples_68D[..., scale_indices] = (
-                scale_samples_68D[..., scale_indices] + scale_residual_samples
+            scale_samples_68D[..., self.scale_indices] = (
+                scale_samples_68D[..., self.scale_indices] + scale_residual_samples
             )
 
         # ----------------------------------------------------------------------

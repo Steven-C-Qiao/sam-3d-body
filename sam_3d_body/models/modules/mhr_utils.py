@@ -40,10 +40,11 @@ def convert_mhr_params_to_flow_params(
     include_scale: bool = True,
     flip_global_rot: bool = False,
     return_rotmats: bool = False,
+    scale_indices=scale_indices,
 ) -> torch.Tensor:
     assert model_params.shape[-1] == 204
     assert shape_params.shape[-1] == 45
-    
+
     scale = model_params[:, -68:]
     pose = model_params[:, 6:-68]
 

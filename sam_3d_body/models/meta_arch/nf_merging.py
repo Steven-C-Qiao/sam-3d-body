@@ -3,7 +3,6 @@ from typing import Optional, Dict
 
 import torch
 
-from sam_3d_body.models.modules.mhr_utils import scale_indices
 
 
 def _psis_smooth_log_weights(log_w: torch.Tensor):
@@ -119,7 +118,7 @@ def merge_params_nf_psis(
 
         for i in range(num_views):
             beta_i = torch.cat(
-                [shape_samples[b, i], scale68_samples[b, i, :, scale_indices]], dim=-1
+                [shape_samples[b, i], scale68_samples[b, i, :, nf_head.scale_indices]], dim=-1
             )  # [S, 55]
 
             logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
@@ -127,7 +126,7 @@ def merge_params_nf_psis(
                 if j == i:
                     continue
                 mean_beta_j = torch.cat(
-                    [pred_shape[b, j], pred_scale68[b, j, scale_indices]], dim=-1
+                    [pred_shape[b, j], pred_scale68[b, j, nf_head.scale_indices]], dim=-1
                 )  # [55]
                 residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)  # [S, 2048]
@@ -154,7 +153,7 @@ def merge_params_nf_psis(
 
         merged_shape.append(merged_beta[: nf_head.num_shape_comps])
         scale68_merged = pred_scale68[b].mean(dim=0).clone()
-        scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
         merged_scale68.append(scale68_merged)
 
     # Diagonal of cross_view_logp = self-view stage-1 log-prob (no need to recompute).
@@ -198,6 +197,8 @@ def merge_params_nf_tempered(
     num_views,
     num_samples,
     temperature=None,
+    batch=None,
+    gt_hand_scale_override=True,
 ):
     """
     IS merge with temperature-scaled log-weights.
@@ -209,11 +210,30 @@ def merge_params_nf_tempered(
     (T = D) is the most natural choice.
 
     A temperature of 1.0 reduces to standard IS (merge_params_nf_is).
+
+    When ``gt_hand_scale_override`` is True, the merged scale_68D has its hand
+    bone scales (indices 8, 9 + 18..67) replaced with GT (from
+    ``batch["model_params"][:, -68:]``) for any hand dim that is not modelled
+    by the flow (i.e. not in ``nf_head.scale_indices``). Per-finger dims
+    (18..67) are never flow-modelled and so are always overridden; the global
+    hand scales (8, 9) are overridden only when not in scale_indices.
     """
     T = temperature if temperature is not None else float(nf_head.beta_dim)
     S = num_samples
 
     T = 10.0
+
+    if gt_hand_scale_override:
+        modelled = set(int(i) for i in nf_head.scale_indices)
+        override_indices = [i for i in [8, 9] + list(range(18, 68)) if i not in modelled]
+        if override_indices:
+            gt_scale_68D = batch["model_params"][:, -68:]   # (B*V, 68)
+            mhr_out["scale_68D"][:, override_indices] = gt_scale_68D[:, override_indices]
+            uncertainty_out["scale_samples"][..., override_indices] = (
+                gt_scale_68D[:, override_indices].unsqueeze(1).expand(-1, S, -1)
+            )
+    else:
+        override_indices = []
 
     pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))
     pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))
@@ -242,7 +262,7 @@ def merge_params_nf_tempered(
 
         for i in range(num_views):
             beta_i = torch.cat(
-                [shape_samples[b, i], scale68_samples[b, i, :, scale_indices]], dim=-1
+                [shape_samples[b, i], scale68_samples[b, i, :, nf_head.scale_indices]], dim=-1
             )  # [S, 55]
 
             logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
@@ -250,7 +270,7 @@ def merge_params_nf_tempered(
                 if j == i:
                     continue
                 mean_beta_j = torch.cat(
-                    [pred_shape[b, j], pred_scale68[b, j, scale_indices]], dim=-1
+                    [pred_shape[b, j], pred_scale68[b, j, nf_head.scale_indices]], dim=-1
                 )  # [55]
                 residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)
@@ -272,7 +292,7 @@ def merge_params_nf_tempered(
 
         merged_shape.append(merged_beta[: nf_head.num_shape_comps])
         scale68_merged = pred_scale68[b].mean(dim=0).clone()
-        scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
         merged_scale68.append(scale68_merged)
 
     diag = torch.arange(num_views, device=cross_view_logp.device)
@@ -361,7 +381,7 @@ def merge_params_nf_is(
             beta_i = torch.cat(
                 [
                     shape_samples[b, i],  # [S, 45]
-                    scale68_samples[b, i, :, scale_indices],  # [S, 10]
+                    scale68_samples[b, i, :, nf_head.scale_indices],  # [S, 10]
                 ],
                 dim=-1,
             )  # [S, 55]
@@ -396,7 +416,7 @@ def merge_params_nf_is(
                 mean_beta_j = torch.cat(
                     [
                         pred_shape[b, j],  # [45]
-                        pred_scale68[b, j, scale_indices],  # [10]
+                        pred_scale68[b, j, nf_head.scale_indices],  # [10]
                     ],
                     dim=-1,
                 )  # [55]
@@ -423,7 +443,7 @@ def merge_params_nf_is(
         merged_shape.append(merged_beta[: nf_head.num_shape_comps])
 
         scale68_merged = pred_scale68[b].mean(dim=0)
-        scale68_merged[scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
         merged_scale68.append(scale68_merged)
 
     diag = torch.arange(num_views, device=cross_view_logp.device)
@@ -498,7 +518,7 @@ def merge_params_nf_gaussian(
     shape_mu = shape_samples.mean(dim=2)                              # [B, V, 45]
     shape_var = shape_samples.var(dim=2)                              # [B, V, 45]
 
-    scale_selected_samples = scale68_samples[..., scale_indices]     # [B, V, S, 10]
+    scale_selected_samples = scale68_samples[..., nf_head.scale_indices]     # [B, V, S, 10]
     scale_mu = scale_selected_samples.mean(dim=2)                    # [B, V, 10]
     scale_var = scale_selected_samples.var(dim=2)                    # [B, V, 10]
 
@@ -509,7 +529,7 @@ def merge_params_nf_gaussian(
     scale_mu_star = (scale_prec * scale_mu).sum(dim=1) / scale_prec.sum(dim=1)  # [B, 10]
 
     scale_mu_star_full = pred_scale68.mean(dim=1).clone()            # [B, 68]
-    scale_mu_star_full[:, scale_indices] = scale_mu_star
+    scale_mu_star_full[:, nf_head.scale_indices] = scale_mu_star
 
     shape_avg = pred_shape.mean(dim=1)
     scale_avg = pred_scale68.mean(dim=1)
@@ -618,7 +638,7 @@ def merge_params_nf_langevin(
     pred_shape = mhr_out["shape"].unflatten(0, (bs, num_views))                 # [B, V, 45]
     pred_scale68 = mhr_out["scale_68D"].unflatten(0, (bs, num_views))           # [B, V, 68]
     view_means = torch.cat(
-        [pred_shape, pred_scale68[..., scale_indices]], dim=-1
+        [pred_shape, pred_scale68[..., nf_head.scale_indices]], dim=-1
     ).detach()                                                                   # [B, V, 55]
     view_context = (
         uncertainty_out["flow_context_beta"]
@@ -629,7 +649,7 @@ def merge_params_nf_langevin(
     shape_samples = uncertainty_out["shape_samples"].unflatten(0, (bs, num_views))
     scale68_samples = uncertainty_out["scale_samples"].unflatten(0, (bs, num_views))
     per_view_samples = torch.cat(
-        [shape_samples, scale68_samples[..., scale_indices]], dim=-1
+        [shape_samples, scale68_samples[..., nf_head.scale_indices]], dim=-1
     )                                                                            # [B, V, S, 55]
     var_j = per_view_samples.var(dim=2)                                          # [B, V, 55]
 
@@ -752,7 +772,7 @@ def merge_params_nf_langevin(
     # ---- Assemble outputs (match existing merge API) ----
     shape_mu_star = merged_beta[:, :num_shape]                                   # [B, 45]
     scale_mu_star_full = pred_scale68.mean(dim=1).clone()                         # [B, 68]
-    scale_mu_star_full[:, scale_indices] = merged_beta[:, num_shape:]
+    scale_mu_star_full[:, nf_head.scale_indices] = merged_beta[:, num_shape:]
 
     shape_avg = pred_shape.mean(dim=1)
     scale_avg = pred_scale68.mean(dim=1)
@@ -790,6 +810,8 @@ def merge_params_nf(
     num_samples,
     method: str = "psis",
     langevin_kwargs: Optional[Dict] = None,
+    batch: Optional[Dict] = None,
+    gt_hand_scale_override: bool = True,
 ):
     """
     Multi-view shape/scale fusion dispatcher.
@@ -802,11 +824,16 @@ def merge_params_nf(
             "is"       — Raw IS (reference; collapses in practice for D=55)
             "langevin" — V-chain MALA over the joint NF posterior
         langevin_kwargs: Optional kwargs forwarded to merge_params_nf_langevin.
+        batch / gt_hand_scale_override: forwarded to ``merge_params_nf_tempered``;
+            ignored by other methods.
     """
     if method == "psis":
         return merge_params_nf_psis(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
     elif method == "tempered":
-        return merge_params_nf_tempered(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
+        return merge_params_nf_tempered(
+            nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples,
+            batch=batch, gt_hand_scale_override=gt_hand_scale_override,
+        )
     elif method == "gaussian":
         return merge_params_nf_gaussian(nf_head, mhr_out, uncertainty_out, bs, num_views, num_samples)
     elif method == "is":
