@@ -154,6 +154,9 @@ class NFARHead(nn.Module):
 
         self.register_buffer("initialized_beta", torch.tensor(False))
         self.register_buffer("initialized_theta", torch.tensor(False))
+        # Python-side mirror so steady-state forwards skip the per-step
+        # .item() syncs on the GPU bool buffers above.
+        self._actnorm_done = False
 
     def initialize_actnorm(self, batch: Dict, mean_pred: Dict, flow_context: torch.Tensor):
         # Compute GT flow params and rotation matrices.
@@ -464,9 +467,11 @@ class NFARHead(nn.Module):
             )
         )
 
-        if (not self.initialized_beta.item()) or (not self.initialized_theta.item()):
-            self.initialize_actnorm(batch, mean_pred=mean_pred, flow_context=flow_context)
-            print("Initialised ActNorm")
+        if not self._actnorm_done:
+            if (not self.initialized_beta.item()) or (not self.initialized_theta.item()):
+                self.initialize_actnorm(batch, mean_pred=mean_pred, flow_context=flow_context)
+                print("Initialised ActNorm")
+            self._actnorm_done = True
 
         beta_residual_samples, beta_log_prob, beta_z = self.flow_beta.sample_and_log_prob(
             N,

@@ -257,12 +257,11 @@ class Metrics(pl.LightningModule):
             )
             metrics["mpjpe"] = mpjpe_per_joint.mean(dim=-1) * 1000.0
 
-            pampjpe_per_joint = pampjpe(
-                pred_kp3d[:, :70, :].cpu().detach().numpy(),
-                gt_kp3d[:, :70, :].cpu().detach().numpy(),
-                reduction="none",
-            )
-            metrics["pampjpe"] = pampjpe_per_joint.mean(axis=-1) * 1000.0
+            pred_kp3d_70 = pred_kp3d[:, :70, :]
+            gt_kp3d_70 = gt_kp3d[:, :70, :]
+            aligned_kp3d = compute_similarity_transform_batch_torch(pred_kp3d_70, gt_kp3d_70)
+            pampjpe_per_joint = torch.sqrt(((aligned_kp3d - gt_kp3d_70) ** 2).sum(dim=-1))
+            metrics["pampjpe"] = pampjpe_per_joint.mean(dim=-1) * 1000.0
 
             # pve_mean = pve(pred_vertices, gt_vertices)
             # metrics["pve"] = pve_mean * 1000.0
@@ -284,14 +283,19 @@ class Metrics(pl.LightningModule):
             metrics["mpjpe_samples"] = mpjpe_samples * 1000.0
             metrics["mpjpe_samples_min"] = mpjpe_samples.min(dim=-1).values * 1000.0
 
-            pampjpe_samples = pampjpe(
-                pred_kp3d_samples[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
-                gt_kp3d_expanded[:, :, :70, :].flatten(0, 1).cpu().detach().numpy(),
-                reduction="none",
-            ).reshape(B, N, -1).mean(axis=-1)  # meters
+            pred_kp3d_samples_70 = pred_kp3d_samples[:, :, :70, :].flatten(0, 1)
+            gt_kp3d_samples_70 = gt_kp3d_expanded[:, :, :70, :].flatten(0, 1)
+            aligned_kp3d_samples = compute_similarity_transform_batch_torch(
+                pred_kp3d_samples_70, gt_kp3d_samples_70
+            )
+            pampjpe_samples = (
+                torch.sqrt(((aligned_kp3d_samples - gt_kp3d_samples_70) ** 2).sum(dim=-1))
+                .mean(dim=-1)
+                .reshape(B, N)
+            )  # meters
             pampjpe_samples_mm = pampjpe_samples * 1000.0
             metrics["pampjpe_samples"] = pampjpe_samples_mm
-            metrics["pampjpe_samples_min"] = pampjpe_samples_mm.min(axis=-1)
+            metrics["pampjpe_samples_min"] = pampjpe_samples_mm.min(dim=-1).values
 
             # pve_samples = pve(
             #     pred_vertices_samples, gt_vertices_expanded, reduction="none"

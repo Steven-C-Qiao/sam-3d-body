@@ -3040,22 +3040,31 @@ def vis_merging_neutral(
     sc: bool = True,
     plot_hist: bool = True,
     use_best_by_log_prob: bool = True,
+    use_oracle: bool = False,
 ):
+    assert use_oracle or use_best_by_log_prob, (
+        "vis_merging_neutral: must set at least one of use_oracle / use_best_by_log_prob"
+    )
+
     generic_cam_t = np.array([0.0, 0.75, 2.5])
     batch_idx = input_dict["batch_idx"]
     num_views = input_dict["num_views"]
 
     renderer = input_dict["neutral_renderer"]
-    
+
     gt_verts = input_dict["gt_neutral_verts"].cpu().detach().numpy()
-    using_best_per_view = use_best_by_log_prob and (
-        "best_logprob_sample_neutral_verts" in input_dict
+    using_oracle = use_oracle and ("sample_param_avg_neutral_verts" in input_dict)
+    using_best_per_view = (
+        not using_oracle
+        and use_best_by_log_prob
+        and ("best_logprob_sample_neutral_verts" in input_dict)
     )
-    per_view_verts_key = (
-        "best_logprob_sample_neutral_verts"
-        if using_best_per_view
-        else "per_view_neutral_verts"
-    )
+    if using_oracle:
+        per_view_verts_key = "sample_param_avg_neutral_verts"
+    elif using_best_per_view:
+        per_view_verts_key = "best_logprob_sample_neutral_verts"
+    else:
+        per_view_verts_key = "per_view_neutral_verts"
     per_view_verts = input_dict[per_view_verts_key].cpu().detach().numpy()
     merged_verts = input_dict.get("merged_neutral_verts", None)
     if merged_verts is not None:
@@ -3101,7 +3110,7 @@ def vis_merging_neutral(
         per_view_vertex_dists[view] = dist_pv
         all_distances.append(dist_pv)
 
-    if using_best_per_view and per_view_pvetsc_render is not None:
+    if (using_oracle or using_best_per_view) and per_view_pvetsc_render is not None:
         # PVETSC is mean L2 distance over vertices (meters). Our distances are in mm.
         per_view_pvetsc_render = np.array(
             [per_view_vertex_dists[v].mean() / 1000.0 for v in range(num_views)],
@@ -3453,8 +3462,23 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     log_prob_t = outputs.get("uncertainty_output", {}).get("log_prob")
     log_prob = _to_np(log_prob_t) if log_prob_t is not None else None     # (V_f, N) or None
 
+    # Cross-view stage-1 log-probs precomputed by IS-style merge methods:
+    # cross_view_log_prob_beta[b, i, j, s] = log p(beta_b_i_s | view j) under view j's flow.
+    # Shape (B, V, V, S). Diagonal (i == j) holds the self-view stage-1 log-prob.
+    cross_view_logp_t = input_dict.get("cross_view_log_prob_beta")
+    cross_view_logp = _to_np(cross_view_logp_t) if cross_view_logp_t is not None else None
+
+    # Per-sample importance weight from the IS pool (B, V, S). Available only for
+    # the IS-style merge methods (psis / tempered / is); None for gaussian / langevin.
+    is_weight_t = input_dict.get("is_weight_beta")
+    is_weight = _to_np(is_weight_t) if is_weight_t is not None else None
+
     pred_cam_t_samples_t = outputs.get("pred_cam_t_samples")
     pred_cam_t_samples = _to_np(pred_cam_t_samples_t) if pred_cam_t_samples_t is not None else None
+
+    # Per-sample PA-MPJPE source: neutral joint coords (Procrustes alignment in vis below).
+    sample_neutral_jcoords_t = input_dict.get("sample_neutral_jcoords")
+    gt_neutral_jcoords_t = input_dict.get("gt_neutral_jcoords")
 
     N_avail = verts_samples.shape[1]
     n_vis = min(max_samples, N_avail)
@@ -3471,6 +3495,16 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
     sample_neutral_sc_verts = {} # view -> (n_vis, V, 3) — scale-aligned samples
     mean_neutral_dists = {}      # view -> (V,)
     sample_neutral_dists = {}    # view -> (n_vis, V)
+    sample_pampjpe_picked = {}   # view -> (n_vis,) in mm
+    sample_pvetsc_picked = {}    # view -> (n_vis,) in mm
+    # IS-best sample (largest importance weight) per view, used as an extra column.
+    isbest_idx = {}                  # view -> int sample index k_w
+    isbest_rank = {}                 # view -> int rank of k_w in lp-sorted order
+    isbest_dists = {}                # view -> (V,) — posed per-vertex dist (mm)
+    isbest_neutral_sc_verts = {}     # view -> (V, 3)
+    isbest_neutral_dists = {}        # view -> (V,) — neutral per-vertex dist (mm)
+    isbest_pampjpe = {}              # view -> scalar (mm)
+    isbest_pvetsc = {}               # view -> scalar (mm)
     all_dists_posed = []
     all_dists_neutral = []
     for view in range(num_views):
@@ -3520,6 +3554,58 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
         sample_neutral_dists[view] = s_nd
         all_dists_neutral.append(s_nd.reshape(-1))
 
+        # Per-sample neutral metrics (mm) for the picked samples.
+        # PVE-T-SC = mean per-vertex distance after scale+translation alignment.
+        sample_pvetsc_picked[view] = s_nd.mean(axis=-1)
+        # PA-MPJPE = Procrustes-aligned MPJPE on neutral joint coords.
+        if sample_neutral_jcoords_t is not None and gt_neutral_jcoords_t is not None:
+            from sam_3d_body.metrics.metrics_tracker import _pampjpe_torch
+            order_t = torch.as_tensor(order, device=sample_neutral_jcoords_t.device)
+            pred_j = sample_neutral_jcoords_t[view].index_select(0, order_t)  # (n_vis, J, 3)
+            gt_j = gt_neutral_jcoords_t[view].unsqueeze(0).expand_as(pred_j)
+            sample_pampjpe_picked[view] = (
+                (_pampjpe_torch(pred_j, gt_j) * 1000.0).cpu().numpy()
+            )
+
+        # IS-best sample for this view (max importance weight).
+        if is_weight is not None:
+            k_w = int(np.argmax(is_weight[0, view]))
+            isbest_idx[view] = k_w
+            # Rank of k_w in the lp-sorted order, to keep labels consistent
+            # with the other sample columns (which use s{rank}, not s{k}).
+            if log_prob is not None:
+                full_lp_order = np.argsort(-log_prob[view])
+                isbest_rank[view] = int(np.where(full_lp_order == k_w)[0][0])
+            else:
+                isbest_rank[view] = k_w
+
+            # Posed (rooted) per-vertex distance — same convention as sample_dists.
+            sample_root_w = j3d_samples_all[view, k_w, 1, :]                # (3,)
+            sample_v_rooted_w = verts_samples[view, k_w] - sample_root_w    # (V, 3)
+            d_posed_w = np.linalg.norm(sample_v_rooted_w - gt_v_rooted, axis=-1) * 1000.0
+            isbest_dists[view] = d_posed_w
+            all_dists_posed.append(d_posed_w)
+
+            # Neutral sc-aligned per-vertex distance — same convention as sample_neutral_dists.
+            sample_neutral_v_w = sample_neutral_all[view, k_w]              # (V, 3)
+            sample_neutral_sc_w = scale_and_translation_transform_batch(
+                sample_neutral_v_w[None],
+                gt_neutral_v[None],
+            )[0]
+            isbest_neutral_sc_verts[view] = sample_neutral_sc_w
+            d_neutral_w = np.linalg.norm(sample_neutral_sc_w - gt_neutral_v, axis=-1) * 1000.0
+            isbest_neutral_dists[view] = d_neutral_w
+            all_dists_neutral.append(d_neutral_w)
+
+            isbest_pvetsc[view] = float(d_neutral_w.mean())
+            if sample_neutral_jcoords_t is not None and gt_neutral_jcoords_t is not None:
+                from sam_3d_body.metrics.metrics_tracker import _pampjpe_torch
+                pred_j_w = sample_neutral_jcoords_t[view, k_w].unsqueeze(0)
+                gt_j_w = gt_neutral_jcoords_t[view].unsqueeze(0)
+                isbest_pampjpe[view] = float(
+                    (_pampjpe_torch(pred_j_w, gt_j_w) * 1000.0).item()
+                )
+
     posed_concat = np.concatenate(all_dists_posed) if all_dists_posed else np.array([0.0])
     max_dist_mm = float(posed_concat.max()) if posed_concat.size else 1.0
     if max_dist_mm <= 0.0:
@@ -3543,6 +3629,17 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
 
     def _label(img, text):
         _draw_label_lines(img, [text])
+        return img
+
+    def _label_bottom(img, lines, font_scale=0.55, line_height=20, pad=4, margin=8):
+        if not lines:
+            return img
+        box_h = line_height * len(lines) + 2 * pad
+        y0 = max(0, img.shape[0] - box_h - margin)
+        _draw_label_lines(
+            img, lines, origin=(10, y0),
+            font_scale=font_scale, line_height=line_height, pad=pad,
+        )
         return img
 
     def _to_uint8(arr01):
@@ -3643,6 +3740,17 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             row1.append(_label(_resize(front), label))
         while len(row1) < 2 + max_samples:
             row1.append(np.full((H_ref, W_ref, 3), 255, dtype=np.uint8))
+        if view in isbest_idx:
+            k_w = isbest_idx[view]
+            rank_w = isbest_rank[view]
+            isbest_front = render_front(
+                verts_samples[view, k_w], pred_cam_t_samples[view, k_w], isbest_dists[view]
+            )
+            isbest_front_label = (
+                f"is-best s{rank_w} lp={float(log_prob[view, k_w]):.1f}"
+                if log_prob is not None else f"is-best s{rank_w}"
+            )
+            row1.append(_label(_resize(isbest_front), isbest_front_label))
 
         # --- side row ---
         row2 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
@@ -3654,6 +3762,15 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
             row2.append(_label(_resize(side), f"s{rank} side"))
         while len(row2) < 2 + max_samples:
             row2.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
+        if view in isbest_idx:
+            k_w = isbest_idx[view]
+            rank_w = isbest_rank[view]
+            isbest_side = render_side(
+                verts_samples[view, k_w],
+                j3d_samples_all[view, k_w, 1, :],
+                isbest_dists[view],
+            )
+            row2.append(_label(_resize(isbest_side), f"is-best s{rank_w} side"))
 
         # --- neutral (scale-corrected) row ---
         row3 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
@@ -3666,9 +3783,50 @@ def vis_merging_samples(input_dict, save_dir=None, max_samples=6):
                 sample_neutral_sc_verts[view][rank],
                 sample_neutral_dists[view][rank],
             )
-            row3.append(_label(_resize(neutral_panel), f"s{rank} neutral"))
+            panel = _resize(neutral_panel)
+            top_lines = [f"s{rank} neutral"]
+            if is_weight is not None:
+                top_lines.append(f"w={float(is_weight[0, view, k]):.3f}")
+            _draw_label_lines(panel, top_lines)
+            bottom_lines = []
+            if view in sample_pampjpe_picked:
+                bottom_lines.append(f"pa-mpjpe={float(sample_pampjpe_picked[view][rank]):.1f}")
+            if view in sample_pvetsc_picked:
+                bottom_lines.append(f"pve-t-sc={float(sample_pvetsc_picked[view][rank]):.1f}")
+            if cross_view_logp is not None:
+                # log p(view's k-th sample | view j) for all j (incl. self).
+                bottom_lines.extend(
+                    f"logp({view}|{j})={float(cross_view_logp[0, view, j, k]):.1f}"
+                    for j in range(num_views)
+                )
+            if bottom_lines:
+                _label_bottom(panel, bottom_lines)
+            row3.append(panel)
         while len(row3) < 2 + max_samples:
             row3.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
+        if view in isbest_idx:
+            k_w = isbest_idx[view]
+            rank_w = isbest_rank[view]
+            isbest_neutral = render_neutral(
+                isbest_neutral_sc_verts[view], isbest_neutral_dists[view]
+            )
+            panel_w = _resize(isbest_neutral)
+            top_lines_w = [f"is-best s{rank_w} neutral"]
+            top_lines_w.append(f"w={float(is_weight[0, view, k_w]):.3f}")
+            _draw_label_lines(panel_w, top_lines_w)
+            bottom_lines_w = []
+            if view in isbest_pampjpe:
+                bottom_lines_w.append(f"pa-mpjpe={isbest_pampjpe[view]:.1f}")
+            if view in isbest_pvetsc:
+                bottom_lines_w.append(f"pve-t-sc={isbest_pvetsc[view]:.1f}")
+            if cross_view_logp is not None:
+                bottom_lines_w.extend(
+                    f"logp({view}|{j})={float(cross_view_logp[0, view, j, k_w]):.1f}"
+                    for j in range(num_views)
+                )
+            if bottom_lines_w:
+                _label_bottom(panel_w, bottom_lines_w)
+            row3.append(panel_w)
 
         all_rows.append(np.concatenate(row1, axis=1))
         all_rows.append(np.concatenate(row2, axis=1))

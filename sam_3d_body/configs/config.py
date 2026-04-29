@@ -37,7 +37,7 @@ _C.MODEL.MODEL_CAM = True
 
 ##########################################
 _C.MODEL.DECODER.USE_LORA = True
-_C.MODEL.NUM_SAMPLES = 25
+_C.MODEL.NUM_SAMPLES = 10
 _C.MODEL.HEAD_TYPE = "nf_ar"
 _C.MODEL.FLOW_COUPLING = "clamped_affine"
 _C.MODEL.FLOW_NUM_LAYERS = 8
@@ -88,7 +88,7 @@ _C.DATASET.EXTREME_CROP_LEVEL = 1
 _C.DATASET.PIN_MEMORY = True
 _C.DATASET.SHUFFLE_TRAIN = True
 _C.DATASET.TRAIN_DS = 'all'
-_C.DATASET.VAL_DS = 'orbit-archviz-15-bbox44-smplx_static-hdri-bmi-bbox44-smplx'
+_C.DATASET.VAL_DS = 'orbit-office-bbox44-smplx_static-hdri-bbox44-smplx_orbit-archviz-15-bbox44-smplx_static-hdri-bmi-bbox44-smplx'
 _C.DATASET.MESH_COLOR = 'pinkish'
 _C.DATASET.DATASETS_AND_RATIOS_FULL = 'static-hdri-bbox44-smplx_agora-body-bbox44-smplx_zoom-suburbd-bbox44-smplx_closeup-suburba-bbox44-smplx_closeup-suburbb-bbox44-smplx_closeup-suburbc-bbox44-smplx_closeup-suburbd-bbox44-smplx_closeup-gym-bbox44-smplx_zoom-gym-bbox44-smplx_static-gym-bbox44-smplx_static-office-bbox44-smplx_orbit-office-bbox44-smplx_static-hdri-zoomed-bbox44-smplx_pitchup-stadium-bbox44-smplx_pitchdown-stadium-bbox44-smplx_static-hdri-bmi-bbox44-smplx_closeup-suburbb-bmi-bbox44-smplx_closeup-suburbc-bmi-bbox44-smplx_static-suburbd-bmi-bbox44-smplx_zoom-gym-bmi-bbox44-smplx_static-office-hair-bbox44-smplx_zoom-suburbd-hair-bbox44-smplx_static-gym-hair-bbox44-smplx_orbit-archviz-15-bbox44-smplx_orbit-archviz-19-bbox44-smplx_orbit-archviz-12-bbox44-smplx_orbit-archviz-10-bbox44-smplx'
 _C.DATASET.DATASETS_AND_RATIOS = 'static-hdri-bbox44-smplx_agora-body-bbox44-smplx_zoom-suburbd-bbox44-smplx_closeup-suburba-bbox44-smplx_closeup-suburbb-bbox44-smplx_closeup-suburbc-bbox44-smplx_closeup-suburbd-bbox44-smplx_closeup-gym-bbox44-smplx_zoom-gym-bbox44-smplx_static-gym-bbox44-smplx_static-office-bbox44-smplx_orbit-office-bbox44-smplx_static-hdri-zoomed-bbox44-smplx_pitchup-stadium-bbox44-smplx_pitchdown-stadium-bbox44-smplx_closeup-suburbb-bmi-bbox44-smplx_closeup-suburbc-bmi-bbox44-smplx_static-suburbd-bmi-bbox44-smplx_zoom-gym-bmi-bbox44-smplx_static-office-hair-bbox44-smplx_zoom-suburbd-hair-bbox44-smplx_static-gym-hair-bbox44-smplx_orbit-archviz-19-bbox44-smplx_orbit-archviz-12-bbox44-smplx_orbit-archviz-10-bbox44-smplx'
@@ -332,6 +332,9 @@ DATASET_FILES = [
         'orbit-archviz-15-bbox44-smplx': os.path.join(PATH, 'data/training_labels/all_npz_12_training_mhr_conditioned/20221014_3_250_batch01hand_orbit_archVizUI3_time15_6fps.npz'),
         'static-hdri-bmi-bbox44-smplx': os.path.join(PATH, 'data/training_labels/all_npz_12_training_mhr_conditioned/20221019_3_250_highbmihand_6fps.npz'),
         'city-dolly-moyo1-smplx-notest': os.path.join(BEDLAM2_LABELS_DIR, '20240425_1_171_citysample_dolly.npz'),
+        'static-hdri-bbox44-smplx': os.path.join(PATH, 'data/training_labels/all_npz_12_training_mhr_conditioned/20221010_3_1000_batch01hand_6fps.npz'),
+        'orbit-office-bbox44-smplx': os.path.join(PATH, 'data/training_labels/all_npz_12_training_mhr_conditioned/20221013_3_250_batch01hand_orbit_bigOffice_6fps.npz'),
+
     },
     {
         # BEDLAM 1 (SMPLX)

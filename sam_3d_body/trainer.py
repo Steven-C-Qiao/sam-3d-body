@@ -817,7 +817,7 @@ class Trainer(BaseLightningModule):
 
             if not noplot:
                 vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-                vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False)
+                vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False, use_oracle=True)
                 vis_merging_samples(outs, save_dir=self.vis_save_dir, max_samples=4)
                 # vis_merging_neutral_variance(outs, sc=True, save_dir=self.vis_save_dir)
 

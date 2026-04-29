@@ -31,9 +31,6 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
 
     cfg = get_config_defaults()
 
-    if config_path is not None:
-        logger.info(f"Loading config overrides from CLI: {config_path}")
-        cfg.merge_from_file(config_path)
 
     if resume_path is not None:
         config_yaml_path = Path(exp_dir) / "config.yaml"
@@ -41,6 +38,11 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
             logger.info(f"Loading config overrides from {config_yaml_path}")
             cfg.merge_from_file(str(config_yaml_path))
     
+    if config_path is not None:
+        logger.info(f"Loading config overrides from CLI: {config_path}")
+        cfg.merge_from_file(config_path)
+
+        
     cfg.MODEL.MHR_HEAD.MHR_MODEL_PATH = (
         "checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt"
     )
@@ -94,7 +96,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
     results = trainer.run_multiview_prediction(
         num_view=4,
         num_samples=num_samples,
-        max_batches=20,
+        max_batches=50,
         dataset_name=dataset_name,
         merge_method=merge_method,
         noplot=noplot,
@@ -176,7 +178,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=100,
+        default=25,
         help="Number of NF samples to draw per view during merging.",
     )
     args = parser.parse_args()
