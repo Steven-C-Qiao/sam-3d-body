@@ -178,7 +178,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=25,
+        default=100,
         help="Number of NF samples to draw per view during merging.",
     )
     args = parser.parse_args()

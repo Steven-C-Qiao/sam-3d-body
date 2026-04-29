@@ -3671,6 +3671,7 @@ def vis_merging_samples(
     mean_neutral_body_dists = {}
     sample_neutral_body_dists = {}
     sample_pvetsc_body_picked = {}
+    sample_pampjpe_body_picked = {}
     # IS-best sample (largest importance weight) per view, used as an extra column.
     isbest_idx = {}                  # view -> int sample index k_w
     isbest_rank = {}                 # view -> int rank of k_w in lp-sorted order
@@ -3682,6 +3683,7 @@ def vis_merging_samples(
     isbest_neutral_sc_body_verts = {}
     isbest_neutral_body_dists = {}
     isbest_pvetsc_body = {}
+    isbest_pampjpe_body = {}
     all_dists_posed = []
     all_dists_neutral = []
     all_dists_neutral_body = []  # body-vert errors only — used for the body colorbar range
@@ -3761,12 +3763,20 @@ def vis_merging_samples(
 
         # PA-MPJPE = Procrustes-aligned MPJPE on neutral joint coords.
         if sample_neutral_jcoords_t is not None and gt_neutral_jcoords_t is not None:
-            from sam_3d_body.metrics.metrics_tracker import _pampjpe_torch
+            from sam_3d_body.metrics.metrics_tracker import (
+                _pampjpe_torch,
+                _pampjpe_body_torch,
+                make_body_joint_mask_127,
+            )
             order_t = torch.as_tensor(order, device=sample_neutral_jcoords_t.device)
             pred_j = sample_neutral_jcoords_t[view].index_select(0, order_t)  # (n_vis, J, 3)
             gt_j = gt_neutral_jcoords_t[view].unsqueeze(0).expand_as(pred_j)
             sample_pampjpe_picked[view] = (
                 (_pampjpe_torch(pred_j, gt_j) * 1000.0).cpu().numpy()
+            )
+            body_jmask = torch.from_numpy(make_body_joint_mask_127()).to(pred_j.device)
+            sample_pampjpe_body_picked[view] = (
+                (_pampjpe_body_torch(pred_j, gt_j, body_jmask) * 1000.0).cpu().numpy()
             )
 
         # IS-best sample for this view (max importance weight).
@@ -3815,11 +3825,19 @@ def vis_merging_samples(
                 all_dists_neutral_body.append(d_neutral_body_w[body_mask_np])
                 isbest_pvetsc_body[view] = float(d_neutral_body_w[body_mask_np].mean())
             if sample_neutral_jcoords_t is not None and gt_neutral_jcoords_t is not None:
-                from sam_3d_body.metrics.metrics_tracker import _pampjpe_torch
+                from sam_3d_body.metrics.metrics_tracker import (
+                    _pampjpe_torch,
+                    _pampjpe_body_torch,
+                    make_body_joint_mask_127,
+                )
                 pred_j_w = sample_neutral_jcoords_t[view, k_w].unsqueeze(0)
                 gt_j_w = gt_neutral_jcoords_t[view].unsqueeze(0)
                 isbest_pampjpe[view] = float(
                     (_pampjpe_torch(pred_j_w, gt_j_w) * 1000.0).item()
+                )
+                body_jmask_w = torch.from_numpy(make_body_joint_mask_127()).to(pred_j_w.device)
+                isbest_pampjpe_body[view] = float(
+                    (_pampjpe_body_torch(pred_j_w, gt_j_w, body_jmask_w) * 1000.0).item()
                 )
 
     posed_concat = np.concatenate(all_dists_posed) if all_dists_posed else np.array([0.0])
@@ -4080,7 +4098,15 @@ def vis_merging_samples(
                 if is_weight is not None:
                     top_lines.append(f"w={float(is_weight[0, view, k]):.3f}")
                 _draw_label_lines(panel, top_lines)
-                bottom_lines = [f"pve-t-sc body={float(sample_pvetsc_body_picked[view][rank]):.1f}"]
+                bottom_lines = []
+                if view in sample_pampjpe_body_picked:
+                    bottom_lines.append(f"pa-mpjpe body={float(sample_pampjpe_body_picked[view][rank]):.1f}")
+                bottom_lines.append(f"pve-t-sc body={float(sample_pvetsc_body_picked[view][rank]):.1f}")
+                if cross_view_logp is not None:
+                    bottom_lines.extend(
+                        f"logp({view}|{j})={float(cross_view_logp[0, view, j, k]):.1f}"
+                        for j in range(num_views)
+                    )
                 _label_bottom(panel, bottom_lines)
                 row4.append(panel)
             while len(row4) < 2 + max_samples:
@@ -4097,7 +4123,16 @@ def vis_merging_samples(
                 top_lines_w = [f"is-best s{rank_w} body"]
                 top_lines_w.append(f"w={float(is_weight[0, view, k_w]):.3f}")
                 _draw_label_lines(panel_w, top_lines_w)
-                _label_bottom(panel_w, [f"pve-t-sc body={isbest_pvetsc_body[view]:.1f}"])
+                bottom_lines_w = []
+                if view in isbest_pampjpe_body:
+                    bottom_lines_w.append(f"pa-mpjpe body={isbest_pampjpe_body[view]:.1f}")
+                bottom_lines_w.append(f"pve-t-sc body={isbest_pvetsc_body[view]:.1f}")
+                if cross_view_logp is not None:
+                    bottom_lines_w.extend(
+                        f"logp({view}|{j})={float(cross_view_logp[0, view, j, k_w]):.1f}"
+                        for j in range(num_views)
+                    )
+                _label_bottom(panel_w, bottom_lines_w)
                 row4.append(panel_w)
 
         all_rows.append(np.concatenate(row1, axis=1))
