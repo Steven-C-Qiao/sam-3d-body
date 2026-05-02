@@ -798,8 +798,63 @@ def multiframe_metrics(
         print(f"sample_param_avg_pvetsc_body: {sample_param_avg_pvetsc_body}")
         # print(f"best_sample_param_avg_pvetsc: {sample_param_avg_pvetsc.min().item():.4f}")
         print(f"best_sample_param_avg_pvetsc_body: {sample_param_avg_pvetsc_body.min().item():.4f}")
-        print('')
+        
 
+    # ---------------- β-space L2 (parameter-space, no Procrustes alignment) ----------------
+    if "gt_beta" in mhr_dict:
+        gt_beta = mhr_dict["gt_beta"]                       # (B*V, 55)
+        per_view_beta = mhr_dict["per_view_beta"]
+        avg_beta = mhr_dict["avg_beta"]
+        perturb_std = mhr_dict.get("beta_perturb_std", None)  # (55,) or None
+
+        def _l2(p, g):
+            return torch.sqrt(((p - g) ** 2).sum(dim=-1))
+
+        def _l2_std(p, g, std):
+            return torch.sqrt((((p - g) / std) ** 2).sum(dim=-1))
+
+        per_view_l2_beta = _l2(per_view_beta, gt_beta)
+        avg_l2_beta = _l2(avg_beta, gt_beta)
+        all_metrics["per_view_l2_beta"].append(per_view_l2_beta)
+        all_metrics["best_per_view_l2_beta"].append(per_view_l2_beta.min().item())
+        all_metrics["avg_l2_beta"].append(avg_l2_beta)
+
+        merged_l2_beta = None
+        if "merged_beta" in mhr_dict:
+            merged_l2_beta = _l2(mhr_dict["merged_beta"], gt_beta)
+            all_metrics["merged_l2_beta"].append(merged_l2_beta)
+
+        spa_l2_beta = None
+        if "sample_param_avg_beta" in mhr_dict:
+            spa_l2_beta = _l2(mhr_dict["sample_param_avg_beta"], gt_beta)
+            all_metrics["sample_param_avg_l2_beta"].append(spa_l2_beta)
+            all_metrics["best_sample_param_avg_l2_beta"].append(spa_l2_beta.min().item())
+
+        if perturb_std is not None:
+            per_view_l2_beta_std = _l2_std(per_view_beta, gt_beta, perturb_std)
+            avg_l2_beta_std = _l2_std(avg_beta, gt_beta, perturb_std)
+            all_metrics["per_view_l2_beta_std"].append(per_view_l2_beta_std)
+            all_metrics["best_per_view_l2_beta_std"].append(per_view_l2_beta_std.min().item())
+            all_metrics["avg_l2_beta_std"].append(avg_l2_beta_std)
+            if "merged_beta" in mhr_dict:
+                merged_l2_beta_std = _l2_std(mhr_dict["merged_beta"], gt_beta, perturb_std)
+                all_metrics["merged_l2_beta_std"].append(merged_l2_beta_std)
+            if "sample_param_avg_beta" in mhr_dict:
+                spa_l2_beta_std = _l2_std(mhr_dict["sample_param_avg_beta"], gt_beta, perturb_std)
+                all_metrics["sample_param_avg_l2_beta_std"].append(spa_l2_beta_std)
+                all_metrics["best_sample_param_avg_l2_beta_std"].append(spa_l2_beta_std.min().item())
+
+        msg = (
+            f"l2_beta: per_view best={per_view_l2_beta.min().item():.3f}"
+            f"  mean={per_view_l2_beta.mean().item():.3f}"
+            f"  avg={avg_l2_beta.mean().item():.3f}"
+        )
+        if merged_l2_beta is not None:
+            msg += f"  merged={merged_l2_beta.mean().item():.3f}"
+        if spa_l2_beta is not None:
+            msg += f"  best_spa={spa_l2_beta.min().item():.3f}"
+        print(msg)
+        print('')
 
     return all_metrics
 

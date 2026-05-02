@@ -154,6 +154,17 @@ def build_vertex_colors(
     return vertex_colors
 
 
+_NON_BODY_GRAY_RGBA = np.array([0.5, 0.5, 0.5, 1.0], dtype=np.float32)
+
+
+def _gray_out_non_body(vertex_colors: np.ndarray, body_mask: np.ndarray) -> np.ndarray:
+    """Set face/hand vertices (``~body_mask``) to a uniform gray. ``vertex_colors``
+    is RGBA (V, 4); ``body_mask`` is bool (V,)."""
+    out = vertex_colors.copy()
+    out[~body_mask] = _NON_BODY_GRAY_RGBA
+    return out
+
+
 def build_distance_colorbar_rgb(
     *,
     min_dist: float,
@@ -543,11 +554,15 @@ def vis_samples(
             if fixed_clbr:
                 nsc_body_max = FIXED_CLBR_MAX_M
             vertex_colors_neutral_sc_body_samples = [
-                build_vertex_colors(nsc_body_dists[i], min_dist=0.0, max_dist=nsc_body_max)
+                _gray_out_non_body(
+                    build_vertex_colors(nsc_body_dists[i], min_dist=0.0, max_dist=nsc_body_max),
+                    body_mask_np,
+                )
                 for i in range(n_vis)
             ]
-            vertex_colors_neutral_sc_body_mean = build_vertex_colors(
-                nsc_body_mean_dists, min_dist=0.0, max_dist=nsc_body_max
+            vertex_colors_neutral_sc_body_mean = _gray_out_non_body(
+                build_vertex_colors(nsc_body_mean_dists, min_dist=0.0, max_dist=nsc_body_max),
+                body_mask_np,
             )
 
             neutral_sc_dists = np.linalg.norm(
@@ -3335,6 +3350,8 @@ def vis_merging_neutral(
         vertex_colors = build_vertex_colors(
             per_view_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
         )
+        if use_body_pvetsc:
+            vertex_colors = _gray_out_non_body(vertex_colors, body_mask_np)
         pv_rgba = renderer(
             per_view_verts_vis[view],
             generic_cam_t,
@@ -3391,6 +3408,8 @@ def vis_merging_neutral(
         merged_vertex_colors = build_vertex_colors(
             merged_vertex_dists, min_dist=min_dist, max_dist=max_dist
         )
+        if use_body_pvetsc:
+            merged_vertex_colors = _gray_out_non_body(merged_vertex_colors, body_mask_np)
 
         merged_rgba = renderer(
             merged_verts_vis,
@@ -3628,6 +3647,11 @@ def vis_merging_samples(
 
     log_prob_t = outputs.get("uncertainty_output", {}).get("log_prob")
     log_prob = _to_np(log_prob_t) if log_prob_t is not None else None     # (V_f, N) or None
+
+    gt_logp_full_t = input_dict.get("gt_residual_log_prob")
+    gt_logp_full = _to_np(gt_logp_full_t) if gt_logp_full_t is not None else None
+    gt_logp_beta_t = input_dict.get("gt_residual_log_prob_beta")
+    gt_logp_beta = _to_np(gt_logp_beta_t) if gt_logp_beta_t is not None else None
 
     # Cross-view stage-1 log-probs precomputed by IS-style merge methods:
     # cross_view_log_prob_beta[b, i, j, s] = log p(beta_b_i_s | view j) under view j's flow.
@@ -3900,6 +3924,20 @@ def vis_merging_samples(
         img_size_v = (int(img_size_all[view, 0, 0]), int(img_size_all[view, 0, 1]))  # (W, H)
         black_bg = np.zeros((H_ref, W_ref, 3), dtype=np.uint8)
 
+        # Per-sample rank under the beta-only flow (self-view stage-1 log-prob).
+        # ``p{rank}`` is the rank by overall log-prob (used to pick); ``beta{rank}``
+        # gives the rank by beta-only log-prob for the same sample index.
+        if cross_view_logp is not None:
+            beta_lp_view = cross_view_logp[0, view, view]                # (S,)
+            beta_full_order = np.argsort(-beta_lp_view)
+            _beta_rank = np.empty_like(beta_full_order)
+            _beta_rank[beta_full_order] = np.arange(beta_full_order.size)
+            def _beta_lbl(k):
+                return f"beta{int(_beta_rank[int(k)])}"
+        else:
+            def _beta_lbl(k):
+                return ""
+
         def render_front(verts_pred, cam_t_pred, dists_mm):
             # GT rendered opaque on the input image; pred (heatmap) on top.
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
@@ -3941,7 +3979,7 @@ def vis_merging_samples(
             blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_base
             return _to_uint8(blended)
 
-        def render_neutral(pred_sc_verts, dists_mm, max_dist_mm=max_dist_mm_neutral):
+        def render_neutral(pred_sc_verts, dists_mm, max_dist_mm=max_dist_mm_neutral, gray_non_body=False):
             # Apply display flip used by other neutral renderers (my_vis.py:2979).
             pred_vis = pred_sc_verts.copy()
             pred_vis[:, [1, 2]] *= -1
@@ -3949,6 +3987,8 @@ def vis_merging_samples(
             gt_vis[:, [1, 2]] *= -1
 
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
+            if gray_non_body:
+                colors = _gray_out_non_body(colors, body_mask_np)
             gt_base = neutral_renderer(
                 gt_vis, neutral_cam_t, black_bg.copy(),
                 mesh_base_color=GT_COLOR,
@@ -3965,18 +4005,30 @@ def vis_merging_samples(
             return _to_uint8(blended)
 
         # --- front row ---
-        img_crop = cv2.warpAffine(img.copy(), affine, img_size_v)
-        row1 = [_label(_resize(img_crop), f"view {view}")]
+        gt_on_img_float = renderer(
+            gt_v, gt_t, img.copy(),
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(1, 1, 1),
+            camera_center=cc,
+        )
+        gt_front_img = cv2.warpAffine(_to_uint8(gt_on_img_float), affine, img_size_v)
+        row1 = [_label(_resize(gt_front_img), f"view {view} gt")]
         mean_front = render_front(mean_verts_all[view], mean_cam_t_all[view], mean_dists[view])
         row1.append(_label(_resize(mean_front), "mean"))
 
+        def _cam_for_sample(k):
+            if pred_cam_t_samples is not None:
+                return pred_cam_t_samples[view, k]
+            return mean_cam_t_all[view]
+
         order = picked_idx[view]
         for rank, k in enumerate(order):
-            cam_k = pred_cam_t_samples[view, k]
+            cam_k = _cam_for_sample(k)
             front = render_front(verts_samples[view, k], cam_k, sample_dists[view][rank])
+            tag = f"p{rank} {_beta_lbl(k)}".rstrip()
             label = (
-                f"s{rank} lp={float(log_prob[view, k]):.1f}"
-                if log_prob is not None else f"s{rank}"
+                f"{tag} lp={float(log_prob[view, k]):.1f}"
+                if log_prob is not None else tag
             )
             row1.append(_label(_resize(front), label))
         while len(row1) < 2 + max_samples:
@@ -3985,22 +4037,34 @@ def vis_merging_samples(
             k_w = isbest_idx[view]
             rank_w = isbest_rank[view]
             isbest_front = render_front(
-                verts_samples[view, k_w], pred_cam_t_samples[view, k_w], isbest_dists[view]
+                verts_samples[view, k_w], _cam_for_sample(k_w), isbest_dists[view]
             )
+            tag_w = f"is-best p{rank_w} {_beta_lbl(k_w)}".rstrip()
             isbest_front_label = (
-                f"is-best s{rank_w} lp={float(log_prob[view, k_w]):.1f}"
-                if log_prob is not None else f"is-best s{rank_w}"
+                f"{tag_w} lp={float(log_prob[view, k_w]):.1f}"
+                if log_prob is not None else tag_w
             )
             row1.append(_label(_resize(isbest_front), isbest_front_label))
 
         # --- side row ---
-        row2 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
+        gt_side_panel_float = side_renderer(
+            gt_v - gt_root, generic_cam_t, black_bg.copy(),
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(0, 0, 0),
+            side_view=True, rot_angle=90,
+        )
+        gt_side_panel = _to_uint8(gt_side_panel_float)
+        gt_side_panel = _resize(gt_side_panel)
+        _draw_label_lines(gt_side_panel, ["gt side"])
+        if gt_logp_full is not None:
+            _label_bottom(gt_side_panel, [f"logp(gt residual)={float(gt_logp_full[view]):.1f}"])
+        row2 = [gt_side_panel]
         mean_side = render_side(mean_verts_all[view], mean_root_all[view], mean_dists[view])
         row2.append(_label(_resize(mean_side), "mean side"))
         for rank, k in enumerate(order):
             sample_root = j3d_samples_all[view, k, 1, :]
             side = render_side(verts_samples[view, k], sample_root, sample_dists[view][rank])
-            row2.append(_label(_resize(side), f"s{rank} side"))
+            row2.append(_label(_resize(side), f"p{rank} {_beta_lbl(k)} side".replace("  ", " ")))
         while len(row2) < 2 + max_samples:
             row2.append(np.zeros((H_ref, W_ref, 3), dtype=np.uint8))
         if view in isbest_idx:
@@ -4011,12 +4075,24 @@ def vis_merging_samples(
                 j3d_samples_all[view, k_w, 1, :],
                 isbest_dists[view],
             )
-            row2.append(_label(_resize(isbest_side), f"is-best s{rank_w} side"))
+            row2.append(_label(_resize(isbest_side), f"is-best p{rank_w} {_beta_lbl(k_w)} side".replace("  ", " ")))
 
         # --- neutral (scale-corrected) row ---
         row3 = None
         if plot_neutral:
-            row3 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
+            gt_neutral_vis = gt_neutral_all[view].copy()
+            gt_neutral_vis[:, [1, 2]] *= -1
+            gt_neutral_panel_float = neutral_renderer(
+                gt_neutral_vis, neutral_cam_t, black_bg.copy(),
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+            )
+            gt_neutral_panel = _to_uint8(gt_neutral_panel_float)
+            gt_neutral_panel = _resize(gt_neutral_panel)
+            _draw_label_lines(gt_neutral_panel, ["gt neutral"])
+            if gt_logp_beta is not None:
+                _label_bottom(gt_neutral_panel, [f"logp(gt beta)={float(gt_logp_beta[view]):.1f}"])
+            row3 = [gt_neutral_panel]
             mean_neutral = render_neutral(
                 mean_neutral_sc_verts[view], mean_neutral_dists[view]
             )
@@ -4027,7 +4103,7 @@ def vis_merging_samples(
                     sample_neutral_dists[view][rank],
                 )
                 panel = _resize(neutral_panel)
-                top_lines = [f"s{rank} neutral"]
+                top_lines = [f"p{rank} {_beta_lbl(k)} neutral".replace("  ", " ")]
                 if is_weight is not None:
                     top_lines.append(f"w={float(is_weight[0, view, k]):.3f}")
                 _draw_label_lines(panel, top_lines)
@@ -4054,7 +4130,7 @@ def vis_merging_samples(
                     isbest_neutral_sc_verts[view], isbest_neutral_dists[view]
                 )
                 panel_w = _resize(isbest_neutral)
-                top_lines_w = [f"is-best s{rank_w} neutral"]
+                top_lines_w = [f"is-best p{rank_w} {_beta_lbl(k_w)} neutral".replace("  ", " ")]
                 top_lines_w.append(f"w={float(is_weight[0, view, k_w]):.3f}")
                 _draw_label_lines(panel_w, top_lines_w)
                 bottom_lines_w = []
@@ -4074,11 +4150,24 @@ def vis_merging_samples(
         # --- neutral body-only aligned row (alignment + colours over body verts only) ---
         row4 = None
         if plot_neutral_pvetsc_body:
-            row4 = [np.zeros((H_ref, W_ref, 3), dtype=np.uint8)]
+            gt_neutral_body_vis = gt_neutral_all[view].copy()
+            gt_neutral_body_vis[:, [1, 2]] *= -1
+            gt_neutral_body_panel_float = neutral_renderer(
+                gt_neutral_body_vis, neutral_cam_t, black_bg.copy(),
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+            )
+            gt_neutral_body_panel = _to_uint8(gt_neutral_body_panel_float)
+            gt_neutral_body_panel = _resize(gt_neutral_body_panel)
+            _draw_label_lines(gt_neutral_body_panel, ["gt neutral"])
+            if gt_logp_beta is not None:
+                _label_bottom(gt_neutral_body_panel, [f"logp(gt beta)={float(gt_logp_beta[view]):.1f}"])
+            row4 = [gt_neutral_body_panel]
             mean_neutral_body = render_neutral(
                 mean_neutral_sc_body_verts[view],
                 mean_neutral_body_dists[view],
                 max_dist_mm=max_dist_mm_neutral_body,
+                gray_non_body=True,
             )
             mean_pvetsc_body = float(mean_neutral_body_dists[view][body_mask_np].mean())
             mean_neutral_body_panel = _resize(mean_neutral_body)
@@ -4092,9 +4181,10 @@ def vis_merging_samples(
                     sample_neutral_sc_body_verts[view][rank],
                     sample_neutral_body_dists[view][rank],
                     max_dist_mm=max_dist_mm_neutral_body,
+                    gray_non_body=True,
                 )
                 panel = _resize(neutral_body_panel)
-                top_lines = [f"s{rank} body"]
+                top_lines = [f"p{rank} {_beta_lbl(k)} body".replace("  ", " ")]
                 if is_weight is not None:
                     top_lines.append(f"w={float(is_weight[0, view, k]):.3f}")
                 _draw_label_lines(panel, top_lines)
@@ -4118,9 +4208,10 @@ def vis_merging_samples(
                     isbest_neutral_sc_body_verts[view],
                     isbest_neutral_body_dists[view],
                     max_dist_mm=max_dist_mm_neutral_body,
+                    gray_non_body=True,
                 )
                 panel_w = _resize(isbest_neutral_body)
-                top_lines_w = [f"is-best s{rank_w} body"]
+                top_lines_w = [f"is-best p{rank_w} {_beta_lbl(k_w)} body".replace("  ", " ")]
                 top_lines_w.append(f"w={float(is_weight[0, view, k_w]):.3f}")
                 _draw_label_lines(panel_w, top_lines_w)
                 bottom_lines_w = []
@@ -4177,3 +4268,159 @@ def vis_merging_samples(
         cv2.imwrite(out_path, cv2.cvtColor(grid, cv2.COLOR_RGB2BGR))
         print(f"Saved merging samples to {out_path}")
     return grid
+
+
+def vis_merging_scatter(input_dict, save_dir=None):
+    """Per-view scatter plots of (β log-prob rank, PVE-T-SC body, IS weight)
+    against the overall log-prob rank, to inspect rank correlations within the
+    NF sample pool. Layout: ``num_views × 3`` subplots (one row per view)."""
+    num_views = input_dict["num_views"]
+    batch_idx = input_dict["batch_idx"]
+
+    outputs = input_dict["outputs"]
+    log_prob_t = outputs.get("uncertainty_output", {}).get("log_prob")
+    if log_prob_t is None:
+        return None
+    log_prob = log_prob_t.cpu().detach().numpy()                               # (V_f, S)
+
+    cross_view_logp_t = input_dict.get("cross_view_log_prob_beta")
+    cross_view_logp = (
+        cross_view_logp_t.cpu().detach().numpy() if cross_view_logp_t is not None else None
+    )
+    is_weight_t = input_dict.get("is_weight_beta")
+    is_weight = is_weight_t.cpu().detach().numpy() if is_weight_t is not None else None
+
+    sample_neutral_t = input_dict["sample_neutral_verts"]
+    gt_neutral_t = input_dict["gt_neutral_verts"]
+
+    body_mask_np = _get_body_vertex_mask()
+    body_mask_t = torch.from_numpy(body_mask_np).to(sample_neutral_t.device)
+
+    BV, S = sample_neutral_t.shape[:2]
+    sample_flat = sample_neutral_t.reshape(BV * S, *sample_neutral_t.shape[2:])
+    gt_tiled = gt_neutral_t.unsqueeze(1).expand(-1, S, -1, -1).reshape(
+        BV * S, *gt_neutral_t.shape[1:]
+    )
+
+    from sam_3d_body.metrics.metrics_tracker import _pvetsc_body_torch
+    pvetsc_body_per_s = (
+        _pvetsc_body_torch(sample_flat, gt_tiled, body_mask_t)
+        .reshape(BV, S)
+        .cpu()
+        .numpy()
+        * 1000.0
+    )
+
+    metrics = input_dict.get("metrics", {})
+    best_sp_avg_pvetsc_body_mm = None
+    sp_avg_pvetsc_body_mm = None  # per-view (V_f,)
+    merged_pvetsc_body_mm = None
+    if isinstance(metrics, dict) and metrics.get("best_sample_param_avg_pvetsc_body"):
+        best_sp_avg_pvetsc_body_mm = float(metrics["best_sample_param_avg_pvetsc_body"][-1]) * 1000.0
+    if isinstance(metrics, dict) and metrics.get("sample_param_avg_pvetsc_body"):
+        sp_avg_pvetsc_body_mm = (
+            metrics["sample_param_avg_pvetsc_body"][-1].cpu().detach().numpy() * 1000.0
+        )
+    if isinstance(metrics, dict) and metrics.get("merged_pvetsc_body"):
+        merged_pvetsc_body_mm = float(metrics["merged_pvetsc_body"][-1].mean().item()) * 1000.0
+
+    fig, axes = plt.subplots(
+        num_views, 3, figsize=(15, 4 * num_views), squeeze=False, sharey="col"
+    )
+
+    for view in range(num_views):
+        overall_order = np.argsort(-log_prob[view])
+        overall_rank = np.empty_like(overall_order)
+        overall_rank[overall_order] = np.arange(S)
+
+        if cross_view_logp is not None:
+            beta_lp = cross_view_logp[0, view, view]
+            beta_order = np.argsort(-beta_lp)
+            beta_rank = np.empty_like(beta_order)
+            beta_rank[beta_order] = np.arange(S)
+        else:
+            beta_rank = None
+
+        if is_weight is not None:
+            top_k = min(3, S)
+            top_idx = np.argsort(-is_weight[0, view])[:top_k]
+        else:
+            top_idx = None
+
+        ax = axes[view, 0]
+        if beta_rank is not None:
+            ax.scatter(overall_rank, beta_rank, alpha=0.5, s=10)
+            if top_idx is not None:
+                ax.scatter(
+                    overall_rank[top_idx], beta_rank[top_idx],
+                    marker="x", color="purple", s=50, linewidths=1.5,
+                    label="top-3 IS weight", zorder=5,
+                )
+                ax.legend(fontsize=8, loc="upper left")
+        ax.set_xlabel("overall log-prob rank")
+        ax.set_ylabel("β log-prob rank")
+        ax.set_title(f"view {view}: β rank")
+        ax.grid(alpha=0.3)
+
+        ax = axes[view, 1]
+        ax.scatter(overall_rank, pvetsc_body_per_s[view], alpha=0.5, s=10)
+        if top_idx is not None:
+            ax.scatter(
+                overall_rank[top_idx], pvetsc_body_per_s[view, top_idx],
+                marker="x", color="purple", s=50, linewidths=1.5,
+                label="top-3 IS weight", zorder=5,
+            )
+        if best_sp_avg_pvetsc_body_mm is not None:
+            ax.axhline(
+                best_sp_avg_pvetsc_body_mm,
+                color="red", linestyle="--", linewidth=1.0,
+                label=f"best_sample_param_avg ({best_sp_avg_pvetsc_body_mm:.1f} mm)",
+            )
+        if sp_avg_pvetsc_body_mm is not None:
+            view_val = float(sp_avg_pvetsc_body_mm[view])
+            ax.axhline(
+                view_val,
+                color="green", linestyle="--", linewidth=1.0,
+                label=f"sample_param_avg ({view_val:.1f} mm)",
+            )
+        if merged_pvetsc_body_mm is not None:
+            ax.axhline(
+                merged_pvetsc_body_mm,
+                color="blue", linestyle="--", linewidth=1.0,
+                label=f"merged ({merged_pvetsc_body_mm:.1f} mm)",
+            )
+        if (
+            best_sp_avg_pvetsc_body_mm is not None
+            or sp_avg_pvetsc_body_mm is not None
+            or merged_pvetsc_body_mm is not None
+            or top_idx is not None
+        ):
+            ax.legend(fontsize=8, loc="upper left")
+        ax.set_xlabel("overall log-prob rank")
+        ax.set_ylabel("PVE-T-SC body (mm)")
+        ax.set_title(f"view {view}: PVE-T-SC body")
+        ax.grid(alpha=0.3)
+
+        ax = axes[view, 2]
+        if is_weight is not None:
+            ax.scatter(overall_rank, is_weight[0, view], alpha=0.5, s=10)
+            if top_idx is not None:
+                ax.scatter(
+                    overall_rank[top_idx], is_weight[0, view, top_idx],
+                    marker="x", color="purple", s=50, linewidths=1.5,
+                    label="top-3 IS weight", zorder=5,
+                )
+                ax.legend(fontsize=8, loc="upper left")
+        ax.set_xlabel("overall log-prob rank")
+        ax.set_ylabel("IS weight")
+        ax.set_title(f"view {view}: IS weight")
+        ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+
+    if save_dir is not None:
+        save_path = os.path.join(save_dir, f"b{batch_idx:03d}_merging_scatter.png")
+        fig.savefig(save_path, dpi=120)
+        plt.close(fig)
+        print(f"Saved merging scatter to {save_path}")
+    return fig

@@ -33,14 +33,17 @@ class NFARHead(nn.Module):
         self.model_shape = getattr(cfg.MODEL, "MODEL_SHAPE", True)
         self.model_scale = getattr(cfg.MODEL, "MODEL_SCALE", True)
         self.model_cam = getattr(cfg.MODEL, "MODEL_CAM", False)
+        self.model_pose = getattr(cfg.MODEL, "MODEL_POSE", True)
 
-        self.num_3dof_comps = 39
-        self.num_1dof_comps = 34
+        # When MODEL_POSE is False the entire stage-2 (theta) flow is dropped:
+        # no pose / glob_rot / cam residuals are modelled by the NF.
+        self.num_3dof_comps = 39 if self.model_pose else 0
+        self.num_1dof_comps = 34 if self.model_pose else 0
         self.num_shape_comps = 45 if self.model_shape else 0
         self.scale_indices = list(cfg.MODEL.SCALE_INDICES)
         self.num_scale_comps = len(self.scale_indices) if self.model_scale else 0
-        self.num_glob_rot_comps = 3 if self.model_glob_rot else 0
-        self.num_cam_comps = 3 if self.model_cam else 0
+        self.num_glob_rot_comps = 3 if (self.model_pose and self.model_glob_rot) else 0
+        self.num_cam_comps = 3 if (self.model_pose and self.model_cam) else 0
 
         # Factorised v2 autoregressive model:
         #   Stage 1: p(Δβ | c, μβ) over shape+scale residuals.
@@ -119,16 +122,19 @@ class NFARHead(nn.Module):
             batch_norm_within_layers=flow_batch_norm,
             **flow_extra_kwargs,
         )
-        self.flow_theta = flow_cls(
-            flow_config_theta["flow_dim"],
-            flow_config_theta["layer_hidden_features"],
-            flow_config_theta["num_layers"],
-            flow_config_theta["layer_depth"],
-            dropout_probability=flow_config_theta["dropout_probability"],
-            context_features=flow_config_theta["context_features"],
-            batch_norm_within_layers=flow_batch_norm,
-            **flow_extra_kwargs,
-        )
+        if self.model_pose:
+            self.flow_theta = flow_cls(
+                flow_config_theta["flow_dim"],
+                flow_config_theta["layer_hidden_features"],
+                flow_config_theta["num_layers"],
+                flow_config_theta["layer_depth"],
+                dropout_probability=flow_config_theta["dropout_probability"],
+                context_features=flow_config_theta["context_features"],
+                batch_norm_within_layers=flow_batch_norm,
+                **flow_extra_kwargs,
+            )
+        else:
+            self.flow_theta = None
         self.num_samples = cfg.MODEL.NUM_SAMPLES
         self.shape_perturb_scale = cfg.MODEL.SHAPE_PERTURB_SCALE
         self.scale_perturb_scale = cfg.MODEL.SCALE_PERTURB_SCALE
@@ -149,8 +155,11 @@ class NFARHead(nn.Module):
         self.beta_context_proj = nn.Linear(context_beta_dim, 2048)
 
         # Stage 2 context: [flow_context, shape_sample, scale_sample_selected, aa_3dofs, params_1dofs, (pred_cam?)]
-        context_theta_dim = 1024 + 45 + len(self.scale_indices) + 39 + 34 + (3 if self.model_cam else 0)
-        self.theta_context_proj = nn.Linear(context_theta_dim, 2048)
+        if self.model_pose:
+            context_theta_dim = 1024 + 45 + len(self.scale_indices) + 39 + 34 + (3 if self.model_cam else 0)
+            self.theta_context_proj = nn.Linear(context_theta_dim, 2048)
+        else:
+            self.theta_context_proj = None
 
         self.register_buffer("initialized_beta", torch.tensor(False))
         self.register_buffer("initialized_theta", torch.tensor(False))
@@ -186,40 +195,8 @@ class NFARHead(nn.Module):
         # Beta residual (additive)
         beta_residual = gt_flow_params[..., : self.beta_dim] - mean_beta
 
-        # Theta residual: [3dof(39), 1dof(34), glob_rot?(3)]
-        pose_3dof_residual = so3_residual_aa(
-            pose_params_mean["rotmat_3dofs"], gt_rotmats["pose_3dof_rotmat"]
-        )
-        offset_1dof = self.beta_dim + 39
-        pose_1dof_residual = (
-            gt_flow_params[..., offset_1dof : offset_1dof + 34]
-            - pose_params_mean["params_1dofs"]
-        )
-        theta_parts = [pose_3dof_residual, pose_1dof_residual]
-        if self.model_glob_rot:
-            mean_glob_rotmat = batch9Dfrom6D(
-                mean_pred["pred_pose_raw"][:, :6]
-            ).unflatten(-1, (3, 3))
-            glob_rot_residual = so3_residual_aa(
-                mean_glob_rotmat.unsqueeze(-3),
-                gt_rotmats["glob_rotmat"].unsqueeze(-3),
-            )
-            theta_parts.append(glob_rot_residual)
-        theta_residual_no_cam = torch.cat(theta_parts, dim=-1)
-
-        if self.model_cam:
-            cam_residual = batch["gt_pred_cam"] - mean_pred["pred_cam"]
-            theta_residual = torch.cat([theta_residual_no_cam, cam_residual], dim=-1)
-        else:
-            theta_residual = theta_residual_no_cam
-
         shape_mean = mean_pred["shape"]
         scale_mean = mean_pred["scale_68D"]
-        pose_params = convert_pose_cont_to_flow_context(
-            mean_pred["pred_pose_raw"][:, 6:]
-        )
-        aa_3dofs = pose_params["aa_3dofs"]
-        params_1dofs = pose_params["params_1dofs"]
 
         context_beta = self.beta_context_proj(
             torch.cat(
@@ -232,38 +209,74 @@ class NFARHead(nn.Module):
             )
         )
 
-        # Pose context uses GT shape (teacher forcing), mirroring nf_loss.py.
-        shape_residual_true = beta_residual[..., : self.num_shape_comps]
-        scale_residual_true = beta_residual[..., self.num_shape_comps :]
-        shape_sample_true = shape_mean
-        if self.num_shape_comps > 0:
-            shape_sample_true = shape_sample_true + shape_residual_true
-        scale_sample_selected_true = scale_mean[..., self.scale_indices]
-        if self.num_scale_comps > 0:
-            scale_sample_selected_true = scale_sample_selected_true + scale_residual_true
+        if self.model_pose:
+            # Theta residual: [3dof(39), 1dof(34), glob_rot?(3)]
+            pose_3dof_residual = so3_residual_aa(
+                pose_params_mean["rotmat_3dofs"], gt_rotmats["pose_3dof_rotmat"]
+            )
+            offset_1dof = self.beta_dim + 39
+            pose_1dof_residual = (
+                gt_flow_params[..., offset_1dof : offset_1dof + 34]
+                - pose_params_mean["params_1dofs"]
+            )
+            theta_parts = [pose_3dof_residual, pose_1dof_residual]
+            if self.model_glob_rot:
+                mean_glob_rotmat = batch9Dfrom6D(
+                    mean_pred["pred_pose_raw"][:, :6]
+                ).unflatten(-1, (3, 3))
+                glob_rot_residual = so3_residual_aa(
+                    mean_glob_rotmat.unsqueeze(-3),
+                    gt_rotmats["glob_rotmat"].unsqueeze(-3),
+                )
+                theta_parts.append(glob_rot_residual)
+            theta_residual_no_cam = torch.cat(theta_parts, dim=-1)
 
-        context_theta_parts = [
-            flow_context,
-            shape_sample_true,
-            scale_sample_selected_true,
-            aa_3dofs,
-            params_1dofs,
-        ]
-        if self.model_cam:
-            context_theta_parts.append(mean_pred["pred_cam"])
-        context_theta= self.theta_context_proj(torch.cat(context_theta_parts, dim=-1))
+            if self.model_cam:
+                cam_residual = batch["gt_pred_cam"] - mean_pred["pred_cam"]
+                theta_residual = torch.cat([theta_residual_no_cam, cam_residual], dim=-1)
+            else:
+                theta_residual = theta_residual_no_cam
+
+            pose_params = convert_pose_cont_to_flow_context(
+                mean_pred["pred_pose_raw"][:, 6:]
+            )
+            aa_3dofs = pose_params["aa_3dofs"]
+            params_1dofs = pose_params["params_1dofs"]
+
+            # Pose context uses GT shape (teacher forcing), mirroring nf_loss.py.
+            shape_residual_true = beta_residual[..., : self.num_shape_comps]
+            scale_residual_true = beta_residual[..., self.num_shape_comps :]
+            shape_sample_true = shape_mean
+            if self.num_shape_comps > 0:
+                shape_sample_true = shape_sample_true + shape_residual_true
+            scale_sample_selected_true = scale_mean[..., self.scale_indices]
+            if self.num_scale_comps > 0:
+                scale_sample_selected_true = scale_sample_selected_true + scale_residual_true
+
+            context_theta_parts = [
+                flow_context,
+                shape_sample_true,
+                scale_sample_selected_true,
+                aa_3dofs,
+                params_1dofs,
+            ]
+            if self.model_cam:
+                context_theta_parts.append(mean_pred["pred_cam"])
+            context_theta = self.theta_context_proj(torch.cat(context_theta_parts, dim=-1))
 
         with torch.no_grad():
             _, _ = self.flow_beta.log_prob(beta_residual, context_beta)
-            _, _ = self.flow_theta.log_prob(theta_residual, context_theta)
             self.initialized_beta |= True
-            self.initialized_theta |= True
+            if self.model_pose:
+                _, _ = self.flow_theta.log_prob(theta_residual, context_theta)
+                self.initialized_theta |= True
 
         # nflows ActNorm._initialize sets self.initialized.data = torch.tensor(True)
         # which creates a CPU tensor, breaking DDP buffer sync. Fix by moving any
         # CPU buffers back to the correct device.
         device = beta_residual.device
-        for module in [self.flow_beta, self.flow_theta]:
+        modules = [self.flow_beta] + ([self.flow_theta] if self.model_pose else [])
+        for module in modules:
             for name, buf in module.named_buffers():
                 if buf.device != device:
                     buf.data = buf.data.to(device)
@@ -305,9 +318,13 @@ class NFARHead(nn.Module):
         log_prob_beta, z_beta = self.flow_beta.log_prob(
             inputs=beta_params, context=flow_context_beta
         )
-        log_prob_theta, z_theta = self.flow_theta.log_prob(
-            inputs=theta_params, context=flow_context_theta
-        )
+        if self.model_pose:
+            log_prob_theta, z_theta = self.flow_theta.log_prob(
+                inputs=theta_params, context=flow_context_theta
+            )
+        else:
+            log_prob_theta = torch.zeros_like(log_prob_beta)
+            z_theta = None
 
         log_prob_total = log_prob_beta + log_prob_theta
         return log_prob_total, (z_beta, z_theta)
@@ -344,6 +361,20 @@ class NFARHead(nn.Module):
             ``context_theta``:          (B*N, 2048) post-projection context
         """
         B, N = shape_samples.shape[0], shape_samples.shape[1]
+
+        if not self.model_pose:
+            # Stage-2 disabled: deterministic mean pose repeated, no theta residuals.
+            pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
+            pose_params_mhr = compact_cont_to_model_params_body(pose_mean_cont)
+            pose_samples = pose_params_mhr.unsqueeze(1).expand(B, N, -1).contiguous()
+            return {
+                "theta_samples_residual": flow_context.new_zeros(B, N, 0),
+                "theta_log_prob":         flow_context.new_zeros(B, N),
+                "pose_samples":           pose_samples,
+                "global_rot_samples":     None,
+                "cam_samples":            None,
+                "context_theta":          None,
+            }
 
         pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
         pose_params_mhr = compact_cont_to_model_params_body(pose_mean_cont)
@@ -620,7 +651,7 @@ class NFARHead(nn.Module):
             "global_rot_samples": glob_rot_euler_samples,
             "cam_samples": cam_samples,
             "flow_context_beta": beta_context,
-            "flow_context_theta": context_theta.reshape(B, N, -1),
+            "flow_context_theta": context_theta.reshape(B, N, -1) if context_theta is not None else None,
             "flow_context_raw": flow_context,
         }
 

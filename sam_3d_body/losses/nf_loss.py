@@ -27,6 +27,71 @@ class Loss(pl.LightningModule):
         hand_weight = getattr(self.cfg.LOSS, "HAND_WEIGHT", 0.1)
         self.hand_weight = hand_weight
 
+    def compute_gt_log_probs(self, predictions, batch):
+        """Return ``(log_prob_full, log_prob_beta)`` for the GT residual under
+        the NF-AR head. Each is a ``(B,)`` tensor; ``None`` for unsupported head
+        types. Used by visualisation code outside the training loop."""
+        if self.cfg.MODEL.HEAD_TYPE != "nf_ar":
+            return None, None
+
+        gt_model_params = batch["model_params"]
+        gt_shape = batch["shape_params"]
+        model_glob_rot = getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False)
+        model_pose = getattr(self.cfg.MODEL, "MODEL_POSE", True)
+
+        gt_flow_params, gt_rotmats = convert_mhr_params_to_flow_params(
+            gt_model_params, gt_shape,
+            include_global_rot=model_glob_rot,
+            include_shape=getattr(self.cfg.MODEL, "MODEL_SHAPE", True),
+            include_scale=getattr(self.cfg.MODEL, "MODEL_SCALE", True),
+            flip_global_rot=True,
+            return_rotmats=True,
+            scale_indices=self.nf_head.scale_indices,
+        )
+        mean_pred = predictions["mhr"]
+        pose_params = convert_pose_cont_to_flow_context(mean_pred["pred_pose_raw"][:, 6:])
+
+        beta_parts = []
+        if getattr(self.cfg.MODEL, "MODEL_SHAPE", True):
+            beta_parts.append(mean_pred["shape"])
+        if getattr(self.cfg.MODEL, "MODEL_SCALE", True):
+            beta_parts.append(mean_pred["scale_68D"][..., self.nf_head.scale_indices])
+        mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None
+
+        beta_dim = self.nf_head.num_shape_comps + self.nf_head.num_scale_comps
+        beta_residual = gt_flow_params[..., :beta_dim] - mean_beta
+
+        residual_parts = [beta_residual]
+        if model_pose:
+            residual_parts.append(
+                so3_residual_aa(pose_params["rotmat_3dofs"], gt_rotmats["pose_3dof_rotmat"])
+            )
+            offset_1dof = beta_dim + 39
+            residual_parts.append(
+                gt_flow_params[..., offset_1dof : offset_1dof + 34] - pose_params["params_1dofs"]
+            )
+            if model_glob_rot:
+                mean_glob_rotmat = batch9Dfrom6D(
+                    mean_pred["pred_pose_raw"][:, :6]
+                ).unflatten(-1, (3, 3))
+                residual_parts.append(
+                    so3_residual_aa(
+                        mean_glob_rotmat.unsqueeze(-3),
+                        gt_rotmats["glob_rotmat"].unsqueeze(-3),
+                    )
+                )
+        true_residual = torch.cat(residual_parts, dim=-1)
+        if model_pose and getattr(self.cfg.MODEL, "MODEL_CAM", False):
+            cam_residual = (batch["gt_pred_cam"] - mean_pred["pred_cam"]).detach()
+            true_residual = torch.cat([true_residual, cam_residual], dim=-1)
+
+        log_prob_full = self._compute_gt_residual_log_prob(true_residual, predictions)
+        flow_context_beta = predictions["uncertainty_output"]["flow_context_beta"]
+        log_prob_beta, _ = self.nf_head.flow_beta.log_prob(
+            inputs=beta_residual, context=flow_context_beta
+        )
+        return log_prob_full, log_prob_beta
+
     def _compute_gt_residual_log_prob(self, true_residual, predictions):
         head_type = self.cfg.MODEL.HEAD_TYPE
         uncertainty_output = predictions["uncertainty_output"]
@@ -51,42 +116,45 @@ class Loss(pl.LightningModule):
                 )
             )
 
-            pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
-            pose_params = convert_pose_cont_to_flow_context(pose_mean_cont)
-            aa_3dofs = pose_params["aa_3dofs"]  # B, 39
-            params_1dofs = pose_params["params_1dofs"]  # B, 34
+            if self.nf_head.model_pose:
+                pose_mean_cont = mean_pred["pred_pose_raw"][:, 6:]
+                pose_params = convert_pose_cont_to_flow_context(pose_mean_cont)
+                aa_3dofs = pose_params["aa_3dofs"]  # B, 39
+                params_1dofs = pose_params["params_1dofs"]  # B, 34
 
-            beta_residual_true = true_residual[..., : self.nf_head.beta_dim]
-            shape_residual_true = beta_residual_true[
-                ...,
-                : self.nf_head.num_shape_comps,
-            ]
-            scale_residual_true = beta_residual_true[
-                ...,
-                self.nf_head.num_shape_comps :,
-            ]
+                beta_residual_true = true_residual[..., : self.nf_head.beta_dim]
+                shape_residual_true = beta_residual_true[
+                    ...,
+                    : self.nf_head.num_shape_comps,
+                ]
+                scale_residual_true = beta_residual_true[
+                    ...,
+                    self.nf_head.num_shape_comps :,
+                ]
 
-            shape_sample_true = mean_pred["shape"]
-            if self.nf_head.num_shape_comps > 0:
-                shape_sample_true = shape_sample_true + shape_residual_true
-            scale_sample_selected_true = mean_pred["scale_68D"][..., self.nf_head.scale_indices]
-            if self.nf_head.num_scale_comps > 0:
-                scale_sample_selected_true = (
-                    scale_sample_selected_true + scale_residual_true
+                shape_sample_true = mean_pred["shape"]
+                if self.nf_head.num_shape_comps > 0:
+                    shape_sample_true = shape_sample_true + shape_residual_true
+                scale_sample_selected_true = mean_pred["scale_68D"][..., self.nf_head.scale_indices]
+                if self.nf_head.num_scale_comps > 0:
+                    scale_sample_selected_true = (
+                        scale_sample_selected_true + scale_residual_true
+                    )
+
+                context_theta_parts = [
+                    flow_context_raw,
+                    shape_sample_true,
+                    scale_sample_selected_true,
+                    aa_3dofs,
+                    params_1dofs,
+                ]
+                if self.nf_head.model_cam:
+                    context_theta_parts.append(mean_pred["pred_cam"])
+                flow_context_theta = self.nf_head.theta_context_proj(
+                    torch.cat(context_theta_parts, dim=-1)
                 )
-
-            context_theta_parts = [
-                flow_context_raw,
-                shape_sample_true,
-                scale_sample_selected_true,
-                aa_3dofs,
-                params_1dofs,
-            ]
-            if self.nf_head.model_cam:
-                context_theta_parts.append(mean_pred["pred_cam"])
-            flow_context_theta = self.nf_head.theta_context_proj(
-                torch.cat(context_theta_parts, dim=-1)
-            )
+            else:
+                flow_context_theta = None
 
             flow_log_prob, _ = self.nf_head.log_prob(
                 true_residual, flow_context_beta, flow_context_theta
@@ -160,6 +228,7 @@ class Loss(pl.LightningModule):
             gt_shape = batch["shape_params"]
 
             model_glob_rot = getattr(self.cfg.MODEL, "MODEL_GLOB_ROT", False)
+            model_pose = getattr(self.cfg.MODEL, "MODEL_POSE", True)
 
             gt_flow_params, gt_rotmats = convert_mhr_params_to_flow_params(
                 gt_model_params,
@@ -194,31 +263,32 @@ class Loss(pl.LightningModule):
             beta_residual = gt_flow_params[..., :beta_dim] - mean_beta
             residual_parts.append(beta_residual)
 
-            # 3DOF pose residual (SO(3) right-perturbation)
-            pose_3dof_residual = so3_residual_aa(
-                pose_params["rotmat_3dofs"],        # (B, 13, 3, 3) mean
-                gt_rotmats["pose_3dof_rotmat"],     # (B, 13, 3, 3) GT
-            )
-            residual_parts.append(pose_3dof_residual)
+            if model_pose:
+                # 3DOF pose residual (SO(3) right-perturbation)
+                pose_3dof_residual = so3_residual_aa(
+                    pose_params["rotmat_3dofs"],        # (B, 13, 3, 3) mean
+                    gt_rotmats["pose_3dof_rotmat"],     # (B, 13, 3, 3) GT
+                )
+                residual_parts.append(pose_3dof_residual)
 
-            # 1DOF pose residual (additive — SO(2) is abelian)
-            offset_1dof = beta_dim + 39
-            pose_1dof_residual = (
-                gt_flow_params[..., offset_1dof : offset_1dof + 34]
-                - pose_params["params_1dofs"]
-            )
-            residual_parts.append(pose_1dof_residual)
+                # 1DOF pose residual (additive — SO(2) is abelian)
+                offset_1dof = beta_dim + 39
+                pose_1dof_residual = (
+                    gt_flow_params[..., offset_1dof : offset_1dof + 34]
+                    - pose_params["params_1dofs"]
+                )
+                residual_parts.append(pose_1dof_residual)
 
-            # Global rotation residual (SO(3)) if enabled
-            if model_glob_rot:
-                mean_glob_rotmat = batch9Dfrom6D(
-                    mean_pred["pred_pose_raw"][:, :6]
-                ).unflatten(-1, (3, 3))  # (B, 3, 3)
-                glob_rot_residual = so3_residual_aa(
-                    mean_glob_rotmat.unsqueeze(-3),          # (B, 1, 3, 3)
-                    gt_rotmats["glob_rotmat"].unsqueeze(-3), # (B, 1, 3, 3)
-                )  # (B, 3)
-                residual_parts.append(glob_rot_residual)
+                # Global rotation residual (SO(3)) if enabled
+                if model_glob_rot:
+                    mean_glob_rotmat = batch9Dfrom6D(
+                        mean_pred["pred_pose_raw"][:, :6]
+                    ).unflatten(-1, (3, 3))  # (B, 3, 3)
+                    glob_rot_residual = so3_residual_aa(
+                        mean_glob_rotmat.unsqueeze(-3),          # (B, 1, 3, 3)
+                        gt_rotmats["glob_rotmat"].unsqueeze(-3), # (B, 1, 3, 3)
+                    )  # (B, 3)
+                    residual_parts.append(glob_rot_residual)
 
             true_residual = torch.cat(residual_parts, dim=-1)
 
@@ -226,7 +296,7 @@ class Loss(pl.LightningModule):
             # Camera residual is detached: the NLL trains the flow to model
             # the correct joint distribution, but no gradient flows back to
             # the camera prediction head — supervised only by reprojection.
-            if getattr(self.cfg.MODEL, "MODEL_CAM", False):
+            if model_pose and getattr(self.cfg.MODEL, "MODEL_CAM", False):
                 cam_residual = (batch["gt_pred_cam"] - mean_pred["pred_cam"]).detach()
                 true_residual = torch.cat([true_residual, cam_residual], dim=-1)
 

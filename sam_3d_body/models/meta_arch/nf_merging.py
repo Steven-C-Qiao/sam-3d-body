@@ -225,7 +225,7 @@ def merge_params_nf_tempered(
 
     if gt_hand_scale_override:
         modelled = set(int(i) for i in nf_head.scale_indices)
-        override_indices = [i for i in [8, 9] + list(range(18, 68)) if i not in modelled]
+        override_indices = [i for i in range(68) if i not in modelled]
         if override_indices:
             gt_scale_68D = batch["model_params"][:, -68:]   # (B*V, 68)
             mhr_out["scale_68D"][:, override_indices] = gt_scale_68D[:, override_indices]
@@ -937,8 +937,54 @@ def get_mhr_outputs(
     bs,
     num_views,
     uncertainty_out=None,
+    nf_head=None,
 ):
     ret = {}
+
+    # ------------- β-space tensors for L2-in-parameter-space metrics -------------
+    # Authoritative reference for what merging is actually optimising for: the
+    # posterior mean β. Vertex-space metrics like PVE-T-SC quotient out global
+    # scale and translation, hiding fusion gains in those directions.
+    if nf_head is not None:
+        scale_indices = nf_head.scale_indices
+
+        per_view_beta = torch.cat(
+            [mhr_out["shape"], mhr_out["scale_68D"][..., scale_indices]], dim=-1
+        )                                                                         # (B*V, 55)
+        gt_shape = batch["shape_params"]
+        gt_scale_68D = batch["model_params"][:, -68:]
+        gt_beta = torch.cat([gt_shape, gt_scale_68D[..., scale_indices]], dim=-1)  # (B*V, 55)
+
+        avg_beta_per_subj = torch.cat(
+            [param_dict["avg_shape"], param_dict["avg_scale"][..., scale_indices]], dim=-1
+        )                                                                         # (B, 55)
+        avg_beta = avg_beta_per_subj.repeat_interleave(num_views, dim=0)          # (B*V, 55)
+
+        ret["per_view_beta"] = per_view_beta
+        ret["gt_beta"] = gt_beta
+        ret["avg_beta"] = avg_beta
+
+        if "merged_shape" in param_dict and "merged_scale" in param_dict:
+            merged_beta_per_subj = torch.cat(
+                [param_dict["merged_shape"], param_dict["merged_scale"][..., scale_indices]], dim=-1
+            )                                                                     # (B, 55)
+            ret["merged_beta"] = merged_beta_per_subj.repeat_interleave(num_views, dim=0)
+
+        if uncertainty_out is not None:
+            shape_s = uncertainty_out["shape_samples"]                            # (B*V, S, 45)
+            scale_s = uncertainty_out["scale_samples"]                            # (B*V, S, 68)
+            ret["sample_param_avg_beta"] = torch.cat(
+                [shape_s.mean(dim=1), scale_s.mean(dim=1)[..., scale_indices]], dim=-1
+            )                                                                     # (B*V, 55)
+
+        shape_std = getattr(nf_head, "_shape_perturb_std", None)
+        scale_std = getattr(nf_head, "_scale_perturb_std", None)
+        if shape_std is not None and scale_std is not None:
+            ret["beta_perturb_std"] = torch.cat(
+                [shape_std.to(per_view_beta.device, per_view_beta.dtype),
+                 scale_std.to(per_view_beta.device, per_view_beta.dtype)],
+                dim=0,
+            )                                                                     # (55,)
 
 
     mhr_zero_inputs = {

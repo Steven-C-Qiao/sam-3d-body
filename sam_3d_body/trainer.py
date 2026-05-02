@@ -38,6 +38,7 @@ from .visualization.my_vis import (
     vis_merging_neutral_variance,
     vis_merging_predictions,
     vis_merging_samples,
+    vis_merging_scatter,
 )
 from .visualization.renderer import Renderer
 
@@ -310,7 +311,7 @@ class Trainer(BaseLightningModule):
                 stack_vertically=False,
                 overlay_gt=True,
                 plot_side=True,
-                plot_neutral=False,
+                plot_neutral=True,
                 plot_sc=False,
                 max_sample=25,
             )
@@ -718,6 +719,7 @@ class Trainer(BaseLightningModule):
         )
 
         self.model.eval()
+        # self.model.train()
 
         all_metrics = defaultdict(list)
 
@@ -764,7 +766,14 @@ class Trainer(BaseLightningModule):
                 bs=bs,
                 num_views=num_views,
                 uncertainty_out=uncertainty_out,
+                nf_head=self.model.nf_head,
             )
+
+            gt_logp_full, gt_logp_beta = self.criterion.compute_gt_log_probs(outputs, batch)
+            if gt_logp_full is not None:
+                outs["gt_residual_log_prob"] = gt_logp_full.detach()
+            if gt_logp_beta is not None:
+                outs["gt_residual_log_prob_beta"] = gt_logp_beta.detach()
 
             # Stage-2 cam resample for shape-consistent merged reprojection.
             merged_pred_cam_t = resample_cam_for_merged_shape(
@@ -818,9 +827,10 @@ class Trainer(BaseLightningModule):
 
             if not noplot:
                 vis_merging_predictions(outs, sc=True, save_dir=self.vis_save_dir)
-                vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False, use_oracle=True)
+                # vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False, use_oracle=True)
                 vis_merging_neutral(outs, sc=True, save_dir=self.vis_save_dir, use_best_by_log_prob=False, use_oracle=True, use_body_pvetsc=True)
                 vis_merging_samples(outs, save_dir=self.vis_save_dir, max_samples=4, plot_neutral_pvetsc_body=True)
+                vis_merging_scatter(outs, save_dir=self.vis_save_dir)
                 # vis_merging_neutral_variance(outs, sc=True, save_dir=self.vis_save_dir)
 
             # vis_predictions(outs, sc=False, save_dir=self.vis_save_dir)
