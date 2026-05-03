@@ -221,7 +221,7 @@ def merge_params_nf_tempered(
     T = temperature if temperature is not None else float(nf_head.beta_dim)
     S = num_samples
 
-    T = 15.0
+    T = 10.0
 
     if gt_hand_scale_override:
         modelled = set(int(i) for i in nf_head.scale_indices)

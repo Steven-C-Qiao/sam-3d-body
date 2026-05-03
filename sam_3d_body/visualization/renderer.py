@@ -12,6 +12,24 @@ import pyrender
 import torch
 import trimesh
 
+_PERSISTENT_RENDERER: Optional[pyrender.OffscreenRenderer] = None
+
+
+def _get_offscreen_renderer(viewport_width: int, viewport_height: int,
+                            point_size: float = 1.0) -> pyrender.OffscreenRenderer:
+    global _PERSISTENT_RENDERER
+    if _PERSISTENT_RENDERER is None:
+        _PERSISTENT_RENDERER = pyrender.OffscreenRenderer(
+            viewport_width=int(viewport_width),
+            viewport_height=int(viewport_height),
+            point_size=point_size,
+        )
+    else:
+        _PERSISTENT_RENDERER.viewport_width = int(viewport_width)
+        _PERSISTENT_RENDERER.viewport_height = int(viewport_height)
+        _PERSISTENT_RENDERER.point_size = point_size
+    return _PERSISTENT_RENDERER
+
 
 def get_light_poses(n_lights=5, elevation=np.pi / 3, dist=12):
     # get lights in a circle around origin at elevation
@@ -160,6 +178,7 @@ class Renderer:
         return_rgba=False,
         camera_center=None,
         vertex_colors=None,
+        focal_length: Optional[float] = None,
     ) -> np.array:
         """
         Render meshes on input image
@@ -176,10 +195,7 @@ class Renderer:
         image = image / 255.0
         h, w = image.shape[:2]
 
-        renderer = pyrender.OffscreenRenderer(
-            viewport_height=h,
-            viewport_width=w,
-        )
+        renderer = _get_offscreen_renderer(viewport_width=w, viewport_height=h)
 
         camera_translation = cam_t.copy()
         camera_translation[0] *= -1.0
@@ -228,9 +244,10 @@ class Renderer:
         camera_pose[:3, 3] = camera_translation
         if camera_center is None:
             camera_center = [image.shape[1] / 2.0, image.shape[0] / 2.0]
+        f_eff = self.focal_length if focal_length is None else focal_length
         camera = pyrender.IntrinsicsCamera(
-            fx=self.focal_length,
-            fy=self.focal_length,
+            fx=f_eff,
+            fy=f_eff,
             cx=camera_center[0],
             cy=camera_center[1],
             zfar=1e12,
@@ -254,7 +271,6 @@ class Renderer:
         color, _rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
 
         color = color.astype(np.float32) / 255.0
-        renderer.delete()
 
         if return_rgba:
             return color
@@ -307,8 +323,8 @@ class Renderer:
         render_res=[256, 256],
     ):
 
-        renderer = pyrender.OffscreenRenderer(
-            viewport_width=render_res[0], viewport_height=render_res[1], point_size=1.0
+        renderer = _get_offscreen_renderer(
+            viewport_width=render_res[0], viewport_height=render_res[1], point_size=1.0,
         )
         # material = pyrender.MetallicRoughnessMaterial(
         #     metallicFactor=0.0,
@@ -357,7 +373,6 @@ class Renderer:
 
         color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         color = color.astype(np.float32) / 255.0
-        renderer.delete()
 
         return color
 
@@ -373,8 +388,8 @@ class Renderer:
         focal_length=None,
     ):
 
-        renderer = pyrender.OffscreenRenderer(
-            viewport_width=render_res[0], viewport_height=render_res[1], point_size=1.0
+        renderer = _get_offscreen_renderer(
+            viewport_width=render_res[0], viewport_height=render_res[1], point_size=1.0,
         )
         MESH_COLORS = [
             [0.000, 0.447, 0.741],
@@ -427,7 +442,6 @@ class Renderer:
 
         color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         color = color.astype(np.float32) / 255.0
-        renderer.delete()
 
         return color
 

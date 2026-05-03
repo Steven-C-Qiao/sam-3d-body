@@ -17,7 +17,10 @@ from sam_3d_body.data.transforms import (
     TopdownAffine,
     VisionTransformWrapper,
 )
-from sam_3d_body.data.bedlam.utils.image_utils import extreme_crop_bbox
+from sam_3d_body.data.bedlam.utils.image_utils import (
+    extreme_crop_bbox,
+    extreme_crop_bbox_mask,
+)
 
 
 def load_pickle(pkl_dir):
@@ -436,8 +439,8 @@ class MultiD4DressDataset(Dataset):
                 getattr(self.cfg.DATASET, "EXTREME_CROP_PROB", 0.0)
             )
             if extreme_crop_prob > 0 and np.random.rand() < extreme_crop_prob:
-                bbox_center, bbox_scale = extreme_crop_bbox(
-                    bbox_center, bbox_scale,
+                bbox_center, bbox_scale = extreme_crop_bbox_mask(
+                    bbox_center, bbox_scale, mask,
                     level=int(getattr(self.cfg.DATASET, "EXTREME_CROP_LEVEL", 0)),
                 )
 

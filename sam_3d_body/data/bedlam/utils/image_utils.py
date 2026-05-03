@@ -306,6 +306,138 @@ def extreme_crop_bbox(center, scale, level=0):
     return new_center, new_scale
 
 
+# ---------------------------------------------------------------------------
+# Keypoint-driven extreme crop, ported from NFCameraHMR.
+#
+# Each crop part defines a KEEP-set of joint indices in the SMPL-X / SMPL
+# 24-main-joint convention (matches `gtkps[:, :24]` in BEDLAM):
+#   0 pelvis, 1 left_hip, 2 right_hip, 3 spine1, 4 left_knee, 5 right_knee,
+#   6 spine2, 7 left_ankle, 8 right_ankle, 9 spine3, 10 left_foot, 11 right_foot,
+#   12 neck, 13 left_collar, 14 right_collar, 15 head, 16 left_shoulder,
+#   17 right_shoulder, 18 left_elbow, 19 right_elbow, 20 left_wrist, 21 right_wrist,
+#   22 left_hand, 23 right_hand.
+# The new bbox is the tight enclosing square of the kept joints, padded by
+# 1.1× (1.2× shoulders, 1.3× head — small parts need more breathing room).
+_SMPL24_KEEP = {
+    'hips':       [i for i in range(24) if i not in (4, 5, 7, 8, 10, 11)],
+    'shoulders':  [3, 6, 9, 12, 13, 14, 15, 16, 17],
+    'head':       [12, 15],
+    'torso':      [0, 1, 2, 3, 6, 9, 12, 13, 14, 16, 17],
+    'rightarm':   [17, 19, 21, 23],
+    'leftarm':    [16, 18, 20, 22],
+    'legs':       [0, 1, 2, 4, 5, 7, 8, 10, 11],
+    'rightleg':   [0, 2, 5, 8, 11],
+    'leftleg':    [0, 1, 4, 7, 10],
+}
+_PART_PAD = {'head': 1.3, 'shoulders': 1.2}  # fallback 1.1
+
+
+def _bbox_from_points(pts, pad=1.1):
+    """Tight enclosing square bbox around 2D points.
+
+    pts: (N, 2) array. Returns (center [2], scale) where scale = side / 200.
+    Returns (None, None) if fewer than 2 points.
+    """
+    if len(pts) < 2:
+        return None, None
+    xy_min = pts.min(axis=0)
+    xy_max = pts.max(axis=0)
+    center = 0.5 * (xy_min + xy_max)
+    side = float(max(xy_max[0] - xy_min[0], xy_max[1] - xy_min[1]) * pad)
+    return center.astype(np.float32), np.float32(side / 200.0)
+
+
+def extreme_crop_bbox_kpts(center, scale, keypoints_2d, level=0):
+    """Keypoint-driven extreme crop (NFCameraHMR-style).
+
+    center, scale: original bbox (returned unchanged if the chosen part has
+        fewer than 2 valid keypoints, mirroring NFCameraHMR's fallback).
+    keypoints_2d: (J, 2) or (J, 3) numpy array in SMPL-X 24-main-joint order.
+        If a 3rd column is present, it's treated as confidence and joints
+        with confidence <= 0 are filtered out.
+    level: 0 = mild (hips/shoulders/head), 1 = aggressive (all 9 parts).
+
+    Returns (new_center, new_scale).
+    """
+    choices, probs = _EXTREME_CROP_LEVEL_0 if level == 0 else _EXTREME_CROP_LEVEL_1
+    part = np.random.choice(choices, p=probs)
+
+    keep = _SMPL24_KEEP[part]
+    pts = np.asarray(keypoints_2d, dtype=np.float32)[keep]
+    if pts.shape[1] >= 3:
+        pts = pts[pts[:, 2] > 0, :2]
+    else:
+        pts = pts[:, :2]
+
+    pad = _PART_PAD.get(part, 1.1)
+    new_center, new_scale = _bbox_from_points(pts, pad=pad)
+    if new_center is None:
+        return center, scale
+    return new_center, new_scale
+
+
+def extreme_crop_bbox_mask(center, scale, mask, level=0):
+    """Mask-band-driven extreme crop (used when 2D keypoints aren't available,
+    e.g. 4D-Dress where the bbox is already mask-derived).
+
+    Each part selects a vertical band of the foreground mask using fixed
+    anatomical proportions, then takes the tight bbox of the foreground pixels
+    inside that band. Lateral parts (rightleg/leftleg/rightarm/leftarm) split
+    the band by image-x relative to its midpoint — note this is image-side,
+    not body-side, since we have no orientation info from the mask alone.
+
+    mask: (H, W) or (H, W, C). Foreground = any positive pixel.
+    """
+    fg = mask > 0 if mask.ndim == 2 else mask.any(axis=-1)
+    ys, xs = np.where(fg)
+    if len(ys) < 2:
+        return center, scale
+
+    choices, probs = _EXTREME_CROP_LEVEL_0 if level == 0 else _EXTREME_CROP_LEVEL_1
+    part = np.random.choice(choices, p=probs)
+
+    # Vertical bands per part as (y_lo_frac, y_hi_frac) of mask vertical extent,
+    # measured from the top of the mask (y_top = 0 → y_bot = 1).
+    bands = {
+        'hips':      (0.00, 0.55),  # head → hips
+        'shoulders': (0.00, 0.30),  # head + shoulders + chest
+        'head':      (0.00, 0.15),
+        'torso':     (0.20, 0.55),
+        'legs':      (0.55, 1.00),
+        'rightleg':  (0.55, 1.00),
+        'leftleg':   (0.55, 1.00),
+        'rightarm':  (0.20, 0.55),
+        'leftarm':   (0.20, 0.55),
+    }
+    y_top, y_bot = float(ys.min()), float(ys.max())
+    h = y_bot - y_top
+    y_lo = y_top + bands[part][0] * h
+    y_hi = y_top + bands[part][1] * h
+
+    band = (ys >= y_lo) & (ys <= y_hi)
+    bx, by = xs[band], ys[band]
+    if len(by) < 2:
+        return center, scale
+
+    if part in ('rightarm', 'rightleg'):
+        cx_band = 0.5 * (bx.min() + bx.max())
+        side = bx <= cx_band
+        bx, by = bx[side], by[side]
+    elif part in ('leftarm', 'leftleg'):
+        cx_band = 0.5 * (bx.min() + bx.max())
+        side = bx >= cx_band
+        bx, by = bx[side], by[side]
+    if len(by) < 2:
+        return center, scale
+
+    pts = np.stack([bx, by], axis=-1).astype(np.float32)
+    pad = _PART_PAD.get(part, 1.1)
+    new_center, new_scale = _bbox_from_points(pts, pad=pad)
+    if new_center is None:
+        return center, scale
+    return new_center, new_scale
+
+
 def uncrop(img, center, scale, orig_shape, rot=0, is_rgb=True):
     """'Undo' the image cropping/resizing.
     This function is used when evaluating mask/part segmentation.

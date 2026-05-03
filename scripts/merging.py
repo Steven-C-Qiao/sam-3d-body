@@ -96,7 +96,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
     results = trainer.run_multiview_prediction(
         num_view=4,
         num_samples=num_samples,
-        max_batches=20,
+        max_batches=3,
         dataset_name=dataset_name,
         merge_method=merge_method,
         noplot=noplot,

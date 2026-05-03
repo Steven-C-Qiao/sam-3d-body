@@ -11,7 +11,13 @@ from torch.utils.data import default_collate
 
 from .bedlam import constants
 from .bedlam.constants import NUM_JOINTS_SMPLX
-from .bedlam.utils.image_utils import extreme_crop_bbox, random_crop, read_img
+from .bedlam.utils.image_utils import (
+    extreme_crop_bbox,
+    extreme_crop_bbox_kpts,
+    extreme_crop_bbox_mask,
+    random_crop,
+    read_img,
+)
 from ..configs.config import DATASET_FILES, DATASET_FOLDERS, INDICES_PATH
 
 # Mesh-vertex indices used to extract dense keypoint supervision. Loaded once
@@ -101,6 +107,10 @@ class DatasetHMR(Dataset):
         # Bounding boxes are assumed to be in the center and scale format
         self.scale = self.data["scale"].astype(np.float32)
         self.center = self.data["center"].astype(np.float32)
+        # First 24 entries of gtkps are the SMPL-X main joints in image-pixel
+        # coordinates — used by the keypoint-driven extreme crop. (gtkps shape:
+        # (N, 127, 3); the trailing 3rd column is keypoint confidence.)
+        self.gtkps_main = self.data["gtkps"][:, :24].astype(np.float32)
 
         input_size = options.IMAGE_SIZE
         self.transform = Compose(
@@ -184,8 +194,9 @@ class DatasetHMR(Dataset):
         did_extreme_crop = False
         if self.is_train and getattr(self.options, "EXTREME_CROP_PROB", 0.0) > 0:
             if np.random.rand() < self.options.EXTREME_CROP_PROB:
-                center, scale = extreme_crop_bbox(
-                    center, scale, level=self.options.EXTREME_CROP_LEVEL,
+                center, scale = extreme_crop_bbox_kpts(
+                    center, scale, self.gtkps_main[index],
+                    level=self.options.EXTREME_CROP_LEVEL,
                 )
                 did_extreme_crop = True
 
@@ -511,8 +522,9 @@ class MultiViewEvaluationDataset(Dataset):
         did_extreme_crop = False
         if getattr(self.options, "EXTREME_CROP_PROB", 0.0) > 0:
             if np.random.rand() < self.options.EXTREME_CROP_PROB:
-                center, scale = extreme_crop_bbox(
-                    center, scale, level=self.options.EXTREME_CROP_LEVEL,
+                center, scale = extreme_crop_bbox_kpts(
+                    center, scale, keypoints,
+                    level=self.options.EXTREME_CROP_LEVEL,
                 )
                 did_extreme_crop = True
 

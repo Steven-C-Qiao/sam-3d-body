@@ -22,6 +22,7 @@ from sam_3d_body.metrics.metrics_tracker import (
     load_body_vertex_mask_np,
     scale_and_translation_transform_batch,
     scale_and_translation_transform_batch_masked,
+    scale_and_translation_transform_batch_torch,
 )
 from sam_3d_body.visualization.renderer import Renderer
 
@@ -124,6 +125,31 @@ def vis_histogram(
     print(f"Saved histogram column to {hist_path}")
     plt.close()
 
+# Precomputed colormap LUTs. matplotlib's Colormap.__call__ has non-trivial
+# Python overhead per call (input validation, alpha handling, masked-array
+# checks); we hit it ~72× per vis_merging_samples invocation. A 256-entry LUT
+# built once at first use, then looked up with integer indexing, is ~50× faster
+# and bit-identical at this resolution.
+_CMAP_LUT_CACHE: dict = {}
+
+
+def _get_cmap_lut(cmap_name: str) -> np.ndarray:
+    """Return a ``(256, 4)`` float32 RGBA LUT for ``cmap_name``."""
+    lut = _CMAP_LUT_CACHE.get(cmap_name)
+    if lut is None:
+        cmap = plt.get_cmap(cmap_name)
+        lut = cmap(np.linspace(0.0, 1.0, 256, dtype=np.float64)).astype(np.float32)
+        _CMAP_LUT_CACHE[cmap_name] = lut
+    return lut
+
+
+def _apply_cmap(normalized: np.ndarray, cmap_name: str = "inferno") -> np.ndarray:
+    """Vectorised colormap lookup. ``normalized`` is in [0, 1]; returns RGBA float32 in [0, 1]."""
+    lut = _get_cmap_lut(cmap_name)
+    idx = np.clip((normalized * 255.0 + 0.5).astype(np.int32), 0, 255)
+    return lut[idx]
+
+
 def build_vertex_colors(
     dists: np.ndarray,
     *,
@@ -148,9 +174,9 @@ def build_vertex_colors(
         denom = 1.0
     normalized = (dists - effective_min_dist) / denom
     normalized = np.clip(normalized, 0.0, 1.0)
-    colors_rgb = plt.get_cmap(cmap)(normalized)[..., :3]  # (V, 3)
-    vertex_colors = np.ones((colors_rgb.shape[0], 4), dtype=np.float32)
-    vertex_colors[:, :3] = colors_rgb
+    rgba = _apply_cmap(normalized, cmap)              # (V, 4)
+    vertex_colors = rgba.copy()
+    vertex_colors[:, 3] = 1.0
     return vertex_colors
 
 
@@ -187,7 +213,7 @@ def build_distance_colorbar_rgb(
     normalized = (values - effective_min_dist) / denom
     normalized = np.clip(normalized, 0.0, 1.0)
 
-    colors = plt.get_cmap(cmap)(normalized)[..., :3]  # (H, 3), RGB in [0,1]
+    colors = _apply_cmap(normalized, cmap)[..., :3]  # (H, 3), RGB in [0,1]
     bar_rgb = (colors * 255.0).astype(np.uint8)  # (H, 3)
     bar_rgb = np.repeat(bar_rgb[:, None, :], width, axis=1)  # (H, W, 3)
 
@@ -440,6 +466,26 @@ def vis_samples(
     renderer = Renderer(focal_length=mhr_outputs["focal_length"][b], faces=faces)
     renderer_side = Renderer(focal_length=1000, faces=faces)
 
+    # Panel-space intrinsics for the front view — render at panel resolution
+    # instead of full image + warpAffine. Affine (full→panel) is a similarity
+    # transform; pinhole (fx, cx, cy) transform predictably under it.
+    use_panel = affine is not None
+    if use_panel:
+        A = affine[:2, :2]
+        det = float(abs(A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0]))
+        scale_full_to_panel = float(np.sqrt(det))
+        cc_full_h = np.array([camera_center[0], camera_center[1], 1.0], dtype=np.float64)
+        cc_panel = (affine @ cc_full_h)[:2]
+        cc_front_t = (float(cc_panel[0]), float(cc_panel[1]))
+        fx_front = renderer.focal_length * scale_full_to_panel
+        front_bg = base_img
+        white_bg_front = np.full_like(base_img, 255)
+    else:
+        cc_front_t = camera_center
+        fx_front = None  # use renderer's default
+        front_bg = img_cv2
+        white_bg_front = np.full_like(img_cv2, 255, dtype=np.uint8)
+
     # Expose as `outputs` to keep existing per-sample code below unchanged.
     outputs = mhr_outputs
     img_mesh_list = []
@@ -588,11 +634,42 @@ def vis_samples(
             )
         else:
             neutral_sc_max = 1.0
-    white_bg_full = np.full_like(img_cv2, 255, dtype=np.uint8)
     if img_size is not None:
         black_bg = np.zeros((int(img_size[1]), int(img_size[0]), 3), dtype=np.uint8)
     else:
         black_bg = np.zeros_like(img_cv2)
+
+    # Cache GT renders — the same gt_verts/cam are used by every sample and by
+    # the mean panel, so render once and reuse. Five conditional caches:
+    #   gt_front_cache   : front-view GT-on-image (used by gt_on_img + gt_on_img_mean)
+    #   gt_side_cache    : side view of GT mesh   (used by gt_side + gt_side_mean
+    #                                              + gt_pa + gt_pa_mean — same input)
+    #   gt_neutral_cache : neutral side view      (used by gt_n + gt_n_mean
+    #                                              + gt_nsc — same input)
+    gt_front_cache = None
+    gt_side_cache = None
+    gt_neutral_cache = None
+    if overlay_gt:
+        gt_front_cache = renderer(
+            gt_verts[b], gt_cam_t[b],
+            front_bg.copy(),
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(1, 1, 1),
+            camera_center=cc_front_t,
+            focal_length=fx_front,
+        )
+    if plot_side:
+        gt_side_cache = renderer_side(
+            gt_verts_b - gt_root, generic_camera, black_bg,
+            mesh_base_color=GT_COLOR, scene_bg_color=(0, 0, 0),
+            side_view=True, rot_angle=90,
+        )
+        if neutral_available:
+            gt_neutral_cache = renderer_side(
+                gt_neutral - neutral_center, generic_camera, black_bg,
+                mesh_base_color=GT_COLOR, scene_bg_color=(0, 0, 0),
+                side_view=True, rot_angle=0,
+            )
 
     def _to_uint8(float_rgb):
         return (float_rgb * 255.0).clip(0, 255).astype(np.uint8)
@@ -609,23 +686,17 @@ def vis_samples(
         # ----------------------- front view -----------------------
         sample_cam_t = pred_cam_t_samples[b, orig_i] if pred_cam_t_samples is not None else outputs["pred_cam_t"][b]
         if overlay_gt:
-            # GT mesh drawn opaque onto the input image (keeps image visible
-            # wherever the GT mesh is absent).
-            gt_on_img = renderer(
-                gt_verts[b], gt_cam_t[b],
-                img_cv2.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(1, 1, 1),
-                camera_center=camera_center,
-            )
+            # GT mesh drawn opaque onto the input image — cached above.
+            gt_on_img = gt_front_cache
             # Pred rendered with alpha onto a blank canvas, then overlaid on top.
             pred_rgba = renderer(
                 mhr_samples[b, orig_i],
                 sample_cam_t,
-                white_bg_full,
+                white_bg_front,
                 scene_bg_color=(1, 1, 1),
                 vertex_colors=vertex_colors_samples[i],
-                camera_center=camera_center,
+                camera_center=cc_front_t,
+                focal_length=fx_front,
                 return_rgba=True,
             )
             out_rgb = _overlay_rgba(pred_rgba, gt_on_img)
@@ -633,16 +704,15 @@ def vis_samples(
             out_rgb = renderer(
                 mhr_samples[b, orig_i],
                 sample_cam_t,
-                img_cv2.copy(),
+                front_bg.copy(),
                 scene_bg_color=(1, 1, 1),
                 vertex_colors=vertex_colors_samples[i],
-                camera_center=camera_center,
+                camera_center=cc_front_t,
+                focal_length=fx_front,
             )
 
         img_mesh = _to_uint8(out_rgb)
-
-        if affine is not None:
-            img_mesh = cv2.warpAffine(img_mesh, affine, img_size)
+        # img_mesh is already at panel size when use_panel.
 
         front_lines = []
         if kp2d_visible_samples_px is not None:
@@ -657,15 +727,7 @@ def vis_samples(
 
         # ----------------------- side view -----------------------
         if plot_side:
-            gt_side = renderer_side(
-                gt_verts[b] - gt_root_joint[b],
-                generic_camera,
-                black_bg,
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=90,
-            )
+            gt_side = gt_side_cache
             pred_side_rgba = renderer_side(
                 mhr_samples[b, orig_i] - mhr_root_joint_samples[b, orig_i],
                 generic_camera,
@@ -688,15 +750,8 @@ def vis_samples(
 
             # ----------------------- PA-aligned side view -----------------------
             if plot_sc and vertex_colors_pa_samples is not None:
-                gt_pa = renderer_side(
-                    gt_verts_b - gt_root,
-                    generic_camera,
-                    black_bg,
-                    mesh_base_color=GT_COLOR,
-                    scene_bg_color=(0, 0, 0),
-                    side_view=True,
-                    rot_angle=90,
-                )
+                # Same input as gt_side; reuse cached render.
+                gt_pa = gt_side_cache
                 pa_pred_rgba = renderer_side(
                     aligned_samples[i] - gt_root,
                     generic_camera,
@@ -717,15 +772,7 @@ def vis_samples(
 
             # ----------------------- neutral raw -----------------------
             if neutral_available:
-                gt_n = renderer_side(
-                    gt_neutral - neutral_center,
-                    generic_camera,
-                    black_bg,
-                    mesh_base_color=GT_COLOR,
-                    scene_bg_color=(0, 0, 0),
-                    side_view=True,
-                    rot_angle=0,
-                )
+                gt_n = gt_neutral_cache
                 pred_n_rgba = renderer_side(
                     sample_neutral[i] - neutral_center,
                     generic_camera,
@@ -742,15 +789,8 @@ def vis_samples(
 
                 # ----------------------- neutral scale+trans aligned -----------------------
                 if plot_sc:
-                    gt_nsc = renderer_side(
-                        gt_neutral - neutral_center,
-                        generic_camera,
-                        black_bg,
-                        mesh_base_color=GT_COLOR,
-                        scene_bg_color=(0, 0, 0),
-                        side_view=True,
-                        rot_angle=0,
-                    )
+                    # Same input as gt_n; reuse cached render.
+                    gt_nsc = gt_neutral_cache
                     pred_nsc_rgba = renderer_side(
                         sample_neutral_sc[i] - neutral_center,
                         generic_camera,
@@ -784,24 +824,33 @@ def vis_samples(
                     img_neutral_sc_body_list.append(img_nsc_body)
 
     axis = 0 if stack_vertically else 1
-    img_mesh_list = np.concatenate(img_mesh_list, axis=axis)
-    img_side_list = np.concatenate(img_side_list, axis=axis)
-    if img_pa_list:
-        img_pa_list = np.concatenate(img_pa_list, axis=axis)
-    else:
-        img_pa_list = None
-    if img_neutral_list:
-        img_neutral_list = np.concatenate(img_neutral_list, axis=axis)
-    else:
-        img_neutral_list = None
-    if img_neutral_sc_list:
-        img_neutral_sc_list = np.concatenate(img_neutral_sc_list, axis=axis)
-    else:
-        img_neutral_sc_list = None
-    if img_neutral_sc_body_list:
-        img_neutral_sc_body_list = np.concatenate(img_neutral_sc_body_list, axis=axis)
-    else:
-        img_neutral_sc_body_list = None
+    # Disable Python GC across the concat block — gen-2 collections over the
+    # full training-process heap can stall numpy.concatenate by seconds.
+    import gc as _gc
+    _gc_was_enabled = _gc.isenabled()
+    _gc.disable()
+    try:
+        img_mesh_list = np.concatenate(img_mesh_list, axis=axis)
+        img_side_list = np.concatenate(img_side_list, axis=axis)
+        if img_pa_list:
+            img_pa_list = np.concatenate(img_pa_list, axis=axis)
+        else:
+            img_pa_list = None
+        if img_neutral_list:
+            img_neutral_list = np.concatenate(img_neutral_list, axis=axis)
+        else:
+            img_neutral_list = None
+        if img_neutral_sc_list:
+            img_neutral_sc_list = np.concatenate(img_neutral_sc_list, axis=axis)
+        else:
+            img_neutral_sc_list = None
+        if img_neutral_sc_body_list:
+            img_neutral_sc_body_list = np.concatenate(img_neutral_sc_body_list, axis=axis)
+        else:
+            img_neutral_sc_body_list = None
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
 
     # ----------------------- Top-left -----------------------
     if overlay_gt:
@@ -809,35 +858,21 @@ def vis_samples(
         mean_pred_cam_t = outputs["pred_cam_t"][b]
         mean_pred_root_joint = outputs["pred_joint_coords"][b][..., [1], :]
 
-        gt_on_img_mean = renderer(
-            gt_verts[b],
-            gt_cam_t[b],
-            img_cv2.copy(),
-            mesh_base_color=GT_COLOR,
-            scene_bg_color=(1, 1, 1),
-            camera_center=camera_center,
-        )
+        gt_on_img_mean = gt_front_cache
         mean_pred_rgba_full = renderer(
             mean_pred_verts,
             mean_pred_cam_t,
-            white_bg_full,
+            white_bg_front,
             scene_bg_color=(1, 1, 1),
             vertex_colors=vertex_colors_mean,
-            camera_center=camera_center,
+            camera_center=cc_front_t,
+            focal_length=fx_front,
             return_rgba=True,
         )
         gt_base_img = _to_uint8(_overlay_rgba(mean_pred_rgba_full, gt_on_img_mean))
 
         # ----------------------- Bottom-left -----------------------
-        gt_side_mean = renderer_side(
-            gt_verts[b] - gt_root_joint[b],
-            generic_camera,
-            black_bg,
-            mesh_base_color=GT_COLOR,
-            scene_bg_color=(0, 0, 0),
-            side_view=True,
-            rot_angle=90,
-        )
+        gt_side_mean = gt_side_cache
         mean_pred_unc_rgba = renderer_side(
             mean_pred_verts - mean_pred_root_joint,
             generic_camera,
@@ -863,15 +898,8 @@ def vis_samples(
         # ----------------------- Bottom-left (PA-aligned) -----------------------
         mean_pa_panel = None
         if plot_sc and vertex_colors_pa_mean is not None:
-            gt_pa_mean = renderer_side(
-                gt_verts_b - gt_root,
-                generic_camera,
-                black_bg,
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=90,
-            )
+            # Same input as gt_side; reuse cached render.
+            gt_pa_mean = gt_side_cache
             mean_pa_pred_rgba = renderer_side(
                 aligned_mean - gt_root,
                 generic_camera,
@@ -894,15 +922,7 @@ def vis_samples(
         mean_neutral_sc_panel = None
         mean_neutral_sc_body_panel = None
         if neutral_available:
-            gt_n_mean = renderer_side(
-                gt_neutral - neutral_center,
-                generic_camera,
-                black_bg,
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-                side_view=True,
-                rot_angle=0,
-            )
+            gt_n_mean = gt_neutral_cache
             pred_n_mean_rgba = renderer_side(
                 pred_neutral - neutral_center,
                 generic_camera,
@@ -946,8 +966,7 @@ def vis_samples(
                     [f"PVE-T-SC body (mean): {pvetsc_body_mean:.1f} mm"],
                 )
 
-        if affine is not None:
-            gt_base_img = cv2.warpAffine(gt_base_img, affine, img_size)
+        # gt_base_img is already at panel size (rendered with panel intrinsics).
 
         mean_front_lines = []
         if kp2d_visible_mean_px is not None:
@@ -979,34 +998,40 @@ def vis_samples(
         )
         return np.concatenate([row_img, cbar], axis=1)
 
-    rows = []
-    rows.append(_with_cbar(
-        np.concatenate([gt_base_img, img_mesh_list], axis=axis), shared_max
-    ))
-    rows.append(_with_cbar(
-        np.concatenate([mean_unc_panel, img_side_list], axis=axis), shared_max
-    ))
-    if img_neutral_list is not None and mean_neutral_panel is not None:
+    _gc_was_enabled = _gc.isenabled()
+    _gc.disable()
+    try:
+        rows = []
         rows.append(_with_cbar(
-            np.concatenate([mean_neutral_panel, img_neutral_list], axis=axis),
-            neutral_max,
+            np.concatenate([gt_base_img, img_mesh_list], axis=axis), shared_max
         ))
-    if img_pa_list is not None:
         rows.append(_with_cbar(
-            np.concatenate([mean_pa_panel, img_pa_list], axis=axis), pa_max
+            np.concatenate([mean_unc_panel, img_side_list], axis=axis), shared_max
         ))
-    if img_neutral_sc_list is not None and mean_neutral_sc_panel is not None:
-        rows.append(_with_cbar(
-            np.concatenate([mean_neutral_sc_panel, img_neutral_sc_list], axis=axis),
-            neutral_sc_max,
-        ))
-    if img_neutral_sc_body_list is not None and mean_neutral_sc_body_panel is not None:
-        rows.append(_with_cbar(
-            np.concatenate([mean_neutral_sc_body_panel, img_neutral_sc_body_list], axis=axis),
-            nsc_body_max,
-        ))
+        if img_neutral_list is not None and mean_neutral_panel is not None:
+            rows.append(_with_cbar(
+                np.concatenate([mean_neutral_panel, img_neutral_list], axis=axis),
+                neutral_max,
+            ))
+        if img_pa_list is not None:
+            rows.append(_with_cbar(
+                np.concatenate([mean_pa_panel, img_pa_list], axis=axis), pa_max
+            ))
+        if img_neutral_sc_list is not None and mean_neutral_sc_panel is not None:
+            rows.append(_with_cbar(
+                np.concatenate([mean_neutral_sc_panel, img_neutral_sc_list], axis=axis),
+                neutral_sc_max,
+            ))
+        if img_neutral_sc_body_list is not None and mean_neutral_sc_body_panel is not None:
+            rows.append(_with_cbar(
+                np.concatenate([mean_neutral_sc_body_panel, img_neutral_sc_body_list], axis=axis),
+                nsc_body_max,
+            ))
 
-    cur_img = np.concatenate(rows, axis=1 - axis)
+        cur_img = np.concatenate(rows, axis=1 - axis)
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
     return cur_img
 
 
@@ -1065,6 +1090,24 @@ def vis_directional_variance(img_cv2, outputs, faces, batch):
         base_img = cv2.warpAffine(base_img, affine, img_size)
     _draw_label_lines(base_img, ["image"])
 
+    # Panel-space intrinsics — render directly at panel resolution.
+    use_panel = affine is not None
+    if use_panel:
+        A = affine[:2, :2]
+        det = float(abs(A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0]))
+        scale_full_to_panel = float(np.sqrt(det))
+        cc_full_h = np.array([camera_center[0], camera_center[1], 1.0], dtype=np.float64)
+        cc_panel = (affine @ cc_full_h)[:2]
+        cc_front_t = (float(cc_panel[0]), float(cc_panel[1]))
+        fx_front = renderer.focal_length * scale_full_to_panel
+        front_bg = base_img
+        white_bg_front = np.full_like(base_img, 255)
+    else:
+        cc_front_t = camera_center
+        fx_front = None
+        front_bg = img_cv2
+        white_bg_front = np.full_like(img_cv2, 255, dtype=np.uint8)
+
     # GT overlaid on mean prediction.
     gt_verts = _to_np(batch["vertices"])[b]
     gt_cam_t = _to_np(batch["cam_ext"][..., :3, -1])[b]
@@ -1074,26 +1117,26 @@ def vis_directional_variance(img_cv2, outputs, faces, batch):
     gt_on_img = renderer(
         gt_verts,
         gt_cam_t,
-        img_cv2.copy(),
+        front_bg.copy(),
         mesh_base_color=GT_COLOR,
         scene_bg_color=(1, 1, 1),
-        camera_center=camera_center,
+        camera_center=cc_front_t,
+        focal_length=fx_front,
     )
-    white_bg_full = np.full_like(img_cv2, 255, dtype=np.uint8)
     mean_pred_rgba = renderer(
         mean_pred_verts,
         mean_pred_cam_t,
-        white_bg_full,
+        white_bg_front,
         mesh_base_color=PRED_COLOR,
         scene_bg_color=(1, 1, 1),
         return_rgba=True,
-        camera_center=camera_center,
+        camera_center=cc_front_t,
+        focal_length=fx_front,
     )
     a = mean_pred_rgba[..., 3:4].astype(np.float32) * 0.75
     blended = a * mean_pred_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_on_img
     gt_mean_img = _to_uint8(blended)
-    if affine is not None:
-        gt_mean_img = cv2.warpAffine(gt_mean_img, affine, img_size)
+    # gt_mean_img is already at panel size (rendered with panel intrinsics).
     _draw_label_lines(gt_mean_img, ["gt + mean pred (on top)"])
 
     axis_names = ["std x (horizontal)", "std y (vertical)", "std z (depth)"]
@@ -1111,14 +1154,14 @@ def vis_directional_variance(img_cv2, outputs, faces, batch):
         rendered = renderer(
             best_verts,
             best_cam_t,
-            img_cv2.copy(),
+            front_bg.copy(),
             scene_bg_color=(1, 1, 1),
             vertex_colors=vert_colors,
-            camera_center=camera_center,
+            camera_center=cc_front_t,
+            focal_length=fx_front,
         )
         img_out = _to_uint8(rendered)
-        if affine is not None:
-            img_out = cv2.warpAffine(img_out, affine, img_size)
+        # img_out is already at panel size when use_panel.
         _draw_label_lines(img_out, [axis_names[axis_idx]])
         panels.append(img_out)
 
@@ -1812,8 +1855,9 @@ class Visualiser(pl.LightningModule):
 
         h, w = render_size
 
-        # Create renderer
-        renderer = pyrender.OffscreenRenderer(viewport_width=w, viewport_height=h)
+        # Create renderer (cached process-wide; see visualization/renderer.py)
+        from sam_3d_body.visualization.renderer import _get_offscreen_renderer
+        renderer = _get_offscreen_renderer(viewport_width=w, viewport_height=h)
 
         # Create mesh
         if faces is None:
@@ -1869,7 +1913,6 @@ class Visualiser(pl.LightningModule):
 
         # Render
         color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-        renderer.delete()
 
         # Convert to [0, 255] uint8
         color = color.astype(np.float32) / 255.0
@@ -2558,6 +2601,31 @@ def vis_merging_predictions(
     gallery = [[None for _ in range(num_views)] for _ in range(bs)]
 
     i = 0
+    if not has_merged:
+        # `merged_verts` and `merged_neutral_verts` should both be provided for this visualization.
+        assert False
+
+    # Batch the scale+translation alignment on GPU for all views of the
+    # current example, then transfer once. Avoids per-view CPU↔GPU
+    # round-trips and a Python-level alignment call per view.
+    base = i * num_views
+    pred_t = outputs["mhr"]["pred_vertices"][base : base + num_views]      # (V, N, 3)
+    gt_t = batch["vertices"][base : base + num_views]                      # (V, N, 3)
+    merged_t = merged_verts[base : base + num_views]                       # (V, N, 3)
+    if sc:
+        # PVE-T-SC: scale + translation normalise predicted verts to GT.
+        pred_t_aligned = scale_and_translation_transform_batch_torch(pred_t, gt_t)
+        merged_t_aligned = scale_and_translation_transform_batch_torch(merged_t, gt_t)
+    else:
+        pred_t_aligned = pred_t
+        merged_t_aligned = merged_t
+
+    pred_aligned_np = pred_t_aligned.detach().cpu().numpy()                # (V, N, 3)
+    merged_aligned_np = merged_t_aligned.detach().cpu().numpy()
+    gt_verts_np_all = gt_t.detach().cpu().numpy()
+    pred_unaligned_np = pred_t.detach().cpu().numpy()
+    merged_unaligned_np = merged_t.detach().cpu().numpy()
+
     all_distances = []
     pred_vertex_dists = {}
     merged_vertex_dists = {}
@@ -2566,23 +2634,9 @@ def vis_merging_predictions(
     merged_centered_for_side = {}
 
     for view in range(num_views):
-
-        flat_idx = i * num_views + view
-        pred_verts = outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
-        gt_verts = batch["vertices"][flat_idx].cpu().detach().numpy()
-        if not has_merged:
-            # `merged_verts` and `merged_neutral_verts` should both be provided for this visualization.
-            assert False
-        merged_verts_view = merged_verts[flat_idx].cpu().detach().numpy()
-
-        if sc:
-            # PVETS-T-C: scale + translation normalize predicted vertices to GT.
-            pred_verts = scale_and_translation_transform_batch(
-                pred_verts[None, ...], gt_verts[None, ...]
-            )[0]
-            merged_verts_view = scale_and_translation_transform_batch(
-                merged_verts_view[None, ...], gt_verts[None, ...]
-            )[0]
+        pred_verts = pred_aligned_np[view]
+        gt_verts = gt_verts_np_all[view]
+        merged_verts_view = merged_aligned_np[view]
 
         # Pre-compute centered coordinates for the side-view renderer.
         # These match the centering logic that used to happen inside `plot_side`.
@@ -2611,10 +2665,12 @@ def vis_merging_predictions(
 
         flat_idx = i * num_views + view
 
-        verts = outputs["mhr"]["pred_vertices"][flat_idx].cpu().detach().numpy()
+        # Reuse the (un-aligned) tensors already moved to CPU in the first loop;
+        # the front-view rendering uses the original posed mesh + camera.
+        verts = pred_unaligned_np[view]
         cam_t = outputs["mhr"]["pred_cam_t"][flat_idx].cpu().detach().numpy()
 
-        gt_verts = batch["vertices"][flat_idx].cpu().detach().numpy()
+        gt_verts = gt_verts_np_all[view]
         # gt_verts[..., [1, 2]] *= -1  # un-flip for renderer (renderer applies 180-deg X internally)
         if "cam_ext" not in batch:
             # SSP-3D
@@ -2623,54 +2679,50 @@ def vis_merging_predictions(
         else:
             gt_cam_t = batch["cam_ext"][flat_idx][:3, -1].cpu().detach().numpy()
 
-        if has_merged:
-            merged_verts_view = merged_verts[flat_idx].cpu().detach().numpy()
-        else:
-            assert False
+        merged_verts_view = merged_unaligned_np[view]
 
-        # GT column (no overlay): GT rendered on the input image.
-        gt_rendered_img = (
-            renderer(
-                gt_verts,
-                gt_cam_t,
-                img_for_render.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(1, 1, 1),
-                camera_center=(
-                    batch["cam_int"][flat_idx][0, 2],
-                    batch["cam_int"][flat_idx][1, 2],
-                ),
-            )
-            * 255
-        ).astype(np.uint8)
+        # Render at panel resolution: pre-warp the input image and derive
+        # panel-space intrinsics from the per-view affine. Skips the per-render
+        # full-image→panel warpAffine and reduces GPU rasterisation work.
+        affine = batch["affine_trans"][flat_idx, 0].cpu().detach().numpy()
+        img_size = batch["img_size"][flat_idx, 0].cpu().detach().numpy()
+        img_panel = cv2.warpAffine(img_for_render, affine, img_size)
+        cc_full_pred = (
+            float(batch["cam_int"][flat_idx][0, 2]),
+            float(batch["cam_int"][flat_idx][1, 2]),
+        )
+        A = affine[:2, :2]
+        det = float(abs(A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0]))
+        scale_full_to_panel = float(np.sqrt(det))
+        cc_full_h = np.array([cc_full_pred[0], cc_full_pred[1], 1.0], dtype=np.float64)
+        cc_panel = (affine @ cc_full_h)[:2]
+        cc_panel_t = (float(cc_panel[0]), float(cc_panel[1]))
+        fx_panel = renderer.focal_length * scale_full_to_panel
+        white_panel = np.full_like(img_panel, 255)
 
-        # GT rendered opaque on the input image; prediction (heatmap) is
-        # then alpha-blended on top so the heatmap stays readable.
+        # GT rendered opaque on the input image — used both for the GT-only
+        # column and as the underlay for the pred/merged heatmap blends.
+        gt_on_img = renderer(
+            gt_verts,
+            gt_cam_t,
+            img_panel.copy(),
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(1, 1, 1),
+            camera_center=cc_panel_t,
+            focal_length=fx_panel,
+        ).astype(np.float32)  # in [0,1]
+        gt_rendered_img = (gt_on_img * 255.0).clip(0, 255).astype(np.uint8)
+
         pred_colors = build_vertex_colors(
             pred_vertex_dists[view], min_dist=min_dist, max_dist=max_dist
         )
-        gt_on_img = (
-            renderer(
-                gt_verts,
-                gt_cam_t,
-                img_for_render.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(1, 1, 1),
-                camera_center=(
-                    batch["cam_int"][flat_idx][0, 2],
-                    batch["cam_int"][flat_idx][1, 2],
-                ),
-            )
-        ).astype(np.float32)  # in [0,1]
         pred_rgba = renderer(
             verts,
             cam_t,
-            np.ones_like(img_for_render) * 255,
+            white_panel,
             scene_bg_color=(1, 1, 1),
-            camera_center=(
-                batch["cam_int"][flat_idx][0, 2],
-                batch["cam_int"][flat_idx][1, 2],
-            ),
+            camera_center=cc_panel_t,
+            focal_length=fx_panel,
             vertex_colors=pred_colors,
             return_rgba=True,
         )
@@ -2690,25 +2742,17 @@ def vis_merging_predictions(
         merged_rgba = renderer(
             merged_verts_view,
             merged_cam_t_view,
-            np.ones_like(img_for_render) * 255,
+            white_panel,
             scene_bg_color=(1, 1, 1),
-            camera_center=(
-                batch["cam_int"][flat_idx][0, 2],
-                batch["cam_int"][flat_idx][1, 2],
-            ),
+            camera_center=cc_panel_t,
+            focal_length=fx_panel,
             vertex_colors=merged_colors,
             return_rgba=True,
         )
         alpha_m = merged_rgba[..., 3:4].astype(np.float32) * 0.75
         blended_merged = alpha_m * merged_rgba[..., :3].astype(np.float32) + (1.0 - alpha_m) * gt_on_img
         rendered_merged_img = (blended_merged * 255.0).clip(0, 255).astype(np.uint8)
-
-        affine = batch["affine_trans"][flat_idx, 0].cpu().detach().numpy()
-        img_size = batch["img_size"][flat_idx, 0].cpu().detach().numpy()
-
-        gt_rendered_img = cv2.warpAffine(gt_rendered_img, affine, img_size)
-        rendered_img = cv2.warpAffine(rendered_img, affine, img_size)
-        rendered_merged_img = cv2.warpAffine(rendered_merged_img, affine, img_size)
+        # gt_rendered_img / rendered_img / rendered_merged_img are already at panel size.
 
         # Add text labels to images
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -2977,42 +3021,48 @@ def vis_merging_predictions(
                 [gt_rendered_img, rendered_img, rendered_merged_img], axis=1
             )
 
-    gallery_rows = []
-    for i in range(1):
-        row = np.concatenate(
-            [gallery[i][view] for view in range(num_views)], axis=0
+    import gc as _gc
+    _gc_was_enabled = _gc.isenabled()
+    _gc.disable()
+    try:
+        gallery_rows = []
+        for i in range(1):
+            row = np.concatenate(
+                [gallery[i][view] for view in range(num_views)], axis=0
+            )
+            gallery_rows.append(row)
+
+        # gallery_img = np.concatenate(gallery_rows, axis=0)
+        gallery_img = gallery_rows[0]
+        gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
+        # Downscale final image by factor 2 before saving
+        h, w = gallery_img_bgr.shape[:2]
+        gallery_img_bgr = cv2.resize(
+            gallery_img_bgr, (w // 2, h // 2), interpolation=cv2.INTER_AREA
         )
-        gallery_rows.append(row)
 
-    # gallery_img = np.concatenate(gallery_rows, axis=0)
-    gallery_img = gallery_rows[0]
-    gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
-    # Downscale final image by factor 2 before saving
-    h, w = gallery_img_bgr.shape[:2]
-    gallery_img_bgr = cv2.resize(
-        gallery_img_bgr, (w // 2, h // 2), interpolation=cv2.INTER_AREA
-    )
-
-    # Append error-distance colorbar to the right.
-    colorbar_rgb = build_distance_colorbar_rgb(
-        min_dist=min_dist,
-        max_dist=max_dist,
-        cmap="inferno",
-        height=gallery_img_bgr.shape[0],
-        width=60,
-    )
-    colorbar_bgr = cv2.cvtColor(colorbar_rgb, cv2.COLOR_RGB2BGR)
-    gallery_img_bgr = np.concatenate([gallery_img_bgr, colorbar_bgr], axis=1)
+        # Append error-distance colorbar to the right.
+        colorbar_rgb = build_distance_colorbar_rgb(
+            min_dist=min_dist,
+            max_dist=max_dist,
+            cmap="inferno",
+            height=gallery_img_bgr.shape[0],
+            width=60,
+        )
+        colorbar_bgr = cv2.cvtColor(colorbar_rgb, cv2.COLOR_RGB2BGR)
+        gallery_img_bgr = np.concatenate([gallery_img_bgr, colorbar_bgr], axis=1)
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
 
     # save_dir = self.vis_save_dir if self.vis_save_dir else "."
     os.makedirs(save_dir, exist_ok=True)
     suffix = "_sc" if sc else ""
     save_path = os.path.join(
         save_dir,
-        # f"batch{batch_idx:03d}_bs{bs}_views{num_views}{suffix}.png",
-        f"b{batch_idx:03d}{suffix}.png",
+        f"b{batch_idx:03d}{suffix}.jpg",
     )
-    cv2.imwrite(save_path, gallery_img_bgr)
+    cv2.imwrite(save_path, gallery_img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
     logger.info(
         f"Saved multiview gallery: {save_path} (shape: {gallery_img.shape})"
     )
@@ -3134,9 +3184,9 @@ def vis_merging_neutral_variance(
     fig = np.concatenate([stacked, cbar], axis=1)
 
     if save_dir is not None:
-        fname = os.path.join(save_dir, f"b{batch_idx:03d}_neutral_dir_var.png")
+        fname = os.path.join(save_dir, f"b{batch_idx:03d}_neutral_dir_var.jpg")
         fig_bgr = cv2.cvtColor(fig, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(fname, fig_bgr)
+        cv2.imwrite(fname, fig_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
         logger.info(f"Saved neutral variance viz: {fname}")
 
     return fig
@@ -3516,33 +3566,40 @@ def vis_merging_neutral(
                 )
             )
 
-    top_row = np.concatenate(top_row_images, axis=1)
-    bottom_row = np.concatenate(bottom_row_images, axis=1)
-    if plot_hist:
-        hist_row = np.concatenate(hist_row_images, axis=1)
-        gallery_img = np.concatenate([top_row, bottom_row, hist_row], axis=0)
-    else:
-        gallery_img = np.concatenate([top_row, bottom_row], axis=0)
-    gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
+    import gc as _gc
+    _gc_was_enabled = _gc.isenabled()
+    _gc.disable()
+    try:
+        top_row = np.concatenate(top_row_images, axis=1)
+        bottom_row = np.concatenate(bottom_row_images, axis=1)
+        if plot_hist:
+            hist_row = np.concatenate(hist_row_images, axis=1)
+            gallery_img = np.concatenate([top_row, bottom_row, hist_row], axis=0)
+        else:
+            gallery_img = np.concatenate([top_row, bottom_row], axis=0)
+        gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
 
-    # Append error-distance colorbar to the right.
-    colorbar_rgb = build_distance_colorbar_rgb(
-        min_dist=min_dist,
-        max_dist=max_dist,
-        cmap="inferno",
-        height=gallery_img_bgr.shape[0],
-        width=60,
-    )
-    colorbar_bgr = cv2.cvtColor(colorbar_rgb, cv2.COLOR_RGB2BGR)
-    gallery_img_bgr = np.concatenate([gallery_img_bgr, colorbar_bgr], axis=1)
+        # Append error-distance colorbar to the right.
+        colorbar_rgb = build_distance_colorbar_rgb(
+            min_dist=min_dist,
+            max_dist=max_dist,
+            cmap="inferno",
+            height=gallery_img_bgr.shape[0],
+            width=60,
+        )
+        colorbar_bgr = cv2.cvtColor(colorbar_rgb, cv2.COLOR_RGB2BGR)
+        gallery_img_bgr = np.concatenate([gallery_img_bgr, colorbar_bgr], axis=1)
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
 
     sc_suffix = "_sc" if sc else ""
     mode_suffix = "_body_pvetsc" if use_body_pvetsc else "_pvetsc"
     save_path = os.path.join(
         save_dir,
-        f"b{batch_idx:03d}_neutral{sc_suffix}{mode_suffix}.png",
+        f"b{batch_idx:03d}_neutral{sc_suffix}{mode_suffix}.jpg",
     )
-    cv2.imwrite(save_path, gallery_img_bgr)
+    cv2.imwrite(save_path, gallery_img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
     logger.info(f"Saved neutral meshes gallery: {save_path}")
 
 
@@ -3924,6 +3981,24 @@ def vis_merging_samples(
         img_size_v = (int(img_size_all[view, 0, 0]), int(img_size_all[view, 0, 1]))  # (W, H)
         black_bg = np.zeros((H_ref, W_ref, 3), dtype=np.uint8)
 
+        # Pre-warp input image to panel size once per view; render at panel
+        # resolution to skip the per-sample full-image→panel warpAffine.
+        # `affine` (full→panel) is a similarity transform: scale + translation,
+        # rotation 0 for our datasets.
+        img_panel = cv2.warpAffine(img, affine, img_size_v)
+        A = affine[:2, :2]
+        det = float(abs(A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0]))
+        scale_full_to_panel = float(np.sqrt(det))
+        # Sanity: rotation should be ~0 (b ≈ -c, a ≈ d).
+        assert (
+            abs(A[0, 0] - A[1, 1]) < 1e-3 * scale_full_to_panel
+            and abs(A[0, 1] + A[1, 0]) < 1e-3 * scale_full_to_panel
+        ), f"affine has non-trivial rotation; cannot render at panel size: {A}"
+        fx_panel = renderer.focal_length * scale_full_to_panel
+        cc_full_h = np.array([cc[0], cc[1], 1.0], dtype=np.float64)
+        cc_panel = (affine @ cc_full_h)[:2]
+        cc_panel_t = (float(cc_panel[0]), float(cc_panel[1]))
+
         # Per-sample rank under the beta-only flow (self-view stage-1 log-prob).
         # ``p{rank}`` is the rank by overall log-prob (used to pick); ``beta{rank}``
         # gives the rank by beta-only log-prob for the same sample index.
@@ -3938,36 +4013,50 @@ def vis_merging_samples(
             def _beta_lbl(k):
                 return ""
 
+        # GT renders — independent of the sample loop. Computed once per view
+        # below and reused inside the render_* closures and the panel headers.
+        gt_front_float = renderer(
+            gt_v, gt_t, img_panel.copy(),
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(1, 1, 1),
+            camera_center=cc_panel_t,
+            focal_length=fx_panel,
+        )
+        gt_side_float = side_renderer(
+            gt_v - gt_root, generic_cam_t, black_bg.copy(),
+            mesh_base_color=GT_COLOR,
+            scene_bg_color=(0, 0, 0),
+            side_view=True, rot_angle=90,
+        )
+        if plot_neutral or plot_neutral_pvetsc_body:
+            gt_neutral_vis_cached = gt_neutral_all[view].copy()
+            gt_neutral_vis_cached[:, [1, 2]] *= -1
+            gt_neutral_float = neutral_renderer(
+                gt_neutral_vis_cached, neutral_cam_t, black_bg.copy(),
+                mesh_base_color=GT_COLOR,
+                scene_bg_color=(0, 0, 0),
+            )
+        else:
+            gt_neutral_float = None
+
         def render_front(verts_pred, cam_t_pred, dists_mm):
             # GT rendered opaque on the input image; pred (heatmap) on top.
+            # Renders directly at panel resolution — skips the post-warpAffine.
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
-            gt_on_img = renderer(
-                gt_v, gt_t, img.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(1, 1, 1),
-                camera_center=cc,
-            )
             pred_rgba = renderer(
-                verts_pred, cam_t_pred, np.ones_like(img) * 255,
+                verts_pred, cam_t_pred, np.full_like(img_panel, 255),
                 scene_bg_color=(1, 1, 1),
-                camera_center=cc,
+                camera_center=cc_panel_t,
+                focal_length=fx_panel,
                 vertex_colors=colors,
                 return_rgba=True,
             )
             a = pred_rgba[..., 3:4].astype(np.float32) * 0.75
-            blended = a * pred_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_on_img
-            img_out = _to_uint8(blended)
-            img_out = cv2.warpAffine(img_out, affine, img_size_v)
-            return img_out
+            blended = a * pred_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_front_float
+            return _to_uint8(blended)
 
         def render_side(verts_pred, root_joint, dists_mm):
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
-            gt_base = side_renderer(
-                gt_v - gt_root, generic_cam_t, black_bg.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-                side_view=True, rot_angle=90,
-            )
             p_rgba = side_renderer(
                 verts_pred - root_joint, generic_cam_t, black_bg.copy(),
                 scene_bg_color=(0, 0, 0),
@@ -3976,24 +4065,17 @@ def vis_merging_samples(
                 return_rgba=True,
             )
             a = p_rgba[..., 3:4].astype(np.float32) * 0.75
-            blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_base
+            blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_side_float
             return _to_uint8(blended)
 
         def render_neutral(pred_sc_verts, dists_mm, max_dist_mm=max_dist_mm_neutral, gray_non_body=False):
             # Apply display flip used by other neutral renderers (my_vis.py:2979).
             pred_vis = pred_sc_verts.copy()
             pred_vis[:, [1, 2]] *= -1
-            gt_vis = gt_neutral_all[view].copy()
-            gt_vis[:, [1, 2]] *= -1
 
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
             if gray_non_body:
                 colors = _gray_out_non_body(colors, body_mask_np)
-            gt_base = neutral_renderer(
-                gt_vis, neutral_cam_t, black_bg.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-            )
             p_rgba = neutral_renderer(
                 pred_vis, neutral_cam_t, black_bg.copy(),
                 scene_bg_color=(0, 0, 0),
@@ -4001,17 +4083,11 @@ def vis_merging_samples(
                 return_rgba=True,
             )
             a = p_rgba[..., 3:4].astype(np.float32) * 0.75
-            blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_base
+            blended = a * p_rgba[..., :3].astype(np.float32) + (1.0 - a) * gt_neutral_float
             return _to_uint8(blended)
 
         # --- front row ---
-        gt_on_img_float = renderer(
-            gt_v, gt_t, img.copy(),
-            mesh_base_color=GT_COLOR,
-            scene_bg_color=(1, 1, 1),
-            camera_center=cc,
-        )
-        gt_front_img = cv2.warpAffine(_to_uint8(gt_on_img_float), affine, img_size_v)
+        gt_front_img = _to_uint8(gt_front_float)  # already at img_size_v
         row1 = [_label(_resize(gt_front_img), f"view {view} gt")]
         mean_front = render_front(mean_verts_all[view], mean_cam_t_all[view], mean_dists[view])
         row1.append(_label(_resize(mean_front), "mean"))
@@ -4047,13 +4123,7 @@ def vis_merging_samples(
             row1.append(_label(_resize(isbest_front), isbest_front_label))
 
         # --- side row ---
-        gt_side_panel_float = side_renderer(
-            gt_v - gt_root, generic_cam_t, black_bg.copy(),
-            mesh_base_color=GT_COLOR,
-            scene_bg_color=(0, 0, 0),
-            side_view=True, rot_angle=90,
-        )
-        gt_side_panel = _to_uint8(gt_side_panel_float)
+        gt_side_panel = _to_uint8(gt_side_float)
         gt_side_panel = _resize(gt_side_panel)
         _draw_label_lines(gt_side_panel, ["gt side"])
         if gt_logp_full is not None:
@@ -4080,14 +4150,7 @@ def vis_merging_samples(
         # --- neutral (scale-corrected) row ---
         row3 = None
         if plot_neutral:
-            gt_neutral_vis = gt_neutral_all[view].copy()
-            gt_neutral_vis[:, [1, 2]] *= -1
-            gt_neutral_panel_float = neutral_renderer(
-                gt_neutral_vis, neutral_cam_t, black_bg.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-            )
-            gt_neutral_panel = _to_uint8(gt_neutral_panel_float)
+            gt_neutral_panel = _to_uint8(gt_neutral_float)
             gt_neutral_panel = _resize(gt_neutral_panel)
             _draw_label_lines(gt_neutral_panel, ["gt neutral"])
             if gt_logp_beta is not None:
@@ -4150,14 +4213,8 @@ def vis_merging_samples(
         # --- neutral body-only aligned row (alignment + colours over body verts only) ---
         row4 = None
         if plot_neutral_pvetsc_body:
-            gt_neutral_body_vis = gt_neutral_all[view].copy()
-            gt_neutral_body_vis[:, [1, 2]] *= -1
-            gt_neutral_body_panel_float = neutral_renderer(
-                gt_neutral_body_vis, neutral_cam_t, black_bg.copy(),
-                mesh_base_color=GT_COLOR,
-                scene_bg_color=(0, 0, 0),
-            )
-            gt_neutral_body_panel = _to_uint8(gt_neutral_body_panel_float)
+            # Same GT neutral mesh as row3 — reuse the cached render.
+            gt_neutral_body_panel = _to_uint8(gt_neutral_float)
             gt_neutral_body_panel = _resize(gt_neutral_body_panel)
             _draw_label_lines(gt_neutral_body_panel, ["gt neutral"])
             if gt_logp_beta is not None:
@@ -4233,40 +4290,58 @@ def vis_merging_samples(
         if row4 is not None:
             all_rows.append(np.concatenate(row4, axis=1))
 
-    grid = np.concatenate(all_rows, axis=0)
-    cbar_parts = [grid]
-    cbar_parts.append(
-        build_distance_colorbar_rgb(
-            min_dist=0.0,
-            max_dist=max_dist_mm,
-            height=grid.shape[0],
-            width=60,
-        )
-    )
-    if plot_neutral:
+    # Disable Python GC across the concat block — gen-2 collections over the
+    # giant training-process heap can stall numpy.concatenate by seconds.
+    import gc as _gc
+    _gc_was_enabled = _gc.isenabled()
+    _gc.disable()
+    try:
+        grid = np.concatenate(all_rows, axis=0)
+
+        cbar_parts = [grid]
         cbar_parts.append(
             build_distance_colorbar_rgb(
                 min_dist=0.0,
-                max_dist=max_dist_mm_neutral,
+                max_dist=max_dist_mm,
                 height=grid.shape[0],
                 width=60,
             )
         )
-    if plot_neutral_pvetsc_body:
-        cbar_parts.append(
-            build_distance_colorbar_rgb(
-                min_dist=0.0,
-                max_dist=max_dist_mm_neutral_body,
-                height=grid.shape[0],
-                width=60,
+        if plot_neutral:
+            cbar_parts.append(
+                build_distance_colorbar_rgb(
+                    min_dist=0.0,
+                    max_dist=max_dist_mm_neutral,
+                    height=grid.shape[0],
+                    width=60,
+                )
             )
-        )
-    grid = np.concatenate(cbar_parts, axis=1)
+        if plot_neutral_pvetsc_body:
+            cbar_parts.append(
+                build_distance_colorbar_rgb(
+                    min_dist=0.0,
+                    max_dist=max_dist_mm_neutral_body,
+                    height=grid.shape[0],
+                    width=60,
+                )
+            )
+
+        grid = np.concatenate(cbar_parts, axis=1)
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
 
     if save_dir is not None:
-        out_path = os.path.join(save_dir, f"b{batch_idx:03d}_merging_samples.png")
-        cv2.imwrite(out_path, cv2.cvtColor(grid, cv2.COLOR_RGB2BGR))
-        print(f"Saved merging samples to {out_path}")
+        out_path = os.path.join(save_dir, f"b{batch_idx:03d}_merging_samples.jpg")
+        # JPEG quality 90 — visually indistinguishable for viridis/inferno
+        # heatmaps and ~5–10× faster to encode (and ~5–10× smaller on disk)
+        # than PNG. Not metric data; loss is fine here.
+        cv2.imwrite(
+            out_path,
+            cv2.cvtColor(grid, cv2.COLOR_RGB2BGR),
+            [cv2.IMWRITE_JPEG_QUALITY, 90],
+        )
+        logger.info(f"Saved merging samples to {out_path}")
     return grid
 
 
