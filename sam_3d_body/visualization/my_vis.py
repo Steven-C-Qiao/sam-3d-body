@@ -391,14 +391,14 @@ def vis_samples(
     # ---- batch-derived quantities (full batch; index with `b` in the plotting loop) ----
     affine_all = _to_np(batch["affine_trans"]) if "affine_trans" in batch else None
     img_size_all = _to_np(batch["img_size"]) if "img_size" in batch else None
-    cam_int = batch["cam_int"]
+    cam_int = _to_np(batch["cam_int"])
     gt_verts = _to_np(batch["vertices"])
     gt_cam_t = _to_np(batch["cam_ext"][..., :3, -1])
     gt_root_joint = _to_np(batch["joint_coords"][..., [1], :])
 
     affine = affine_all[b, 0] if affine_all is not None else None
     img_size = img_size_all[b, 0] if img_size_all is not None else None
-    camera_center = (cam_int[b, 0, 2], cam_int[b, 1, 2])
+    camera_center = (float(cam_int[b, 0, 2]), float(cam_int[b, 1, 2]))
 
     base_img = img_cv2.copy()
     if affine is not None:
@@ -1059,8 +1059,8 @@ def vis_directional_variance(img_cv2, outputs, faces, batch):
     img_size_all = _to_np(batch["img_size"]) if "img_size" in batch else None
     affine = affine_all[b, 0] if affine_all is not None else None
     img_size = img_size_all[b, 0] if img_size_all is not None else None
-    cam_int = batch["cam_int"]
-    camera_center = (cam_int[b, 0, 2], cam_int[b, 1, 2])
+    cam_int = _to_np(batch["cam_int"])
+    camera_center = (float(cam_int[b, 0, 2]), float(cam_int[b, 1, 2]))
 
     verts_samples = _to_np(outputs["verts_samples"])  # (B, N, V, 3)
     mhr_outputs = {k: _to_np(v) for k, v in outputs["mhr"].items()}
