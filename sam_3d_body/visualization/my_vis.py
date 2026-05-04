@@ -46,20 +46,37 @@ LIGHT_GREY   = (0.80, 0.80, 0.80)
 DARK_GREY    = (0.35, 0.35, 0.35)
 SALMON       = (0.98, 0.50, 0.45)
 TEAL         = (0.20, 0.63, 0.63)
+MAGENTA      = (0.95, 0.20, 0.85)
+BRIGHT_GREEN = (0.05, 1.00, 0.30)
 
 PALETTE_CANDIDATES = {
-    "blue_gt":        {"gt": BLUE,        "pred_tint": LIGHT_ORANGE},
-    "light_grey_gt":  {"gt": LIGHT_GREY,  "pred_tint": BLUE},
-    "light_blue_gt":  {"gt": LIGHT_BLUE,  "pred_tint": ORANGE},
-    "salmon_gt":      {"gt": SALMON,      "pred_tint": TEAL},
-    "teal_gt":        {"gt": TEAL,        "pred_tint": LIGHT_ORANGE},
-    "dark_grey_gt":   {"gt": DARK_GREY,   "pred_tint": LIGHT_ORANGE},
+    "blue_gt":        {"gt": BLUE,         "pred_tint": LIGHT_ORANGE},
+    "light_grey_gt":  {"gt": LIGHT_GREY,   "pred_tint": BLUE},
+    "light_blue_gt":  {"gt": LIGHT_BLUE,   "pred_tint": ORANGE},
+    "salmon_gt":      {"gt": SALMON,       "pred_tint": TEAL},
+    "teal_gt":        {"gt": TEAL,         "pred_tint": LIGHT_ORANGE},
+    "dark_grey_gt":   {"gt": DARK_GREY,    "pred_tint": LIGHT_ORANGE},
+    "magenta_gt":     {"gt": MAGENTA,      "pred_tint": LIGHT_ORANGE},
+    "green_gt":       {"gt": BRIGHT_GREEN, "pred_tint": LIGHT_ORANGE},
 }
-ACTIVE_PALETTE = "light_grey_gt"
+ACTIVE_PALETTE = "green_gt"
 GT_COLOR   = PALETTE_CANDIDATES[ACTIVE_PALETTE]["gt"]
 PRED_COLOR = PALETTE_CANDIDATES[ACTIVE_PALETTE]["pred_tint"]
 
 FIXED_CLBR_MAX_M = 0.20
+
+HEAT_CMAP = "turbo"
+HEAT_GAMMA = 0.5
+HEAT_PCT = 75.0
+
+
+def _norm_max(arr, pct=HEAT_PCT):
+    if arr.size == 0:
+        return 1.0
+    v = float(np.percentile(arr, pct))
+    if v <= 0.0:
+        v = float(arr.max())
+    return v if v > 0.0 else 1.0
 
 
 def vis_histogram(
@@ -155,26 +172,18 @@ def build_vertex_colors(
     *,
     min_dist: float,
     max_dist: float,
-    cmap: str = "inferno",
+    cmap: str = HEAT_CMAP,
+    gamma: float = HEAT_GAMMA,
 ) -> np.ndarray:
-    """
-    Map per-vertex distances to RGBA colors using a shared viridis scale.
-
-    Args:
-        dists: Per-vertex distances, shape (V,).
-        min_dist: Global minimum distance used for normalization.
-        max_dist: Global maximum distance used for normalization.
-        cmap: Matplotlib colormap name, e.g. ``"viridis"``, ``"magma"``.
-    """
-    # For error heatmaps, we always anchor the colormap at 0.
-    # `min_dist` is kept only for API compatibility.
     effective_min_dist = 0.0
     denom = max_dist - effective_min_dist
     if denom <= 0:
         denom = 1.0
     normalized = (dists - effective_min_dist) / denom
     normalized = np.clip(normalized, 0.0, 1.0)
-    rgba = _apply_cmap(normalized, cmap)              # (V, 4)
+    if gamma != 1.0:
+        normalized = normalized ** gamma
+    rgba = _apply_cmap(normalized, cmap)
     vertex_colors = rgba.copy()
     vertex_colors[:, 3] = 1.0
     return vertex_colors
@@ -195,23 +204,21 @@ def build_distance_colorbar_rgb(
     *,
     min_dist: float,
     max_dist: float,
-    cmap: str = "inferno",
+    cmap: str = HEAT_CMAP,
     height: int,
     width: int = 30,
+    gamma: float = HEAT_GAMMA,
 ) -> np.ndarray:
-    """
-    Create a simple RGB colorbar image (gradient only) with numeric min/max.
-    """
-    # For error heatmaps, we always anchor the colorbar at 0.
     effective_min_dist = 0.0
     denom = max_dist - effective_min_dist
     if denom <= 0:
         denom = 1.0
 
-    # Top corresponds to max distance (so "bad" = top hot color).
     values = np.linspace(max_dist, effective_min_dist, height, dtype=np.float32)
     normalized = (values - effective_min_dist) / denom
     normalized = np.clip(normalized, 0.0, 1.0)
+    if gamma != 1.0:
+        normalized = normalized ** gamma
 
     colors = _apply_cmap(normalized, cmap)[..., :3]  # (H, 3), RGB in [0,1]
     bar_rgb = (colors * 255.0).astype(np.uint8)  # (H, 3)
@@ -445,12 +452,7 @@ def vis_samples(
     mean_dists = np.linalg.norm(
         mean_pred_vertices_np - gt_verts_b_for_color, axis=-1
     )  # (V,)
-    shared_max = float(max(
-        per_sample_dists.max() if per_sample_dists.size else 0.0,
-        mean_dists.max(),
-    ))
-    if shared_max == 0.0:
-        shared_max = 1.0
+    shared_max = _norm_max(np.concatenate([per_sample_dists.reshape(-1), mean_dists.reshape(-1)]))
     if fixed_clbr:
         shared_max = FIXED_CLBR_MAX_M
     vertex_colors_samples = [
@@ -509,12 +511,7 @@ def vis_samples(
     if plot_sc and aligned_samples is not None and aligned_mean is not None:
         pa_sample_dists = np.linalg.norm(aligned_samples - gt_verts_b[None], axis=-1)  # (n_vis, V)
         pa_mean_dists = np.linalg.norm(aligned_mean - gt_verts_b, axis=-1)  # (V,)
-        pa_max = float(max(
-            pa_sample_dists.max() if pa_sample_dists.size else 0.0,
-            pa_mean_dists.max(),
-        ))
-        if pa_max == 0.0:
-            pa_max = 1.0
+        pa_max = _norm_max(np.concatenate([pa_sample_dists.reshape(-1), pa_mean_dists.reshape(-1)]))
         if fixed_clbr:
             pa_max = FIXED_CLBR_MAX_M
         vertex_colors_pa_samples = [
@@ -566,12 +563,7 @@ def vis_samples(
         neutral_mean_dists = np.linalg.norm(
             pred_neutral - gt_neutral, axis=-1
         )  # (V,)
-        neutral_max = float(max(
-            neutral_dists.max() if neutral_dists.size else 0.0,
-            neutral_mean_dists.max(),
-        ))
-        if neutral_max == 0.0:
-            neutral_max = 1.0
+        neutral_max = _norm_max(np.concatenate([neutral_dists.reshape(-1), neutral_mean_dists.reshape(-1)]))
         if fixed_clbr:
             neutral_max = FIXED_CLBR_MAX_M
         vertex_colors_neutral_samples = [
@@ -590,13 +582,10 @@ def vis_samples(
             nsc_body_mean_dists = np.linalg.norm(
                 pred_neutral_sc_body - gt_neutral, axis=-1
             )
-            # Range derived from body verts only — face/hand saturate informatively.
-            nsc_body_max = float(max(
-                nsc_body_dists[:, body_mask_np].max() if nsc_body_dists.size else 0.0,
-                nsc_body_mean_dists[body_mask_np].max(),
-            ))
-            if nsc_body_max == 0.0:
-                nsc_body_max = 1.0
+            nsc_body_max = _norm_max(np.concatenate([
+                nsc_body_dists[:, body_mask_np].reshape(-1),
+                nsc_body_mean_dists[body_mask_np].reshape(-1),
+            ]))
             if fixed_clbr:
                 nsc_body_max = FIXED_CLBR_MAX_M
             vertex_colors_neutral_sc_body_samples = [
@@ -617,12 +606,7 @@ def vis_samples(
             neutral_sc_mean_dists = np.linalg.norm(
                 pred_neutral_sc - gt_neutral, axis=-1
             )
-            neutral_sc_max = float(max(
-                neutral_sc_dists.max() if neutral_sc_dists.size else 0.0,
-                neutral_sc_mean_dists.max(),
-            ))
-            if neutral_sc_max == 0.0:
-                neutral_sc_max = 1.0
+            neutral_sc_max = _norm_max(np.concatenate([neutral_sc_dists.reshape(-1), neutral_sc_mean_dists.reshape(-1)]))
             if fixed_clbr:
                 neutral_sc_max = FIXED_CLBR_MAX_M
             vertex_colors_neutral_sc_samples = [
@@ -1142,10 +1126,7 @@ def vis_directional_variance(img_cv2, outputs, faces, batch):
     axis_names = ["std x (horizontal)", "std y (vertical)", "std z (depth)"]
     panels = [base_img, gt_mean_img]
 
-    # Shared colour scale across the three axes.
-    shared_max = float(std_mm.max()) if std_mm.size else 1.0
-    if shared_max <= 0.0:
-        shared_max = 1.0
+    shared_max = _norm_max(std_mm.reshape(-1))
 
     for axis_idx in range(3):
         dists = std_mm[:, axis_idx]
@@ -2656,8 +2637,8 @@ def vis_merging_predictions(
         all_distances.append(merged_dist)
 
     all_distances = np.concatenate(all_distances)
-    min_dist = float(all_distances.min()) if all_distances.size > 0 else 0.0
-    max_dist = float(all_distances.max()) if all_distances.size > 0 else 1.0
+    min_dist = 0.0
+    max_dist = _norm_max(all_distances)
 
     # Second pass: render GT (solid color), and pred/merged with per-vertex viridis colors
     for view in range(num_views):
@@ -3041,11 +3022,9 @@ def vis_merging_predictions(
             gallery_img_bgr, (w // 2, h // 2), interpolation=cv2.INTER_AREA
         )
 
-        # Append error-distance colorbar to the right.
         colorbar_rgb = build_distance_colorbar_rgb(
             min_dist=min_dist,
             max_dist=max_dist,
-            cmap="inferno",
             height=gallery_img_bgr.shape[0],
             width=60,
         )
@@ -3137,9 +3116,7 @@ def vis_merging_neutral_variance(
         carrier[:, [1, 2]] *= -1
         carriers_flipped.append(carrier)
 
-    global_max = max((float(s.max()) for s in std_per_image if s.size), default=1.0)
-    if global_max <= 0.0:
-        global_max = 1.0
+    global_max = _norm_max(np.concatenate([s.reshape(-1) for s in std_per_image if s.size]) if any(s.size for s in std_per_image) else np.array([0.0]))
 
     # ---- Pass 2: render all panels with the shared global max ----
     rows = []
@@ -3336,12 +3313,10 @@ def vis_merging_neutral(
             body_only_dists.append(merged_vertex_dists[body_mask_np])
         body_concat = np.concatenate(body_only_dists) if body_only_dists else np.array([0.0])
         min_dist = 0.0
-        max_dist = float(body_concat.max()) if body_concat.size > 0 else 1.0
-        if max_dist <= 0.0:
-            max_dist = 1.0
+        max_dist = _norm_max(body_concat)
     else:
-        min_dist = float(all_distances.min()) if all_distances.size > 0 else 0.0
-        max_dist = float(all_distances.max()) if all_distances.size > 0 else 1.0
+        min_dist = 0.0
+        max_dist = _norm_max(all_distances)
 
     # ----------------- GT -----------------
     background = np.zeros((512, 512, 3)) * 255
@@ -3579,11 +3554,9 @@ def vis_merging_neutral(
             gallery_img = np.concatenate([top_row, bottom_row], axis=0)
         gallery_img_bgr = cv2.cvtColor(gallery_img, cv2.COLOR_RGB2BGR)
 
-        # Append error-distance colorbar to the right.
         colorbar_rgb = build_distance_colorbar_rgb(
             min_dist=min_dist,
             max_dist=max_dist,
-            cmap="inferno",
             height=gallery_img_bgr.shape[0],
             width=60,
         )
@@ -3922,23 +3895,17 @@ def vis_merging_samples(
                 )
 
     posed_concat = np.concatenate(all_dists_posed) if all_dists_posed else np.array([0.0])
-    max_dist_mm = float(posed_concat.max()) if posed_concat.size else 1.0
-    if max_dist_mm <= 0.0:
-        max_dist_mm = 1.0
+    max_dist_mm = _norm_max(posed_concat)
 
     neutral_concat = (
         np.concatenate(all_dists_neutral) if all_dists_neutral else np.array([0.0])
     )
-    max_dist_mm_neutral = float(neutral_concat.max()) if neutral_concat.size else 1.0
-    if max_dist_mm_neutral <= 0.0:
-        max_dist_mm_neutral = 1.0
+    max_dist_mm_neutral = _norm_max(neutral_concat)
 
     neutral_body_concat = (
         np.concatenate(all_dists_neutral_body) if all_dists_neutral_body else np.array([0.0])
     )
-    max_dist_mm_neutral_body = float(neutral_body_concat.max()) if neutral_body_concat.size else 1.0
-    if max_dist_mm_neutral_body <= 0.0:
-        max_dist_mm_neutral_body = 1.0
+    max_dist_mm_neutral_body = _norm_max(neutral_body_concat)
 
     # ---- Reference panel size: cropped image size of view 0 (W, H) ----
     img_size_0 = img_size_all[0, 0]
@@ -4040,8 +4007,6 @@ def vis_merging_samples(
             gt_neutral_float = None
 
         def render_front(verts_pred, cam_t_pred, dists_mm):
-            # GT rendered opaque on the input image; pred (heatmap) on top.
-            # Renders directly at panel resolution — skips the post-warpAffine.
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
             pred_rgba = renderer(
                 verts_pred, cam_t_pred, np.full_like(img_panel, 255),
@@ -4069,10 +4034,8 @@ def vis_merging_samples(
             return _to_uint8(blended)
 
         def render_neutral(pred_sc_verts, dists_mm, max_dist_mm=max_dist_mm_neutral, gray_non_body=False):
-            # Apply display flip used by other neutral renderers (my_vis.py:2979).
             pred_vis = pred_sc_verts.copy()
             pred_vis[:, [1, 2]] *= -1
-
             colors = build_vertex_colors(dists_mm, min_dist=0.0, max_dist=max_dist_mm)
             if gray_non_body:
                 colors = _gray_out_non_body(colors, body_mask_np)
