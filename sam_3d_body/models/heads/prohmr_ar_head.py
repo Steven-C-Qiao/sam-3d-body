@@ -43,6 +43,7 @@ class NFARHead(nn.Module):
         self.num_shape_comps = len(self.shape_indices) if self.model_shape else 0
         self.scale_indices = list(cfg.MODEL.SCALE_INDICES)
         self.num_scale_comps = len(self.scale_indices) if self.model_scale else 0
+        self.height_condition = getattr(cfg.MODEL, "HEIGHT_CONDITION", False)
         self.num_glob_rot_comps = 3 if (self.model_pose and self.model_glob_rot) else 0
         self.num_cam_comps = 3 if (self.model_pose and self.model_cam) else 0
 
@@ -151,13 +152,14 @@ class NFARHead(nn.Module):
             self._shape_perturb_std = None
             self._scale_perturb_std = None
 
-        # Stage 1 context: [flow_context, shape_mean_selected, scale_mean_selected]
-        context_beta_dim = 1024 + len(self.shape_indices) + len(self.scale_indices)
+        # Stage 1 context: [flow_context, shape_mean_selected, scale_mean_selected, gt_height?]
+        height_dim = 1 if self.height_condition else 0
+        context_beta_dim = 1024 + len(self.shape_indices) + len(self.scale_indices) + height_dim
         self.beta_context_proj = nn.Linear(context_beta_dim, 2048)
 
-        # Stage 2 context: [flow_context, shape_sample_selected, scale_sample_selected, aa_3dofs, params_1dofs, (pred_cam?)]
+        # Stage 2 context: [flow_context, shape_sample_selected, scale_sample_selected, aa_3dofs, params_1dofs, (pred_cam?), gt_height?]
         if self.model_pose:
-            context_theta_dim = 1024 + len(self.shape_indices) + len(self.scale_indices) + 39 + 34 + (3 if self.model_cam else 0)
+            context_theta_dim = 1024 + len(self.shape_indices) + len(self.scale_indices) + 39 + 34 + (3 if self.model_cam else 0) + height_dim
             self.theta_context_proj = nn.Linear(context_theta_dim, 2048)
         else:
             self.theta_context_proj = None
@@ -205,6 +207,8 @@ class NFARHead(nn.Module):
             shape_mean[..., self.shape_indices],
             scale_mean[..., self.scale_indices],
         ]
+        if self.height_condition:
+            beta_context_parts.append(batch["gt_height"])
         context_beta = self.beta_context_proj(torch.cat(beta_context_parts, dim=-1))
 
         if self.model_pose:
@@ -260,6 +264,8 @@ class NFARHead(nn.Module):
             ]
             if self.model_cam:
                 context_theta_parts.append(mean_pred["pred_cam"])
+            if self.height_condition:
+                context_theta_parts.append(batch["gt_height"])
             context_theta = self.theta_context_proj(torch.cat(context_theta_parts, dim=-1))
 
         with torch.no_grad():
@@ -335,6 +341,7 @@ class NFARHead(nn.Module):
         mean_pred: Dict,
         shape_samples: torch.Tensor,
         scale_samples_68D: torch.Tensor,
+        gt_height: Optional[torch.Tensor] = None,
     ) -> Dict:
         """Stage 2 of the autoregressive NF: sample pose/glob_rot/cam residuals
         conditioned on a given ``(shape_samples, scale_samples_68D)``.
@@ -394,6 +401,10 @@ class NFARHead(nn.Module):
         if self.model_cam:
             pred_cam_expanded = mean_pred["pred_cam"].unsqueeze(1).repeat(1, N, 1)
             context_theta_parts.append(pred_cam_expanded)
+        if self.height_condition:
+            assert gt_height is not None, "HEIGHT_CONDITION=True but gt_height not provided to sample_theta_given_beta"
+            gt_height_expanded = gt_height.unsqueeze(1).expand(B, N, -1)
+            context_theta_parts.append(gt_height_expanded)
         context_theta = self.theta_context_proj(
             torch.cat(context_theta_parts, dim=-1).reshape(B * N, -1)
         )
@@ -491,6 +502,8 @@ class NFARHead(nn.Module):
             shape_mean[..., self.shape_indices],
             scale_mean[..., self.scale_indices],
         ]
+        if self.height_condition:
+            beta_context_parts.append(batch["gt_height"])
         beta_context = self.beta_context_proj(torch.cat(beta_context_parts, dim=-1))
 
         if not self._actnorm_done:
@@ -543,6 +556,7 @@ class NFARHead(nn.Module):
             mean_pred=mean_pred,
             shape_samples=shape_samples,
             scale_samples_68D=scale_samples_68D,
+            gt_height=batch["gt_height"] if (self.height_condition and batch is not None) else None,
         )
         theta_samples_residual = stage2["theta_samples_residual"]
         theta_log_prob = stage2["theta_log_prob"]

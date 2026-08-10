@@ -457,6 +457,19 @@ class Trainer(BaseLightningModule):
         batch["joint_coords"] = gt_joint_coords
         batch["keypoints_3d"] = gt_keypoints_3d
 
+        if getattr(self.cfg.MODEL, "HEIGHT_CONDITION", False):
+            with torch.amp.autocast(device_type="cuda", enabled=False):
+                neutral_mp = batch["model_params"].clone().float()
+                neutral_mp[:, :-68] = 0  # zero translation/rotation/body pose/hands; keep 68D scale
+                neutral_face = torch.zeros_like(batch["face_expr_coeffs"]).float()
+                neutral_verts, _ = mhr_model.mhr(
+                    identity_coeffs=batch["shape_params"].float(),
+                    model_parameters=neutral_mp,
+                    face_expr_coeffs=neutral_face,
+                )
+            neutral_verts = neutral_verts / 100  # cm -> m
+            height = neutral_verts[..., 1].max(dim=1).values - neutral_verts[..., 1].min(dim=1).values
+            batch["gt_height"] = height.unsqueeze(-1)  # (B*V, 1)
 
         cam_int = batch["cam_int"]
         if "cam_ext" not in batch:

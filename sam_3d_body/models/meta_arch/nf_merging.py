@@ -919,6 +919,7 @@ def resample_cam_for_merged_shape(
         mean_pred=mhr_out,
         shape_samples=merged_shape,
         scale_samples_68D=merged_scale,
+        gt_height=batch.get("gt_height") if nf_head.height_condition else None,
     )
     cam_samples = stage2["cam_samples"]  # (B*V, N, 3) if model_cam else None
     if cam_samples is None:

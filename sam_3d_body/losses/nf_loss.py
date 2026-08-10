@@ -86,14 +86,14 @@ class Loss(pl.LightningModule):
             cam_residual = (batch["gt_pred_cam"] - mean_pred["pred_cam"]).detach()
             true_residual = torch.cat([true_residual, cam_residual], dim=-1)
 
-        log_prob_full = self._compute_gt_residual_log_prob(true_residual, predictions)
+        log_prob_full = self._compute_gt_residual_log_prob(true_residual, predictions, batch=batch)
         flow_context_beta = predictions["uncertainty_output"]["flow_context_beta"]
         log_prob_beta, _ = self.nf_head.flow_beta.log_prob(
             inputs=beta_residual, context=flow_context_beta
         )
         return log_prob_full, log_prob_beta
 
-    def _compute_gt_residual_log_prob(self, true_residual, predictions):
+    def _compute_gt_residual_log_prob(self, true_residual, predictions, batch=None):
         head_type = self.cfg.MODEL.HEAD_TYPE
         uncertainty_output = predictions["uncertainty_output"]
 
@@ -111,6 +111,8 @@ class Loss(pl.LightningModule):
                 mean_pred["shape"][..., self.nf_head.shape_indices],
                 mean_pred["scale_68D"][..., self.nf_head.scale_indices],
             ]
+            if self.nf_head.height_condition:
+                beta_context_parts.append(batch["gt_height"])
             flow_context_beta = self.nf_head.beta_context_proj(
                 torch.cat(beta_context_parts, dim=-1)
             )
@@ -149,6 +151,8 @@ class Loss(pl.LightningModule):
                 ]
                 if self.nf_head.model_cam:
                     context_theta_parts.append(mean_pred["pred_cam"])
+                if self.nf_head.height_condition:
+                    context_theta_parts.append(batch["gt_height"])
                 flow_context_theta = self.nf_head.theta_context_proj(
                     torch.cat(context_theta_parts, dim=-1)
                 )
@@ -305,12 +309,12 @@ class Loss(pl.LightningModule):
             num_samples = uncertainty_output["samples"].shape[1]
 
             flow_log_prob = self._compute_gt_residual_log_prob(
-                true_residual, predictions
+                true_residual, predictions, batch=batch,
             )
             nll_loss = -flow_log_prob.mean()
             loss_dict["loss_param_nll"] = self.cfg.LOSS.PARAM_NLL_WEIGHT * nll_loss
             mean_log_prob = self._compute_gt_residual_log_prob(
-                torch.zeros_like(true_residual), predictions
+                torch.zeros_like(true_residual), predictions, batch=batch,
             )
 
         # DEPRECATED: raw parameter-space variance. Can be gamed by random noise.
