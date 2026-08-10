@@ -59,7 +59,7 @@ PALETTE_CANDIDATES = {
     "magenta_gt":     {"gt": MAGENTA,      "pred_tint": LIGHT_ORANGE},
     "green_gt":       {"gt": BRIGHT_GREEN, "pred_tint": LIGHT_ORANGE},
 }
-ACTIVE_PALETTE = "green_gt"
+ACTIVE_PALETTE = "dark_grey_gt"
 GT_COLOR   = PALETTE_CANDIDATES[ACTIVE_PALETTE]["gt"]
 PRED_COLOR = PALETTE_CANDIDATES[ACTIVE_PALETTE]["pred_tint"]
 
@@ -387,7 +387,7 @@ def vis_samples(
     plot_side=True,
     plot_neutral=True,
     plot_sc=False,
-    fixed_clbr: bool = True,
+    fixed_clbr: bool = False,
     max_sample: Optional[int] = 10,
 ):
     def _to_np(x):
