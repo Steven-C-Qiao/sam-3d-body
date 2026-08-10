@@ -133,3 +133,6 @@ debug/
 **/.dist_test
 sandbox*
 *.sh
+
+.pixi/
+!pixi.lock

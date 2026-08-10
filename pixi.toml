@@ -1,0 +1,50 @@
+[workspace]
+name = "sam-3d-body"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+# Without this pixi assumes no GPU and resolves CPU-only builds.
+[system-requirements]
+cuda = "13.0"
+
+[dependencies]
+python = "3.12.*"
+cuda-version = "13.0.*"
+# conda-forge's triton ships no CUDA headers; without these its JIT gcc step fails on cuda.h
+cuda-driver-dev = "*"
+cuda-cudart-dev = "*"
+pytorch-gpu = "*"
+torchvision = { build = "cuda*" }
+pytorch3d = { build = "cuda*" }
+pytorch-lightning = "*"
+numpy = "*"
+scipy = "*"
+scikit-image = "*"
+matplotlib = "*"
+pillow = "*"
+opencv = "*"
+trimesh = "*"
+einops = "*"
+loguru = "*"
+yacs = "*"
+omegaconf = "*"
+joblib = "*"
+tqdm = "*"
+pyyaml = "*"
+wandb = "*"
+albumentations = "*"
+timm = "*"
+huggingface_hub = "*"
+peft = "*"
+ipdb = "*"
+
+[pypi-dependencies]
+# ProHMR fork; upstream nflows has no ConditionalGlow
+nflows = { git = "https://github.com/nkolot/nflows.git", rev = "26388ed7780e7548ab1a7803ec50b0f0b779f254" }
+smplx = "*"
+roma = "*"
+pyrender = "*"
+braceexpand = "*"
+jpeg4py = "*"
+umnn = "==1.71"
+simsimd = "*"
