@@ -136,3 +136,5 @@ sandbox*
 
 .pixi/
 !pixi.lock
+
+tinker/recovered_sessions/
