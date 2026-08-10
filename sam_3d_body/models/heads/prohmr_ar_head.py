@@ -39,7 +39,8 @@ class NFARHead(nn.Module):
         # no pose / glob_rot / cam residuals are modelled by the NF.
         self.num_3dof_comps = 39 if self.model_pose else 0
         self.num_1dof_comps = 34 if self.model_pose else 0
-        self.num_shape_comps = 45 if self.model_shape else 0
+        self.shape_indices = list(getattr(cfg.MODEL, "SHAPE_INDICES", list(range(45))))
+        self.num_shape_comps = len(self.shape_indices) if self.model_shape else 0
         self.scale_indices = list(cfg.MODEL.SCALE_INDICES)
         self.num_scale_comps = len(self.scale_indices) if self.model_scale else 0
         self.num_glob_rot_comps = 3 if (self.model_pose and self.model_glob_rot) else 0
@@ -150,13 +151,13 @@ class NFARHead(nn.Module):
             self._shape_perturb_std = None
             self._scale_perturb_std = None
 
-        # Stage 1 context: [flow_context, shape_mean, scale_mean_selected]
-        context_beta_dim = 1024 + 45 + len(self.scale_indices)
+        # Stage 1 context: [flow_context, shape_mean_selected, scale_mean_selected]
+        context_beta_dim = 1024 + len(self.shape_indices) + len(self.scale_indices)
         self.beta_context_proj = nn.Linear(context_beta_dim, 2048)
 
-        # Stage 2 context: [flow_context, shape_sample, scale_sample_selected, aa_3dofs, params_1dofs, (pred_cam?)]
+        # Stage 2 context: [flow_context, shape_sample_selected, scale_sample_selected, aa_3dofs, params_1dofs, (pred_cam?)]
         if self.model_pose:
-            context_theta_dim = 1024 + 45 + len(self.scale_indices) + 39 + 34 + (3 if self.model_cam else 0)
+            context_theta_dim = 1024 + len(self.shape_indices) + len(self.scale_indices) + 39 + 34 + (3 if self.model_cam else 0)
             self.theta_context_proj = nn.Linear(context_theta_dim, 2048)
         else:
             self.theta_context_proj = None
@@ -178,6 +179,7 @@ class NFARHead(nn.Module):
             flip_global_rot=True,
             return_rotmats=True,
             scale_indices=self.scale_indices,
+            shape_indices=self.shape_indices,
         )
 
         # Mean prediction via direct 6D→AA path (no euler roundtrip bias).
@@ -186,7 +188,7 @@ class NFARHead(nn.Module):
         )
         beta_parts = []
         if self.model_shape:
-            beta_parts.append(mean_pred["shape"])
+            beta_parts.append(mean_pred["shape"][..., self.shape_indices])
         if self.model_scale:
             beta_parts.append(mean_pred["scale_68D"][..., self.scale_indices])
         mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None
@@ -198,16 +200,12 @@ class NFARHead(nn.Module):
         shape_mean = mean_pred["shape"]
         scale_mean = mean_pred["scale_68D"]
 
-        context_beta = self.beta_context_proj(
-            torch.cat(
-                [
-                    flow_context,
-                    shape_mean,
-                    scale_mean[..., self.scale_indices],
-                ],
-                dim=-1,
-            )
-        )
+        beta_context_parts = [
+            flow_context,
+            shape_mean[..., self.shape_indices],
+            scale_mean[..., self.scale_indices],
+        ]
+        context_beta = self.beta_context_proj(torch.cat(beta_context_parts, dim=-1))
 
         if self.model_pose:
             # Theta residual: [3dof(39), 1dof(34), glob_rot?(3)]
@@ -246,16 +244,16 @@ class NFARHead(nn.Module):
             # Pose context uses GT shape (teacher forcing), mirroring nf_loss.py.
             shape_residual_true = beta_residual[..., : self.num_shape_comps]
             scale_residual_true = beta_residual[..., self.num_shape_comps :]
-            shape_sample_true = shape_mean
+            shape_sample_selected_true = shape_mean[..., self.shape_indices]
             if self.num_shape_comps > 0:
-                shape_sample_true = shape_sample_true + shape_residual_true
+                shape_sample_selected_true = shape_sample_selected_true + shape_residual_true
             scale_sample_selected_true = scale_mean[..., self.scale_indices]
             if self.num_scale_comps > 0:
                 scale_sample_selected_true = scale_sample_selected_true + scale_residual_true
 
             context_theta_parts = [
                 flow_context,
-                shape_sample_true,
+                shape_sample_selected_true,
                 scale_sample_selected_true,
                 aa_3dofs,
                 params_1dofs,
@@ -388,7 +386,7 @@ class NFARHead(nn.Module):
 
         context_theta_parts = [
             flow_context_expanded,
-            shape_samples,
+            shape_samples[..., self.shape_indices],
             scale_samples_68D[..., self.scale_indices],
             aa_3dofs_expanded,
             params_1dofs_expanded,
@@ -488,16 +486,12 @@ class NFARHead(nn.Module):
         # ----------------------------------------------------------------------
         # Stage 1: p(Δβ | c, μβ) — shape+scale residuals.
         # ----------------------------------------------------------------------
-        beta_context = self.beta_context_proj(
-            torch.cat(
-                [
-                    flow_context,
-                    shape_mean,
-                    scale_mean[..., self.scale_indices],
-                ],
-                dim=-1,
-            )
-        )
+        beta_context_parts = [
+            flow_context,
+            shape_mean[..., self.shape_indices],
+            scale_mean[..., self.scale_indices],
+        ]
+        beta_context = self.beta_context_proj(torch.cat(beta_context_parts, dim=-1))
 
         if not self._actnorm_done:
             if (not self.initialized_beta.item()) or (not self.initialized_theta.item()):
@@ -516,7 +510,7 @@ class NFARHead(nn.Module):
             shape_part = beta_residual_samples[..., : self.num_shape_comps]
             scale_part = beta_residual_samples[..., self.num_shape_comps :]
             if self.shape_perturb_scale > 0:
-                shape_part = shape_part + torch.randn_like(shape_part) * self._shape_perturb_std * self.shape_perturb_scale
+                shape_part = shape_part + torch.randn_like(shape_part) * self._shape_perturb_std[self.shape_indices] * self.shape_perturb_scale
             if self.scale_perturb_scale > 0:
                 scale_part = scale_part + torch.randn_like(scale_part) * self._scale_perturb_std * self.scale_perturb_scale
             beta_residual_for_stage2 = torch.cat([shape_part, scale_part], dim=-1)
@@ -530,8 +524,10 @@ class NFARHead(nn.Module):
         scale_residual_samples = beta_residual_for_stage2[..., self.num_shape_comps :]
 
         shape_samples = shape_mean.unsqueeze(1).repeat(1, N, 1)
-        if self.num_shape_comps > 0:
-            shape_samples = shape_samples + shape_residual_samples
+        if self.model_shape and self.num_shape_comps > 0:
+            shape_samples[..., self.shape_indices] = (
+                shape_samples[..., self.shape_indices] + shape_residual_samples
+            )
 
         scale_samples_68D = scale_mean.unsqueeze(1).repeat(1, N, 1)
         if self.model_scale and self.num_scale_comps > 0:

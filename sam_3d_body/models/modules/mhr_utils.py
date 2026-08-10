@@ -41,6 +41,7 @@ def convert_mhr_params_to_flow_params(
     flip_global_rot: bool = False,
     return_rotmats: bool = False,
     scale_indices=scale_indices,
+    shape_indices=None,
 ) -> torch.Tensor:
     assert model_params.shape[-1] == 204
     assert shape_params.shape[-1] == 45
@@ -58,6 +59,8 @@ def convert_mhr_params_to_flow_params(
     pose_3dof_aa = matrix_to_axis_angle(pose_3dof_rotmat_selected).flatten(-2, -1)
 
     scale = scale[..., scale_indices]
+    if shape_indices is not None:
+        shape_params = shape_params[..., shape_indices]
 
     # Output ordering: [beta (shape? + scale?), theta (3dof + 1dof + glob_rot?)]
     beta_parts = []

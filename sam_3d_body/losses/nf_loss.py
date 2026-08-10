@@ -47,13 +47,14 @@ class Loss(pl.LightningModule):
             flip_global_rot=True,
             return_rotmats=True,
             scale_indices=self.nf_head.scale_indices,
+            shape_indices=self.nf_head.shape_indices,
         )
         mean_pred = predictions["mhr"]
         pose_params = convert_pose_cont_to_flow_context(mean_pred["pred_pose_raw"][:, 6:])
 
         beta_parts = []
         if getattr(self.cfg.MODEL, "MODEL_SHAPE", True):
-            beta_parts.append(mean_pred["shape"])
+            beta_parts.append(mean_pred["shape"][..., self.nf_head.shape_indices])
         if getattr(self.cfg.MODEL, "MODEL_SCALE", True):
             beta_parts.append(mean_pred["scale_68D"][..., self.nf_head.scale_indices])
         mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None
@@ -105,15 +106,13 @@ class Loss(pl.LightningModule):
             flow_context_raw = uncertainty_output["flow_context_raw"]
             mean_pred = predictions["mhr"]
 
+            beta_context_parts = [
+                flow_context_raw,
+                mean_pred["shape"][..., self.nf_head.shape_indices],
+                mean_pred["scale_68D"][..., self.nf_head.scale_indices],
+            ]
             flow_context_beta = self.nf_head.beta_context_proj(
-                torch.cat(
-                    [
-                        flow_context_raw,
-                        mean_pred["shape"],
-                        mean_pred["scale_68D"][..., self.nf_head.scale_indices],
-                    ],
-                    dim=-1,
-                )
+                torch.cat(beta_context_parts, dim=-1)
             )
 
             if self.nf_head.model_pose:
@@ -132,9 +131,9 @@ class Loss(pl.LightningModule):
                     self.nf_head.num_shape_comps :,
                 ]
 
-                shape_sample_true = mean_pred["shape"]
+                shape_sample_selected_true = mean_pred["shape"][..., self.nf_head.shape_indices]
                 if self.nf_head.num_shape_comps > 0:
-                    shape_sample_true = shape_sample_true + shape_residual_true
+                    shape_sample_selected_true = shape_sample_selected_true + shape_residual_true
                 scale_sample_selected_true = mean_pred["scale_68D"][..., self.nf_head.scale_indices]
                 if self.nf_head.num_scale_comps > 0:
                     scale_sample_selected_true = (
@@ -143,7 +142,7 @@ class Loss(pl.LightningModule):
 
                 context_theta_parts = [
                     flow_context_raw,
-                    shape_sample_true,
+                    shape_sample_selected_true,
                     scale_sample_selected_true,
                     aa_3dofs,
                     params_1dofs,
@@ -239,6 +238,7 @@ class Loss(pl.LightningModule):
                 flip_global_rot=True,
                 return_rotmats=True,
                 scale_indices=self.nf_head.scale_indices,
+                shape_indices=self.nf_head.shape_indices,
             )
 
             mean_pred = predictions["mhr"]
@@ -249,7 +249,7 @@ class Loss(pl.LightningModule):
             )
             beta_parts = []
             if getattr(self.cfg.MODEL, "MODEL_SHAPE", True):
-                beta_parts.append(mean_pred["shape"])
+                beta_parts.append(mean_pred["shape"][..., self.nf_head.shape_indices])
             if getattr(self.cfg.MODEL, "MODEL_SCALE", True):
                 beta_parts.append(mean_pred["scale_68D"][..., self.nf_head.scale_indices])
             mean_beta = torch.cat(beta_parts, dim=-1) if beta_parts else None

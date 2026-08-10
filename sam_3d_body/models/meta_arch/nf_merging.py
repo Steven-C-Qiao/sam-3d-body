@@ -117,19 +117,25 @@ def merge_params_nf_psis(
         candidate_logw = []
 
         for i in range(num_views):
-            beta_i = torch.cat(
-                [shape_samples[b, i], scale68_samples[b, i, :, nf_head.scale_indices]], dim=-1
-            )  # [S, 55]
+            beta_i_parts = []
+            if nf_head.num_shape_comps > 0:
+                beta_i_parts.append(shape_samples[b, i, :, nf_head.shape_indices])
+            if nf_head.num_scale_comps > 0:
+                beta_i_parts.append(scale68_samples[b, i, :, nf_head.scale_indices])
+            beta_i = torch.cat(beta_i_parts, dim=-1)
 
             logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
             for j in range(num_views):
                 if j == i:
                     continue
-                mean_beta_j = torch.cat(
-                    [pred_shape[b, j], pred_scale68[b, j, nf_head.scale_indices]], dim=-1
-                )  # [55]
-                residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
-                context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)  # [S, 2048]
+                mean_beta_parts = []
+                if nf_head.num_shape_comps > 0:
+                    mean_beta_parts.append(pred_shape[b, j, nf_head.shape_indices])
+                if nf_head.num_scale_comps > 0:
+                    mean_beta_parts.append(pred_scale68[b, j, nf_head.scale_indices])
+                mean_beta_j = torch.cat(mean_beta_parts, dim=-1)
+                residual_j = beta_i - mean_beta_j.unsqueeze(0)
+                context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)
                 logp_j, _ = nf_head.flow_beta.log_prob(inputs=residual_j, context=context_j)
                 cross_view_logp[b, i, j] = logp_j
                 logw_i = logw_i + logp_j
@@ -137,8 +143,8 @@ def merge_params_nf_psis(
             candidate_beta.append(beta_i)
             candidate_logw.append(logw_i)
 
-        candidate_beta = torch.cat(candidate_beta, dim=0)   # [V*S, 55]
-        candidate_logw = torch.cat(candidate_logw, dim=0)   # [V*S]
+        candidate_beta = torch.cat(candidate_beta, dim=0)
+        candidate_logw = torch.cat(candidate_logw, dim=0)
 
         # PSIS: smooth the tail before normalising
         candidate_logw_smooth, k = _psis_smooth_log_weights(candidate_logw)
@@ -149,11 +155,15 @@ def merge_params_nf_psis(
 
         candidate_w = torch.softmax(candidate_logw_smooth, dim=0)
         is_weights[b] = candidate_w.reshape(num_views, S)
-        merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)  # [55]
+        merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)
 
-        merged_shape.append(merged_beta[: nf_head.num_shape_comps])
+        shape_merged = pred_shape[b].mean(dim=0).clone()
+        if nf_head.num_shape_comps > 0:
+            shape_merged[nf_head.shape_indices] = merged_beta[: nf_head.num_shape_comps]
+        merged_shape.append(shape_merged)
         scale68_merged = pred_scale68[b].mean(dim=0).clone()
-        scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        if nf_head.num_scale_comps > 0:
+            scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
         merged_scale68.append(scale68_merged)
 
     # Diagonal of cross_view_logp = self-view stage-1 log-prob (no need to recompute).
@@ -261,18 +271,24 @@ def merge_params_nf_tempered(
         candidate_logw = []
 
         for i in range(num_views):
-            beta_i = torch.cat(
-                [shape_samples[b, i], scale68_samples[b, i, :, nf_head.scale_indices]], dim=-1
-            )  # [S, 55]
+            beta_i_parts = []
+            if nf_head.num_shape_comps > 0:
+                beta_i_parts.append(shape_samples[b, i, :, nf_head.shape_indices])
+            if nf_head.num_scale_comps > 0:
+                beta_i_parts.append(scale68_samples[b, i, :, nf_head.scale_indices])
+            beta_i = torch.cat(beta_i_parts, dim=-1)
 
             logw_i = torch.zeros(S, device=beta_i.device, dtype=beta_i.dtype)
             for j in range(num_views):
                 if j == i:
                     continue
-                mean_beta_j = torch.cat(
-                    [pred_shape[b, j], pred_scale68[b, j, nf_head.scale_indices]], dim=-1
-                )  # [55]
-                residual_j = beta_i - mean_beta_j.unsqueeze(0)       # [S, 55]
+                mean_beta_parts = []
+                if nf_head.num_shape_comps > 0:
+                    mean_beta_parts.append(pred_shape[b, j, nf_head.shape_indices])
+                if nf_head.num_scale_comps > 0:
+                    mean_beta_parts.append(pred_scale68[b, j, nf_head.scale_indices])
+                mean_beta_j = torch.cat(mean_beta_parts, dim=-1)
+                residual_j = beta_i - mean_beta_j.unsqueeze(0)
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)
                 logp_j, _ = nf_head.flow_beta.log_prob(inputs=residual_j, context=context_j)
                 cross_view_logp[b, i, j] = logp_j
@@ -282,17 +298,21 @@ def merge_params_nf_tempered(
             candidate_beta.append(beta_i)
             candidate_logw.append(logw_i / T)  # temperature scaling
 
-        candidate_beta = torch.cat(candidate_beta, dim=0)   # [V*S, 55]
-        candidate_logw = torch.cat(candidate_logw, dim=0)   # [V*S]
+        candidate_beta = torch.cat(candidate_beta, dim=0)
+        candidate_logw = torch.cat(candidate_logw, dim=0)
 
         candidate_w = torch.softmax(candidate_logw, dim=0)
         is_weights[b] = candidate_w.reshape(num_views, S)
         merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)
 
 
-        merged_shape.append(merged_beta[: nf_head.num_shape_comps])
+        shape_merged = pred_shape[b].mean(dim=0).clone()
+        if nf_head.num_shape_comps > 0:
+            shape_merged[nf_head.shape_indices] = merged_beta[: nf_head.num_shape_comps]
+        merged_shape.append(shape_merged)
         scale68_merged = pred_scale68[b].mean(dim=0).clone()
-        scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        if nf_head.num_scale_comps > 0:
+            scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
         merged_scale68.append(scale68_merged)
 
     diag = torch.arange(num_views, device=cross_view_logp.device)
@@ -377,14 +397,13 @@ def merge_params_nf_is(
         candidate_logw = []
 
         for i in range(num_views):
-            # Proposal samples from view i: beta = [shape(45), selected_scale(10)].
-            beta_i = torch.cat(
-                [
-                    shape_samples[b, i],  # [S, 45]
-                    scale68_samples[b, i, :, nf_head.scale_indices],  # [S, 10]
-                ],
-                dim=-1,
-            )  # [S, 55]
+            # Proposal samples from view i: beta = [selected_shape, selected_scale].
+            beta_i_parts = []
+            if nf_head.num_shape_comps > 0:
+                beta_i_parts.append(shape_samples[b, i, :, nf_head.shape_indices])
+            if nf_head.num_scale_comps > 0:
+                beta_i_parts.append(scale68_samples[b, i, :, nf_head.scale_indices])
+            beta_i = torch.cat(beta_i_parts, dim=-1)
 
             # # Debug self-consistency:
             # # Use the exact sampled stage-1 residuals from uncertainty_out["samples"].
@@ -413,14 +432,13 @@ def merge_params_nf_is(
             for j in range(num_views):
                 if j == i:
                     continue
-                mean_beta_j = torch.cat(
-                    [
-                        pred_shape[b, j],  # [45]
-                        pred_scale68[b, j, nf_head.scale_indices],  # [10]
-                    ],
-                    dim=-1,
-                )  # [55]
-                residual_j = beta_i - mean_beta_j.unsqueeze(0)  # [S, 55]
+                mean_beta_parts = []
+                if nf_head.num_shape_comps > 0:
+                    mean_beta_parts.append(pred_shape[b, j, nf_head.shape_indices])
+                if nf_head.num_scale_comps > 0:
+                    mean_beta_parts.append(pred_scale68[b, j, nf_head.scale_indices])
+                mean_beta_j = torch.cat(mean_beta_parts, dim=-1)
+                residual_j = beta_i - mean_beta_j.unsqueeze(0)
                 context_j = beta_context[b, j].unsqueeze(0).expand(S, -1)  # [S, 2048]
                 logp_j, _ = nf_head.flow_beta.log_prob(
                     inputs=residual_j, context=context_j
@@ -439,11 +457,15 @@ def merge_params_nf_is(
         candidate_w = torch.softmax(candidate_logw, dim=0)  # normalized importance weights
         is_weights[b] = candidate_w.reshape(num_views, S)
 
-        merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)  # [55]
-        merged_shape.append(merged_beta[: nf_head.num_shape_comps])
+        merged_beta = (candidate_w.unsqueeze(-1) * candidate_beta).sum(dim=0)
+        shape_merged = pred_shape[b].mean(dim=0).clone()
+        if nf_head.num_shape_comps > 0:
+            shape_merged[nf_head.shape_indices] = merged_beta[: nf_head.num_shape_comps]
+        merged_shape.append(shape_merged)
 
-        scale68_merged = pred_scale68[b].mean(dim=0)
-        scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
+        scale68_merged = pred_scale68[b].mean(dim=0).clone()
+        if nf_head.num_scale_comps > 0:
+            scale68_merged[nf_head.scale_indices] = merged_beta[nf_head.num_shape_comps :]
         merged_scale68.append(scale68_merged)
 
     diag = torch.arange(num_views, device=cross_view_logp.device)
