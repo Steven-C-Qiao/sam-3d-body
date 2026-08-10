@@ -330,7 +330,7 @@ def vis_prediction(img_cv2, outputs, faces, stack_vertically=True, batch=None):
         else:
             normalized_distances = np.zeros_like(avg_distances)
 
-        viridis = cm.get_cmap('viridis')
+        viridis = matplotlib.colormaps['viridis']
         vertex_colors_rgb = viridis(normalized_distances)[:, :3]
         vertex_colors = np.ones((vertex_colors_rgb.shape[0], 4))
         vertex_colors[:, :3] = vertex_colors_rgb
