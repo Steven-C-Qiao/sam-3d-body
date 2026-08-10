@@ -1,5 +1,13 @@
 # Claude Code Context
 
+**Host: juban.** `/scratch` below means juban's local disk. If `hostname -s` says otherwise, you are on
+a different machine and these paths point at unrelated storage — reach this repo at
+`/scratches/juban/cq244/sam-3d-body` and use that machine's own environment.
+
+**This copy:** `origin` = github.com/Steven-C-Qiao/sam-3d-body · `main` @ 472af97 · 6 ahead of origin,
+16 files uncommitted. The same-named copy on columbo2 is ~80 commits behind, has no NF head, and lacks
+the `-C`/`--lr` flags — it is not the same repo.
+
 ## Project Overview
 
 SAM 3D Body reconstructs full 3D human body meshes (pose, shape, camera) from a single RGB image. It uses a promptable architecture (optional 2D keypoint/mask inputs) and a custom parametric body representation called **MHR (Momentum Human Rig)**, which decouples skeletal structure from surface shape.
@@ -70,4 +78,64 @@ Merged shape `β*` = importance-weighted mean over all `V × S` candidates (soft
 | `sam_3d_body/visualization/renderer.py`      | pyrender-based mesh renderer (EGL offscreen)                    |
 | `scripts/train.py`                           | Training entry point (`--gpus`, `--dev`, `--plot` flags)        |
 
+## Environment
 
+pixi, via `pixi.toml` + `pixi.lock` at the repo root — Python 3.12.13, torch 2.13.0 (CUDA 13.0),
+pytorch3d 0.7.9 (`cuda130` build), lightning 2.6.5.
+
+```bash
+pixi run python scripts/train.py -E exp/exp_NNN_tag --gpus 2
+```
+
+Use `pixi run`, **not** the interpreter path. conda-forge patches triton to find Blackwell's `ptxas`
+through `$CONDA_PREFIX`; calling `.pixi/envs/default/bin/python` directly leaves it unset and fails with
+`Cannot find ptxas-blackwell`. No `.claude/settings.json` is wired here for the same reason.
+
+The conda env `prohmr` still runs this repo and stays as a fallback. It is not the env of record.
+
+## Running
+
+`scripts/train.py` — `-E/--experiment_dir`, `-R/--resume_training_states`, `-L/--load_from_ckpt`,
+`--gpus`, `-C/--config`, `--lr`, `--dev`, `--plot`. `--gpus` is required in practice: it is assigned
+straight into `CUDA_VISIBLE_DEVICES`.
+
+`scripts/test.py` mirrors those; `scripts/merging.py` adds `-D/--dataset_name`, `--method`,
+`--num_samples`, `--noplot`. Also `scripts/demo_nf_multiview.py`.
+
+**juban is shared** — check `nvidia-smi` before claiming a GPU. 8 × RTX PRO 6000 Blackwell, 96 GB each.
+
+## Config
+
+Defaults in `sam_3d_body/configs/config.py` (`get_config_defaults`). `-C` is merged unconditionally
+right after them (`scripts/train.py:32`), so an override YAML is the way to change a run.
+`TRAIN.MAX_STEPS` is wired to `pl.Trainer(max_steps=...)` (`scripts/train.py:181`), default `-1` — use
+it to bound smoke tests rather than a shell timeout.
+
+`--dev` is not merely a shorter run: it forces `exp_dir` to `exp/exp_test`, batch 2, 4 workers, and the
+`static-hdri-bbox44-smplx` dataset.
+
+## Data
+
+`paths.py` sets `BEDLAM2_PATH = /scratch/cq244/BEDLAM2/`, which **does not exist** — BEDLAM2 moved,
+labels to `/scratch/cq244/datasets/BEDLAM2_labels/` and images to `/scratch/cq244/BEDLAM/b2/`. The
+constant serves both, so no single symlink fixes it; the BEDLAM2 refactor is half-done.
+
+This does not block training: commit `c1fc0f4` renamed the BEDLAM1 ids to `-bbox44-smplx`, so the
+default `DATASETS_AND_RATIOS` is BEDLAM1, resolving to `data/training_images/<seq>/png` and
+`data/training_labels/all_npz_12_training_mhr_conditioned/<seq>.npz` — all present. Only the
+moyo/citysample entries are affected.
+
+## Outputs
+
+`exp/<run>/` — `saved_models/`, `lightning_logs/`, `vis/`, `merge_vis_bedlam/`, `merge_vis_4d-dress/`,
+`viz_top_dims/`, plus the dumped `config.yaml`.
+
+## Operational notes
+
+Short-horizon metrics are **not reproducible run-to-run**. Two runs with identical seed and config,
+shuffling off, workers 0, augmentation disabled gave `train_loss` -11.43 vs -7.91 at 12 steps.
+Ablations need enforced determinism or enough repeats to clear that noise floor.
+
+`nflows` is the ProHMR fork (`nkolot/nflows@26388ed`), pinned in `pixi.toml`. It alters `ActNorm`,
+`LULinear` and the arity of `sample_and_log_prob`; moving to upstream would change numerics, not just
+imports.
