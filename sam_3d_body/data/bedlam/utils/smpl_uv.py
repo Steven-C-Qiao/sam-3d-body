@@ -4,7 +4,7 @@ import numpy as np
 import skimage.io as io
 from PIL import Image
 from smplx import SMPL
-from matplotlib import cm as mpl_cm, colors as mpl_colors
+from matplotlib import colormaps as mpl_colormaps, colors as mpl_colors
 from trimesh.visual.color import face_to_vertex_color, vertex_to_face_color
 
 from ..core.config import SMPL_MODEL_DIR
@@ -64,7 +64,7 @@ def show_uv_texture():
 
 
 def show_colored_mesh():
-    cm = mpl_cm.get_cmap('jet')
+    cm = mpl_colormaps['jet']
     norm_gt = mpl_colors.Normalize()
 
     smpl = SMPL(SMPL_MODEL_DIR)

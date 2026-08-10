@@ -6,7 +6,7 @@ import skimage.io as io
 import scipy.cluster.vq as scv
 import skimage.transform as tr
 import matplotlib.pyplot as plt
-from matplotlib import cm as mpl_cm, colors as mpl_colors
+from matplotlib import colormaps as mpl_colormaps, colors as mpl_colors
 
 from . import kp_utils
 from smplx import SMPL
@@ -185,7 +185,7 @@ def color_vertices(per_joint_label, alpha=1.0):
     n_vertices = smpl_segmentation['smpl_index'].shape[0]
 
     vertex_colors = np.ones((n_vertices, 4)) * np.array([0.3, 0.3, 0.3, alpha])
-    cm = mpl_cm.get_cmap('jet')
+    cm = mpl_colormaps['jet']
     norm_gt = mpl_colors.Normalize()
 
     per_vertex_label = np.zeros((n_vertices))
@@ -240,7 +240,7 @@ def visualize_heatmaps(image, heatmaps, alpha=0.4):
     heatmaps = heatmaps.max(0)[..., None]
 
     hm = tr.resize(heatmaps, (height, width), anti_aliasing=False)
-    cm = mpl_cm.get_cmap('jet')
+    cm = mpl_colormaps['jet']
     norm_gt = mpl_colors.Normalize()
     hm = cm(norm_gt(hm))[:,:,0,:3]
 
@@ -307,7 +307,7 @@ def overlay_heatmaps(image, hm, alpha=0.4):
     # heatmaps = heatmaps.max(0)[..., None]
     #
     # hm = tr.resize(heatmaps, (height, width), anti_aliasing=False)
-    # cm = mpl_cm.get_cmap('jet')
+    # cm = mpl_colormaps['jet']
     # norm_gt = mpl_colors.Normalize()
     # hm = cm(norm_gt(hm))[:,:,0,:3]
 
@@ -319,7 +319,7 @@ def overlay_heatmaps(image, hm, alpha=0.4):
     return hm_img
 
 
-def colormap_to_arr(arr, cmap=mpl_cm.get_cmap('jet')):
+def colormap_to_arr(arr, cmap=mpl_colormaps['jet']):
     # http://stackoverflow.com/questions/3720840/how-to-reverse-color-map-image-to-scalar-values/3722674#3722674
     gradient = cmap(np.linspace(0.0, 1.0, 1000))
 
