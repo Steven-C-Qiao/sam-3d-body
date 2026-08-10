@@ -996,6 +996,9 @@ def get_mhr_outputs(
         if uncertainty_out is not None:
             shape_s = uncertainty_out["shape_samples"]                            # (B*V, S, 45)
             scale_s = uncertainty_out["scale_samples"]                            # (B*V, S, 68)
+            ret["sample_beta"] = torch.cat(
+                [shape_s, scale_s[..., scale_indices]], dim=-1
+            )                                                                     # (B*V, S, 55)
             ret["sample_param_avg_beta"] = torch.cat(
                 [shape_s.mean(dim=1), scale_s.mean(dim=1)[..., scale_indices]], dim=-1
             )                                                                     # (B*V, 55)

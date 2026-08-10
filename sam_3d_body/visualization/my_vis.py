@@ -4309,9 +4309,10 @@ def vis_merging_samples(
 
 
 def vis_merging_scatter(input_dict, save_dir=None):
-    """Per-view scatter plots of (β log-prob rank, PVE-T-SC body, IS weight)
-    against the overall log-prob rank, to inspect rank correlations within the
-    NF sample pool. Layout: ``num_views × 3`` subplots (one row per view)."""
+    """Per-view scatter plots of (β log-prob rank, PVE-T-SC body, β L2 error,
+    IS weight) against the overall log-prob rank, to inspect rank correlations
+    within the NF sample pool. Layout: ``num_views × 4`` subplots (one row per
+    view)."""
     num_views = input_dict["num_views"]
     batch_idx = input_dict["batch_idx"]
 
@@ -4362,8 +4363,27 @@ def vis_merging_scatter(input_dict, save_dir=None):
     if isinstance(metrics, dict) and metrics.get("merged_pvetsc_body"):
         merged_pvetsc_body_mm = float(metrics["merged_pvetsc_body"][-1].mean().item()) * 1000.0
 
+    # ---- β-L2 per sample (modelled dims only) ----
+    sample_beta_t = input_dict.get("sample_beta")
+    gt_beta_t = input_dict.get("gt_beta")
+    sample_beta_l2 = None  # (V_f, S)
+    if sample_beta_t is not None and gt_beta_t is not None:
+        sample_beta_l2 = torch.sqrt(
+            ((sample_beta_t - gt_beta_t.unsqueeze(1)) ** 2).sum(dim=-1)
+        ).cpu().numpy()
+
+    best_sp_avg_l2_beta = None
+    sp_avg_l2_beta = None  # per-view (V_f,)
+    merged_l2_beta = None
+    if isinstance(metrics, dict) and metrics.get("best_sample_param_avg_l2_beta"):
+        best_sp_avg_l2_beta = float(metrics["best_sample_param_avg_l2_beta"][-1])
+    if isinstance(metrics, dict) and metrics.get("sample_param_avg_l2_beta"):
+        sp_avg_l2_beta = metrics["sample_param_avg_l2_beta"][-1].cpu().detach().numpy()
+    if isinstance(metrics, dict) and metrics.get("merged_l2_beta"):
+        merged_l2_beta = float(metrics["merged_l2_beta"][-1].mean().item())
+
     fig, axes = plt.subplots(
-        num_views, 3, figsize=(15, 4 * num_views), squeeze=False, sharey="col"
+        num_views, 4, figsize=(20, 4 * num_views), squeeze=False, sharey="col"
     )
 
     for view in range(num_views):
@@ -4440,6 +4460,40 @@ def vis_merging_scatter(input_dict, save_dir=None):
         ax.grid(alpha=0.3)
 
         ax = axes[view, 2]
+        if sample_beta_l2 is not None:
+            ax.scatter(overall_rank, sample_beta_l2[view], alpha=0.5, s=10)
+            if top_idx is not None:
+                ax.scatter(
+                    overall_rank[top_idx], sample_beta_l2[view, top_idx],
+                    marker="x", color="purple", s=50, linewidths=1.5,
+                    label="top-3 IS weight", zorder=5,
+                )
+            if best_sp_avg_l2_beta is not None:
+                ax.axhline(
+                    best_sp_avg_l2_beta,
+                    color="red", linestyle="--", linewidth=1.0,
+                    label=f"best_sample_param_avg ({best_sp_avg_l2_beta:.3f})",
+                )
+            if sp_avg_l2_beta is not None:
+                view_val = float(sp_avg_l2_beta[view])
+                ax.axhline(
+                    view_val,
+                    color="green", linestyle="--", linewidth=1.0,
+                    label=f"sample_param_avg ({view_val:.3f})",
+                )
+            if merged_l2_beta is not None:
+                ax.axhline(
+                    merged_l2_beta,
+                    color="blue", linestyle="--", linewidth=1.0,
+                    label=f"merged ({merged_l2_beta:.3f})",
+                )
+            ax.legend(fontsize=8, loc="upper left")
+        ax.set_xlabel("overall log-prob rank")
+        ax.set_ylabel("β L2 error")
+        ax.set_title(f"view {view}: β L2 error")
+        ax.grid(alpha=0.3)
+
+        ax = axes[view, 3]
         if is_weight is not None:
             ax.scatter(overall_rank, is_weight[0, view], alpha=0.5, s=10)
             if top_idx is not None:
