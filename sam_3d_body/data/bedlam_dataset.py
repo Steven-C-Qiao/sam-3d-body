@@ -512,6 +512,7 @@ class MultiViewEvaluationDataset(Dataset):
         """Load a single view (similar to DatasetHMR.__getitem__ but returns dict)."""
         item = {}
         scale = self.scale[index].copy()
+        orig_scale = float(scale)
         center = self.center[index].copy()
         keypoints = self.keypoints[index].copy()
         # mhr_keypoints_2d = self.mhr_keypoints_2d[index].copy()
@@ -665,6 +666,9 @@ class MultiViewEvaluationDataset(Dataset):
         # item["keypoints_orig"] = torch.from_numpy(mhr_keypoints_2d_orig).float()
         # item["keypoints"] = normalized_keypoints.float()
         item["scale"] = float(sc * scale)
+        item["orig_scale_tensor"] = torch.tensor(orig_scale, dtype=torch.float32)
+        item["scale_post_tensor"] = torch.tensor(float(sc * scale), dtype=torch.float32)
+        item["did_extreme_crop"] = torch.tensor(1 if did_extreme_crop else 0, dtype=torch.long)
         item["center"] = center.astype(np.float32)
         item["orig_shape"] = orig_shape
         item["sample_index"] = index
