@@ -964,6 +964,62 @@ def get_mhr_outputs(
 ):
     ret = {}
 
+    # ============================================================
+    # TEMP DIAGNOSTIC: replace flow-unmodelled dims of merged_shape /
+    # merged_scale / sample_param_avg with GT, to isolate the contribution
+    # of the modelled dims. Revert by deleting this block.
+    # ============================================================
+    _TEMP_GT_OVERRIDE = True
+    if _TEMP_GT_OVERRIDE and nf_head is not None:
+        print(f"[TEMP_GT_OVERRIDE] active, "
+              f"shape_indices={list(nf_head.shape_indices)}, "
+              f"scale_indices={list(nf_head.scale_indices)}")
+        gt_shape_bv = batch["shape_params"]                       # (B*V, 45)
+        gt_scale_bv = batch["model_params"][:, -68:]              # (B*V, 68)
+        # Per-subject GT (same across views); take view 0.
+        gt_shape_per_subj = gt_shape_bv.unflatten(0, (bs, num_views))[:, 0]   # (B, 45)
+        gt_scale_per_subj = gt_scale_bv.unflatten(0, (bs, num_views))[:, 0]   # (B, 68)
+
+        modelled_shape_mask = torch.zeros(45, dtype=torch.bool, device=gt_shape_bv.device)
+        if nf_head.model_shape:
+            modelled_shape_mask[list(nf_head.shape_indices)] = True
+        modelled_scale_mask = torch.zeros(68, dtype=torch.bool, device=gt_scale_bv.device)
+        if nf_head.model_scale:
+            modelled_scale_mask[list(nf_head.scale_indices)] = True
+        unmod_shape = ~modelled_shape_mask                          # (45,)
+        unmod_scale = ~modelled_scale_mask                          # (68,)
+
+        # 1) Override merged_shape / merged_scale (B, …) on unmodelled dims.
+        if "merged_shape" in param_dict and unmod_shape.any():
+            ms_before = param_dict["merged_shape"]
+            ms = ms_before.clone()
+            ms[:, unmod_shape] = gt_shape_per_subj[:, unmod_shape]
+            diff = (ms - ms_before)[:, unmod_shape].abs().mean().item()
+            print(f"  shape override: {int(unmod_shape.sum())} dims, "
+                  f"mean |Δ| on overridden dims = {diff:.4f}")
+            param_dict["merged_shape"] = ms
+        if "merged_scale" in param_dict and unmod_scale.any():
+            mc_before = param_dict["merged_scale"]
+            mc = mc_before.clone()
+            mc[:, unmod_scale] = gt_scale_per_subj[:, unmod_scale]
+            diff = (mc - mc_before)[:, unmod_scale].abs().mean().item()
+            print(f"  scale override: {int(unmod_scale.sum())} dims, "
+                  f"mean |Δ| on overridden dims = {diff:.4f}")
+            param_dict["merged_scale"] = mc
+
+        # 2) Override per-view samples on unmodelled dims so sample_param_avg
+        #    inherits GT on those dims after .mean(dim=1).
+        if uncertainty_out is not None:
+            if unmod_shape.any():
+                ss = uncertainty_out["shape_samples"].clone()       # (B*V, S, 45)
+                ss[..., unmod_shape] = gt_shape_bv.unsqueeze(1)[..., unmod_shape]
+                uncertainty_out["shape_samples"] = ss
+            if unmod_scale.any():
+                sc = uncertainty_out["scale_samples"].clone()       # (B*V, S, 68)
+                sc[..., unmod_scale] = gt_scale_bv.unsqueeze(1)[..., unmod_scale]
+                uncertainty_out["scale_samples"] = sc
+    # ============================================================
+
     # ------------- β-space tensors for L2-in-parameter-space metrics -------------
     # Authoritative reference for what merging is actually optimising for: the
     # posterior mean β. Vertex-space metrics like PVE-T-SC quotient out global
