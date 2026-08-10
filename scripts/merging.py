@@ -26,7 +26,20 @@ CKPT_PATH = "checkpoints/sam-3d-body-dinov3/model.ckpt"
 CONFIG_PATH = "checkpoints/sam-3d-body-dinov3/model_config.yaml"
 
 
-def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dataset_name=None, merge_method="tempered", noplot=False, langevin_kwargs=None, num_samples=100, config_path=None):
+def run_train(
+        exp_dir, 
+        resume_path=None, 
+        load_path=None, 
+        seed=42, 
+        dev=False, 
+        dataset_name=None, 
+        merge_method="tempered", 
+        noplot=False, 
+        langevin_kwargs=None, 
+        num_samples=100, 
+        config_path=None,
+        max_batches=20
+    ):
     pl.seed_everything(seed)
 
     cfg = get_config_defaults()
@@ -96,7 +109,7 @@ def run_train(exp_dir, resume_path=None, load_path=None, seed=42, dev=False, dat
     results = trainer.run_multiview_prediction(
         num_view=4,
         num_samples=num_samples,
-        max_batches=3,
+        max_batches=max_batches,
         dataset_name=dataset_name,
         merge_method=merge_method,
         noplot=noplot,
@@ -181,6 +194,11 @@ if __name__ == "__main__":
         default=100,
         help="Number of NF samples to draw per view during merging.",
     )
+    parser.add_argument(
+        '--max_batches',
+        type=int,
+        default=20,
+    )
     args = parser.parse_args()
 
     langevin_kwargs = {
@@ -220,4 +238,5 @@ if __name__ == "__main__":
         langevin_kwargs=langevin_kwargs,
         num_samples=args.num_samples,
         config_path=args.config,
+        max_batches=args.max_batches,
     )
